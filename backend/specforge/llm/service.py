@@ -4,10 +4,12 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from .. import eventlog
 from ..core.hashing import sha256_text
 from .base import LLMError, LLMProvider
 from .ollama import OllamaProvider
@@ -91,16 +93,39 @@ class LLMService:
             key = sha256_text(json.dumps([prov.name, cfg["model"], prompt_version, msgs, schema, cfg.get("temperature", 0)], sort_keys=True))
             hit = self.conn.execute("SELECT response FROM llm_cache WHERE key=?", (key,)).fetchone()
             cached = hit is not None
-            text = hit[0] if hit else prov.generate(msgs, model=cfg["model"], schema=schema, temperature=cfg.get("temperature", 0.0))
+            prompt_chars = sum(len(m.get("content", "")) for m in msgs)
+            base = {"task": task, "provider": prov.name, "model": cfg["model"], "attempt": attempt + 1, "prompt_chars": prompt_chars}
+            if eventlog.capture_prompts():
+                base["prompt"] = [{"role": m.get("role"), "content": eventlog.clip(m.get("content", ""))} for m in msgs]
+            t0 = time.monotonic()
+            if cached:
+                eventlog.emit("debug", "llm", f"{task}: cache hit ({prov.name}/{cfg['model']})", **base)
+                text = hit[0]
+            else:
+                eventlog.emit("info", "llm", f"{task}: request to {prov.name}/{cfg['model']} (attempt {attempt + 1}, {prompt_chars} chars)", **base)
+                try:
+                    text = prov.generate(msgs, model=cfg["model"], schema=schema, temperature=cfg.get("temperature", 0.0))
+                except Exception as e:  # noqa: BLE001  provider errors are reported, then raised unchanged
+                    eventlog.emit("error", "llm", f"{task}: provider error: {e}", seconds=round(time.monotonic() - t0, 2), **{k: v for k, v in base.items() if k != "prompt"})
+                    raise
+            secs = round(time.monotonic() - t0, 2)
+            reply = {"seconds": secs, "response_chars": len(text), "cached": cached}
+            if eventlog.capture_prompts():
+                reply["response"] = eventlog.clip(text)
             try:
                 obj = model_cls.model_validate(extract_json(text))
             except (LLMError, ValidationError, ValueError) as e:
                 last_err = str(e)[:1200]
+                eventlog.emit("warn", "llm", f"{task}: reply did not validate (attempt {attempt + 1}/{retries + 1}): {last_err[:200]}",
+                              task=task, model=cfg["model"], error=last_err, **reply)
                 msgs = msgs + [{"role": "assistant", "content": text[:4000]},
                                {"role": "user", "content": "Your answer did not validate. Fix these problems and reply with the corrected JSON only:\n" + last_err}]
                 continue
             if not cached:
                 self.conn.execute("INSERT OR REPLACE INTO llm_cache(key,provider,model,response) VALUES(?,?,?,?)", (key, prov.name, cfg["model"], text))
                 self.conn.commit()
+            eventlog.emit("info" if not cached else "debug", "llm", f"{task}: reply accepted in {secs}s ({len(text)} chars{', cached' if cached else ''})",
+                          task=task, model=cfg["model"], **reply)
             return obj, {"provider": prov.name, "model": cfg["model"], "attempts": attempt + 1, "cached": cached}
+        eventlog.emit("error", "llm", f"{task}: gave up after {retries + 1} attempts: {last_err[:200]}", task=task, model=cfg["model"], error=last_err)
         raise LLMError(f"Output failed validation after {retries + 1} attempts: {last_err}")

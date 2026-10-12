@@ -13,7 +13,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import __version__, catalog, cmddb, coverage, jobs, refs, reports, scenarios
+from .. import __version__, catalog, cmddb, coverage, eventlog, jobs, refs, reports, scenarios
 from ..ai import generate_ai_scenarios
 from ..core import config
 from ..core.db import get_conn, jloads, row, rows
@@ -50,9 +50,16 @@ def create_app() -> FastAPI:
     def settings() -> dict:
         return config.load_settings(conn())
 
+    def audit(message: str, level: str = "info", **data) -> None:
+        eventlog.emit(level, "api", message, **data)
+
     @app.on_event("startup")
     def _startup():
-        jobs.recover_interrupted(conn())
+        n = jobs.recover_interrupted(conn())
+        eventlog.configure(settings())
+        eventlog.emit("info", "system", f"SpecForge {__version__} started", workspace=str(config.workspace_dir()), parser_version=config.PARSER_VERSION)
+        if n:
+            eventlog.emit("warn", "system", f"{n} job(s) were interrupted by the previous shutdown and marked failed")
 
     # ------------------------------------------------------------------ misc / settings
     @app.get("/api/health")
@@ -66,14 +73,20 @@ def create_app() -> FastAPI:
 
     @app.put("/api/settings")
     def put_settings(body: dict = Body(...)):
-        return config.save_settings(conn(), body)
+        saved = config.save_settings(conn(), body)
+        eventlog.configure(saved)
+        audit("Settings saved", sections=sorted(body) if isinstance(body, dict) else [])
+        return saved
 
     @app.get("/api/providers/{name}/models")
     def provider_models(name: str):
         try:
             prov = make_provider(name, settings())
-            return {"ok": True, "models": [m.__dict__ for m in prov.list_models()], "health": prov.health()}
+            models = [m.__dict__ for m in prov.list_models()]
+            audit(f"Connection test: {name} reachable, {len(models)} model(s)", provider=name)
+            return {"ok": True, "models": models, "health": prov.health()}
         except LLMError as e:
+            audit(f"Connection test: {name} failed: {e}", "warn", provider=name)
             return {"ok": False, "error": str(e), "models": []}
 
     # ------------------------------------------------------------------ specs
@@ -91,6 +104,7 @@ def create_app() -> FastAPI:
             finally:
                 os.unlink(tmp.name)
             out.append(d)
+            audit(f"Uploaded {d.get('filename') or f.filename} as {d['family']} {d['version']}", document_id=d["id"], format=d["format"], pages=d.get("pages"))
         return out
 
     @app.get("/api/specs")
@@ -111,12 +125,14 @@ def create_app() -> FastAPI:
             raise HTTPException(400, "family or version required")
         conn().execute("UPDATE spec_document SET family=COALESCE(?,family), version=COALESCE(?,version) WHERE id=?", (fam, ver, doc_id))
         conn().commit()
+        audit(f"Spec #{doc_id} relabelled", document_id=doc_id, family=fam, version=ver)
         return row(conn(), "SELECT * FROM spec_document WHERE id=?", (doc_id,))
 
     @app.delete("/api/specs/{doc_id}")
     def delete_doc(doc_id: int):
         conn().execute("DELETE FROM spec_document WHERE id=?", (doc_id,))
         conn().commit()
+        audit(f"Deleted spec #{doc_id} and its parse runs", "warn", document_id=doc_id)
         return {"ok": True}
 
     @app.post("/api/specs/{doc_id}/parse")
@@ -128,6 +144,7 @@ def create_app() -> FastAPI:
         def work(c, prog):
             rid = store.run_parse(c, doc_id, st, progress=lambda s, a, b: prog(f"{s} {a}/{b}", a, b), activate=True if activate else None)
             return {"run_id": rid}
+        audit(f"Parse requested for spec #{doc_id}", document_id=doc_id, activate=activate)
         return {"job": jobs.submit(conn(), "parse", work, {"document_id": doc_id}, DB)}
 
     @app.post("/api/runs/{run_id}/activate")
@@ -138,6 +155,7 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "parse run not found")
         except ValueError as e:
             raise HTTPException(409, str(e))
+        audit(f"Parse run #{run_id} set active", run_id=run_id)
         return {"ok": True}
 
     @app.get("/api/runs/{run_id}")
@@ -179,6 +197,7 @@ def create_app() -> FastAPI:
     def patch_issue(issue_id: int, body: dict = Body(...)):
         conn().execute("UPDATE parse_issue SET state=?, note=? WHERE id=?", (body.get("state", "open"), body.get("note"), issue_id))
         conn().commit()
+        audit(f"Parse issue #{issue_id} marked {body.get('state', 'open')}", issue_id=issue_id, note=body.get("note"))
         return {"ok": True}
 
     @app.put("/api/runs/{run_id}/tables/correction")
@@ -188,6 +207,7 @@ def create_app() -> FastAPI:
         if not r:
             raise HTTPException(404)
         store.set_correction(conn(), r["family"], r["version"], body["key"], "table_replace", {"header": body["header"], "rows": body["rows"]})
+        audit(f"Table correction stored for {body['key']}", run_id=run_id, key=body["key"], rows=len(body["rows"]))
         return {"ok": True, "note": "Stored. Reparse to apply; corrections survive every reparse."}
 
     @app.get("/api/runs/{a}/diff/{b}")
@@ -226,6 +246,7 @@ def create_app() -> FastAPI:
         except Exception:
             c.rollback()
             raise HTTPException(409, "could not create the set (duplicate name or unknown document id)")
+        audit(f"Spec set '{name}' created", set_id=cur.lastrowid, document_ids=ids)
         return {"id": cur.lastrowid}
 
     @app.put("/api/sets/{set_id}/members")
@@ -242,6 +263,7 @@ def create_app() -> FastAPI:
         except Exception:
             c.rollback()
             raise HTTPException(409, "could not update the set members (unknown document id?)")
+        audit(f"Members of set #{set_id} updated", set_id=set_id, document_ids=ids)
         return {"ok": True}
 
     @app.delete("/api/sets/{set_id}")
@@ -255,6 +277,7 @@ def create_app() -> FastAPI:
         conn().execute("DELETE FROM item_override WHERE set_id=?", (set_id,))
         conn().execute("DELETE FROM spec_set WHERE id=?", (set_id,))
         conn().commit()
+        audit(f"Spec set #{set_id} deleted with its catalog, scenarios and coverage runs", "warn", set_id=set_id)
         return {"ok": True}
 
     @app.get("/api/sets/{set_id}/references")
@@ -270,6 +293,7 @@ def create_app() -> FastAPI:
     def choose_ref(set_id: int, body: dict = Body(...)):
         need(body, 'src_key', 'raw', 'chosen_key')
         refs.choose_reference(conn(), set_id, body["src_key"], body["raw"], body["chosen_key"])
+        audit(f"Reference '{body['raw']}' resolved to {body['chosen_key']}", set_id=set_id, src_key=body["src_key"])
         return {"ok": True}
 
     # ------------------------------------------------------------------ catalog + scenarios
@@ -281,6 +305,7 @@ def create_app() -> FastAPI:
             prog("generating template scenarios", 1, 2)
             res["templates"] = scenarios.generate_templates(c, set_id)
             return {**res, "issues": res["issues"][:500]}
+        audit(f"Catalog build requested for set #{set_id}", set_id=set_id)
         return {"job": jobs.submit(conn(), "catalog", work, {"set_id": set_id}, DB)}
 
     @app.get("/api/sets/{set_id}/catalog")
@@ -314,6 +339,7 @@ def create_app() -> FastAPI:
         if not isinstance(body["key"], str):
             raise HTTPException(422, "key must be a string")
         catalog.set_override(conn(), set_id, body["key"], obs, reason)
+        audit(f"Catalog override {'cleared' if obs is None and reason is None else 'set'} for {body['key']}", set_id=set_id, observability=obs, na_reason=reason)
         return {"ok": True}
 
     @app.get("/api/sets/{set_id}/scenarios")
@@ -387,6 +413,8 @@ def create_app() -> FastAPI:
         except Exception:
             c.rollback()
             raise
+        if new_state != s["state"] or "predicate" in body:
+            audit(f"Scenario {s['sid']}: {s['state']} \u2192 {new_state}" + (" (predicate edited)" if "predicate" in body else ""), scenario_id=sid, origin=s["origin"])
         return {"ok": True, "state": new_state}
 
     @app.post("/api/scenarios/bulk")
@@ -419,6 +447,8 @@ def create_app() -> FastAPI:
         except Exception:
             c.rollback()
             raise
+        audit(f"Bulk review: {len(updated)} scenario(s) set to {new_state}" + (f", {len(refused)} refused" if refused else ""),
+              "warn" if refused else "info", state=new_state, updated=len(updated), refused=refused[:5])
         return {"ok": not refused, "updated": updated, "refused": refused}
 
     @app.post("/api/scenarios/validate")
@@ -437,6 +467,7 @@ def create_app() -> FastAPI:
         def work(c, prog):
             svc = LLMService(c, st)
             return generate_ai_scenarios(c, set_id, svc, body.get("item_keys"), body.get("limit"), progress=lambda a, b: prog("AI scenarios", a, b))
+        audit(f"AI scenario generation requested for set #{set_id}", set_id=set_id, limit=lim, item_keys=len(body.get("item_keys") or []) or None)
         return {"job": jobs.submit(conn(), "ai-scenarios", work, {"set_id": set_id}, DB)}
 
     # ------------------------------------------------------------------ command DBs
@@ -454,6 +485,7 @@ def create_app() -> FastAPI:
             sid = cmddb.register_source(conn(), body["path"], body.get("mapping"), body.get("name"))
         except Exception as e:  # noqa: BLE001
             raise HTTPException(400, str(e))
+        audit(f"Command database registered: {body['path']}", source_id=sid)
         return {"id": sid}
 
     @app.get("/api/cmddb")
@@ -467,6 +499,7 @@ def create_app() -> FastAPI:
     def put_mapping(sid: int, body: dict = Body(...)):
         conn().execute("UPDATE cmd_source SET mapping_json=?, status='new' WHERE id=?", (json.dumps(body), sid))
         conn().commit()
+        audit(f"Column mapping updated for command database #{sid}", source_id=sid)
         return {"ok": True}
 
     @app.post("/api/cmddb/{sid}/import")
@@ -475,6 +508,7 @@ def create_app() -> FastAPI:
 
         def work(c, prog):
             return cmddb.import_source(c, sid, st.get("mi_layout"), progress=lambda n: prog(f"decoded {n} rows", n, 0))
+        audit(f"Import requested for command database #{sid}", source_id=sid)
         return {"job": jobs.submit(conn(), "import-cmddb", work, {"source_id": sid}, DB)}
 
     @app.get("/api/cmddb/{sid}/commands")
@@ -502,6 +536,7 @@ def create_app() -> FastAPI:
         def work(c, prog):
             rid = coverage.run_coverage(c, body["set_id"], body["source_id"], progress=lambda a, b: prog("matching scenarios", a, b))
             return {"run_id": rid}
+        audit(f"Coverage run requested (set #{body['set_id']}, command DB #{body['source_id']})", set_id=body["set_id"], source_id=body["source_id"])
         return {"job": jobs.submit(conn(), "coverage", work, body, DB)}
 
     @app.get("/api/coverage/runs")
@@ -610,6 +645,51 @@ def create_app() -> FastAPI:
                     return
                 await asyncio.sleep(0.4)
         return StreamingResponse(gen(), media_type="text/event-stream")
+
+    # ------------------------------------------------------------------ activity log
+    def _split(v: str | None) -> list[str] | None:
+        return [x for x in v.split(",") if x] if v else None
+
+    @app.get("/api/logs")
+    def get_logs(after_id: int | None = None, before_id: int | None = None, limit: int = 300, level: str | None = None,
+                 source: str | None = None, job_id: int | None = None, q: str | None = None):
+        eventlog.drain(1.0)       # include events queued a moment ago
+        items = eventlog.query(conn(), after_id=after_id, before_id=before_id, limit=limit, level=level, sources=_split(source), job_id=job_id, q=q)
+        newest = conn().execute("SELECT COALESCE(MAX(id),0) FROM event_log").fetchone()[0]
+        oldest_here = items[0]["id"] if items else None
+        has_older = bool(oldest_here and conn().execute("SELECT 1 FROM event_log WHERE id<? LIMIT 1", (oldest_here,)).fetchone()) if after_id is None else False
+        return {"items": items, "newest_id": newest, "has_older": has_older, "sources": list(eventlog.SOURCES)}
+
+    @app.get("/api/logs/stream")
+    async def stream_logs(after_id: int | None = None, level: str | None = None, source: str | None = None, job_id: int | None = None):
+        srcs = _split(source)
+
+        async def gen():
+            last = after_id if after_id is not None else (await asyncio.to_thread(lambda: get_conn().execute("SELECT COALESCE(MAX(id),0) FROM event_log").fetchone()[0]))
+            idle = 0
+            while True:
+                # read the newest id BEFORE querying: an event inserted in between is picked up next time instead of skipped
+                newest = await asyncio.to_thread(lambda: get_conn().execute("SELECT COALESCE(MAX(id),0) FROM event_log").fetchone()[0])
+                items = await asyncio.to_thread(lambda: eventlog.query(get_conn(), after_id=last, limit=500, level=level, sources=srcs, job_id=job_id))
+                if items:
+                    last = items[-1]["id"]
+                    idle = 0
+                    yield f"data: {json.dumps(items, default=str)}\n\n"
+                else:
+                    last = max(last, newest)         # rows hidden by the filters: step past them so the next poll stays cheap
+                    idle += 1
+                    if idle % 40 == 0:
+                        yield ": keep-alive\n\n"
+                await asyncio.sleep(0.4)
+        return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @app.delete("/api/logs")
+    def clear_logs():
+        eventlog.drain(1.0)
+        n = conn().execute("DELETE FROM event_log").rowcount
+        conn().commit()
+        eventlog.emit("info", "system", f"Activity log cleared ({n} events)")
+        return {"ok": True, "deleted": n}
 
     # ------------------------------------------------------------------ static UI
     for cand in (Path(__file__).resolve().parents[1] / "web", Path(__file__).resolve().parents[3] / "frontend" / "dist"):

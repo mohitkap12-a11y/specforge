@@ -16,6 +16,7 @@ import re
 import sqlite3
 from typing import Any
 
+from . import eventlog
 from .core.config import CATALOG_VERSION
 from .core.db import rows
 from .ingest.normalize import (
@@ -75,6 +76,7 @@ def _opcode_queue(ir: dict, t: dict) -> tuple[str, str, str]:
 
 def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
     irs = load_set_irs(conn, set_id)
+    eventlog.emit("info", "catalog", "Building catalog from " + ", ".join(f"{i['family']} {i['version']}" for i in irs), set_id=set_id)
     items: dict[str, dict] = {}
     issues: list[dict] = []
 
@@ -343,6 +345,13 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
     kinds: dict[str, int] = {}
     for it in items.values():
         kinds[it["kind"]] = kinds.get(it["kind"], 0) + 1
+    by_sev: dict[str, int] = {}
+    for it_ in issues:
+        by_sev[it_["severity"]] = by_sev.get(it_["severity"], 0) + 1
+    eventlog.emit("warn" if by_sev.get("error") else "info", "catalog", f"Catalog built: {len(items)} items "
+                  f"({', '.join(f'{n} {k}' for k, n in sorted(kinds.items()))}), {len(commands)} commands, {len(issues)} issue(s)", set_id=set_id, kinds=kinds, issues=by_sev)
+    for it_ in issues[:15]:
+        eventlog.emit("warn", "catalog", it_["message"], set_id=set_id, key=it_.get("key"), kind=it_["kind"])
     return {"version": CATALOG_VERSION, "items": len(items), "kinds": kinds, "issues": issues,
             "commands": sorted(commands), "documents": [f"{i['prefix']}" for i in irs]}
 

@@ -20,6 +20,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "parser": {"workers": 0, "table_strategy": "auto"},  # workers=0 -> cpu_count-1
     "llm": {"max_concurrency": 2, "max_retries": 2},
+    "logging": {"min_level": "info", "capture_prompts": True, "preview_chars": 4000},  # capture_prompts: keep LLM prompts/replies in the activity log
     "mi_layout": {},  # overrides for the NVMe-MI header layout, see cmddb.MI_DEFAULT_LAYOUT
 }
 

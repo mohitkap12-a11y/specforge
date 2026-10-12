@@ -11,6 +11,7 @@ import sqlite3
 from collections import defaultdict
 from typing import Any
 
+from . import eventlog
 from .core.db import jloads, row, rows
 
 EVIDENCE_LIMIT = 50
@@ -193,6 +194,11 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
         raise ValueError("command source must be imported before running coverage")
     sigs_by = _load_sigs(conn, source_id)
     scen = rows(conn, "SELECT * FROM scenario WHERE set_id=?", (set_id,))
+    by_review = {}
+    for s_ in scen:
+        by_review[s_["state"]] = by_review.get(s_["state"], 0) + 1
+    eventlog.emit("info", "coverage", f"Matching {len(scen)} scenarios against '{src['name'] or src['path']}' ({src['decoded_count']} commands, {len(sigs_by)} distinct)",
+                  set_id=set_id, source_id=source_id, scenarios_by_review_state=by_review)
     cur = conn.execute("INSERT INTO coverage_run(set_id,source_id,meta_json) VALUES(?,?,?)",
                        (set_id, source_id, json.dumps(_run_meta(conn, set_id, src, scen))))
     run_id = cur.lastrowid
@@ -209,6 +215,7 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
         except Exception as e:  # noqa: BLE001
             count, ev = 0, [{"error": str(e)}]
             st = "error"
+            eventlog.emit("warn", "coverage", f"Scenario {s['sid']} could not be evaluated: {e}", scenario_id=s["id"], title=s["title"])
         else:
             st = "matched" if count > 0 else "not_matched"
         results[s["id"]] = {"state": st, "count": count}
@@ -246,6 +253,11 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
     summary = summarize_run(conn, run_id, set_id, source_id, items, item_res, sigs_by)
     conn.execute("UPDATE coverage_run SET summary_json=? WHERE id=?", (json.dumps(summary), run_id))
     conn.commit()
+    o = summary["overall"]
+    eventlog.emit("info", "coverage", f"Coverage run #{run_id} done: {o['pct_covered']}% covered ({o['covered']} covered, {o['partial']} partial, {o['not_covered']} not covered, "
+                  f"{o['no_scenario']} without scenario, {o['needs_review']} awaiting review, {o['na']} N/A)", run_id=run_id, overall=o, unknown_commands=len(summary["unknown_commands"]))
+    if summary["unknown_commands"]:
+        eventlog.emit("warn", "coverage", f"{len(summary['unknown_commands'])} command type(s) in the database are not in the catalog", run_id=run_id, top=summary["unknown_commands"][:5])
     return run_id  # type: ignore[return-value]
 
 

@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from . import eventlog
 from .core.db import jloads, rows
 from .ingest.normalize import norm_text
 from .llm.base import LLMError
@@ -151,11 +152,16 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
         reqs = reqs[:limit]       # 0 means "none", not "everything"
     existing = {r["predicate_json"] for r in rows(conn, "SELECT predicate_json FROM scenario WHERE set_id=?", (set_id,))}
     stats = {"requirements": len(reqs), "created": 0, "not_testable": 0, "rejected": 0, "failed": 0, "duplicates": 0}
+    cfg = svc.task_cfg("generate")
+    eventlog.emit("info", "agent", f"Scenario agent starting: {len(reqs)} requirement(s) to draft, model {cfg['provider']}/{cfg['model'] or '(unset)'}",
+                  requirements=len(reqs), skipped_with_scenarios=len(have), limit=limit, provider=cfg["provider"], model=cfg["model"])
     for n, req in enumerate(reqs):
         if progress:       # first thing in the loop: every iteration (including failed and not-testable ones) checks cancellation
             progress(n, len(reqs))
         req["attrs"] = jloads(req.pop("attrs_json"), {})
         ctx = build_context(conn, set_id, req)
+        eventlog.emit("info", "agent", f"[{n + 1}/{len(reqs)}] Reading requirement: {req['label'][:140]}", key=req["key"], command=ctx["command"],
+                      requirement=eventlog.clip(ctx["requirement"], 1500), context_chars=len(ctx["context_text"]))
         # validate against what the model was shown: the requirement's own command, not the whole set
         scoped_cmds = {k: v for k, v in cmds.items() if k == ctx["command"]}
         scoped_fields = {k: v for k, v in fields.items() if k == ctx["command"]}
@@ -166,12 +172,14 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
             out, meta = svc.generate_model("generate", msgs, AIOutput, PROMPT_VERSION)
         except LLMError as e:
             stats["failed"] += 1
+            eventlog.emit("error", "agent", f"[{n + 1}/{len(reqs)}] Model failed for this requirement: {str(e)[:200]}", key=req["key"], error=str(e))
             _record(conn, set_id, req["key"], "generate", svc, "failed", None, str(e))
             continue
         problems: list[str] = []
         created = 0
         if not out.testable or not out.scenarios:
             stats["not_testable"] += 1
+            eventlog.emit("info", "agent", f"[{n + 1}/{len(reqs)}] Judged not testable from submitted commands: {(out.reason or 'no reason given')[:200]}", key=req["key"], reason=out.reason)
             _record(conn, set_id, req["key"], "generate", svc, "not_testable", out.model_dump(), out.reason, meta)
             continue
         for sc in out.scenarios:
@@ -186,10 +194,12 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
             if errs:
                 stats["rejected"] += 1
                 problems.append(f"{sc.title}: {'; '.join(errs)}")
+                eventlog.emit("warn", "agent", f"[{n + 1}/{len(reqs)}] Rejected draft '{sc.title[:100]}': {'; '.join(errs)[:200]}", key=req["key"], errors=errs, quotes=sc.quotes)
                 continue
             pj = json.dumps(pred)
             if pj in existing:
                 stats["duplicates"] += 1
+                eventlog.emit("info", "agent", f"[{n + 1}/{len(reqs)}] Draft '{sc.title[:100]}' matches an existing scenario", key=req["key"])
                 dup = conn.execute("SELECT id,state FROM scenario WHERE set_id=? AND predicate_json=? ORDER BY id LIMIT 1", (set_id, pj)).fetchone()
                 if dup and dup["state"] == "draft":   # an unreviewed draft: this requirement joins it and is reviewed with it
                     conn.execute("INSERT OR IGNORE INTO scenario_item(scenario_id,item_key) VALUES(?,?)", (dup[0], req["key"]))
@@ -207,9 +217,12 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
                 conn.execute("INSERT OR IGNORE INTO scenario_item(scenario_id,item_key) VALUES(?,?)", (cur.lastrowid, req["key"]))
                 created += 1
                 stats["created"] += 1
+                eventlog.emit("info", "agent", f"[{n + 1}/{len(reqs)}] Drafted scenario '{sc.title[:120]}' (awaiting review)", key=req["key"], sid=sid,
+                              observability=sc.observability, quotes=sc.quotes, predicate=pred)
         _record(conn, set_id, req["key"], "generate", svc, "ok" if created else "needs_review", out.model_dump(),
                 "; ".join(problems) or None, meta)
         conn.commit()
+    eventlog.emit("info" if not stats["failed"] else "warn", "agent", "Scenario agent finished: " + ", ".join(f"{v} {k}" for k, v in stats.items()), **stats)
     return stats
 
 

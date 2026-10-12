@@ -15,6 +15,7 @@ import struct
 from pathlib import Path
 from typing import Any, Iterator
 
+from . import eventlog
 from .core.db import row
 from .core.hashing import sha256_file, stable_hash
 
@@ -305,6 +306,8 @@ def import_source(conn: sqlite3.Connection, source_id: int, mi_layout: dict | No
         raise KeyError(source_id)
     mapping = json.loads(src["mapping_json"])
     layout = merged_layout(mi_layout)
+    eventlog.emit("info", "import", f"Importing '{src['name'] or src['path']}' (table {mapping.get('table')})", source_id=source_id, mapping=mapping,
+                  mi_layout_overrides=mi_layout or {})
     # the file may have changed since it was registered: record the hash of the bytes actually imported
     conn.execute("UPDATE cmd_source SET sha256=? WHERE id=?", (sha256_file(src["path"]), source_id))
     conn.execute("DELETE FROM decoded_command WHERE source_id=?", (source_id,))
@@ -347,6 +350,10 @@ def import_source(conn: sqlite3.Connection, source_id: int, mi_layout: dict | No
     conn.execute("UPDATE cmd_source SET row_count=?, decoded_count=?, unknown_json=?, imported_at=CURRENT_TIMESTAMP, status='imported' WHERE id=?",
                  (total, total - bad, json.dumps(unknown), source_id))
     conn.commit()
+    eventlog.emit("warn" if bad else "info", "import", f"Import done: {total} rows scanned, {total - bad} decoded, {bad} undecodable, {len(sigs)} distinct command signatures",
+                  source_id=source_id, rows=total, decoded=total - bad, undecodable=bad, signatures=len(sigs))
+    for e_ in errors[:5]:
+        eventlog.emit("warn", "import", f"Row {e_['row']} could not be decoded: {e_['error']}", source_id=source_id)
     return {"rows": total, "decoded": total - bad, "undecodable": bad, "signatures": len(sigs), "errors": errors,
             "config_hash": stable_hash([mapping, layout])}
 
