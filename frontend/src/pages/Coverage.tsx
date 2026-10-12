@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { api } from "../api";
 import { Badge, Empty, ErrorNote, Legend, Loading, Pager, Pct, STATE_ORDER, StateBar, stateLabel } from "../components/ui";
 import { SetPicker, useSelectedSet } from "../components/SetPicker";
@@ -134,31 +135,6 @@ function RunView({ runId, prevId }: { runId: number; prevId: number | null }) {
   );
 }
 
-function AddSource() {
-  const { track } = useJobs();
-  const [path, setPath] = useState("");
-  const add = useMutation({
-    mutationFn: async () => {
-      const sug = await api.suggestMapping(path.trim());
-      const { id } = await api.addSource(path.trim(), sug.mapping);
-      const job = await api.importSource(id);
-      return { ...job, warnings: (sug.warnings ?? []) as string[] };
-    },
-    onSuccess: (r) => { setPath(""); track(r.job, "Import command DB"); },
-  });
-  return (
-    <div className="card">
-      <div className="row">
-        <input className="grow" placeholder="Path to a command SQLite file on the server, e.g. /data/run.db" value={path} onChange={(e) => setPath(e.target.value)} />
-        <button disabled={!path.trim() || add.isPending} onClick={() => add.mutate()}>Register &amp; import</button>
-      </div>
-      <div className="muted small">Uses the suggested column mapping and decodes every command. Needs the file to be readable by the machine running <code>specforge serve</code>.</div>
-      <ErrorNote error={add.error} />
-      {add.data?.warnings.map((w, i) => <div key={i} className="toast bad">Mapping warning: {w}</div>)}
-    </div>
-  );
-}
-
 export default function CoveragePage() {
   const sel = useSelectedSet();
   const { track } = useJobs();
@@ -196,9 +172,8 @@ export default function CoveragePage() {
       </div>
       <ErrorNote error={sel.error ?? sources.error ?? runs.error ?? run.error} />
       {sources.data && !imported.length && (
-        <Empty>No imported command DB yet. Add one below.</Empty>
+        <Empty>No imported command DB yet. Add one on the <Link to="/cmddb">Command DBs</Link> page.</Empty>
       )}
-      <AddSource />
       {sel.setId !== null && runs.data && list.length === 0 && imported.length > 0 && <Empty>No coverage runs for this set yet. Click “Run coverage”.</Empty>}
       {runId !== null && <RunView runId={runId} prevId={prevId} />}
     </>

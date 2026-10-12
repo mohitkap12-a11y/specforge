@@ -27,7 +27,7 @@ pre { background: var(--neutral-bg); padding: 8px 10px; border-radius: 6px; over
 .main { padding: 20px 24px; min-width: 0; }
 @media (max-width: 760px) { .shell { grid-template-columns: 1fr; } .nav { position: static; height: auto; flex-direction: row; flex-wrap: wrap; } .nav .spacer { display: none; } }
 
-.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 14px; }
+.card { min-width: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 14px; }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .row.end { justify-content: flex-end; } .grow { flex: 1; min-width: 0; }
 .muted { color: var(--muted); } .small { font-size: 12px; }
@@ -61,7 +61,7 @@ table.t { width: 100%; border-collapse: collapse; }
 .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; }
 .big { font-size: 28px; font-weight: 700; line-height: 1.1; }
 
-.explorer { display: grid; grid-template-columns: 320px 1fr; gap: 14px; align-items: start; }
+.explorer { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 14px; align-items: start; }
 .explorer .treebox { max-height: 78vh; overflow: auto; position: sticky; top: 10px; }
 @media (max-width: 900px) { .explorer { grid-template-columns: 1fr; } .explorer .treebox { position: static; max-height: 40vh; } }
 .tree-row { display: flex; align-items: center; gap: 4px; padding: 2px 4px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
@@ -77,3 +77,6 @@ table.t { width: 100%; border-collapse: collapse; }
 .jobs-pill { margin: 0 4px; padding: 6px 10px; border-radius: 6px; background: var(--neutral-bg); font-size: 12px; }
 .progress { height: 4px; background: var(--border); border-radius: 2px; margin-top: 4px; overflow: hidden; }
 .progress > span { display: block; height: 100%; background: var(--accent); transition: width .3s; }
+.t input { width: 100%; min-width: 80px; }
+.t td input[type=checkbox], .t th input[type=checkbox] { width: auto; min-width: 0; }
+.dws { display: flex; flex-wrap: wrap; gap: 4px 14px; width: 0; min-width: 100%; }

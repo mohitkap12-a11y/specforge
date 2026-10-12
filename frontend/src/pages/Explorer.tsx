@@ -57,7 +57,41 @@ function Tree({ nodes, selected, onSelect, filter }: { nodes: TreeNode[]; select
   return <div role="tree">{(by.get(null) ?? []).map((n) => render(n, 0))}</div>;
 }
 
-function Content({ data, docId }: { data: SectionData; docId: number | null }) {
+function TableEditor({ run, t, onDone }: { run: number; t: SectionData["tables"][number]; onDone: () => void }) {
+  const [header, setHeader] = useState<string[]>(t.header ?? []);
+  const [rows, setRows] = useState<string[][]>((t.rows ?? []).map((r) => r.map((c) => (typeof c === "string" ? c : c === null ? "" : JSON.stringify(c)))));
+  const save = useMutation({ mutationFn: () => api.correctTable(run, t.key, header, rows) });
+  const cols = Math.max(header.length, ...rows.map((r) => r.length), 1);
+  const cell = (r: string[], j: number) => r[j] ?? "";
+  const setCell = (i: number, j: number, v: string) => setRows((rs) => rs.map((r, x) => (x === i ? Array.from({ length: cols }, (_, c) => (c === j ? v : cell(r, c))) : r)));
+  return (
+    <div>
+      <div className="scroll">
+        <table className="t">
+          <thead><tr>{Array.from({ length: cols }, (_, j) => (
+            <th key={j}><input value={header[j] ?? ""} aria-label={`Header ${j + 1}`} onChange={(e) => setHeader((h) => Array.from({ length: cols }, (_, c) => (c === j ? e.target.value : h[c] ?? "")))} /></th>
+          ))}<th /></tr></thead>
+          <tbody>{rows.map((r, i) => (
+            <tr key={i}>
+              {Array.from({ length: cols }, (_, j) => <td key={j}><input value={cell(r, j)} aria-label={`Row ${i + 1} column ${j + 1}`} onChange={(e) => setCell(i, j, e.target.value)} /></td>)}
+              <td><button className="danger" aria-label={`Delete row ${i + 1}`} onClick={() => setRows((rs) => rs.filter((_, x) => x !== i))}>×</button></td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+      <div className="row" style={{ marginTop: 8 }}>
+        <button onClick={() => setRows((rs) => [...rs, Array(cols).fill("")])}>Add row</button>
+        <button className="primary" disabled={save.isPending} onClick={() => save.mutate()}>Save correction</button>
+        <button onClick={onDone}>Close editor</button>
+      </div>
+      <ErrorNote error={save.error} />
+      {save.data && <div className="toast ok">{save.data.note}</div>}
+    </div>
+  );
+}
+
+function Content({ data, docId, run }: { data: SectionData; docId: number | null; run: number }) {
+  const [editing, setEditing] = useState<string | null>(null);
   const s = data.section;
   const pdf = (p: number | null) => (docId && p ? `${fileUrl(docId)}#page=${p}` : null);
   return (
@@ -79,12 +113,13 @@ function Content({ data, docId }: { data: SectionData; docId: number | null }) {
       {data.tables.map((t) => (
         <div key={t.key} style={{ marginTop: 14 }}>
           <h3>{t.number} {t.title} {pdf(t.page_from) && <a className="small" href={pdf(t.page_from)!} target="_blank" rel="noreferrer">p.{t.page_from}</a>}</h3>
-          <div className="scroll">
+          {editing === t.key ? <TableEditor run={run} t={t} onDone={() => setEditing(null)} /> : <div className="scroll">
             <table className="t">
               {t.header && <thead><tr>{t.header.map((h, i) => <th key={i}>{h}</th>)}</tr></thead>}
               <tbody>{(t.rows ?? []).map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j}>{typeof c === "string" ? c : JSON.stringify(c)}</td>)}</tr>)}</tbody>
             </table>
-          </div>
+          </div>}
+          {editing !== t.key && <button className="small" style={{ marginTop: 6 }} onClick={() => setEditing(t.key)}>Edit table</button>}
         </div>
       ))}
       {data.references.length > 0 && <>
@@ -175,7 +210,7 @@ export default function ExplorerPage() {
             </div>
             <div className="card">
               {tab === "issues" && run !== null && <Issues run={run} onGoto={(k) => { set({ sec: k }); setTab("content"); }} />}
-              {tab === "content" && (!sel ? <div className="muted">Pick a section from the tree.</div> : <><Loading q={section} />{section.data && <Content data={section.data} docId={cur.d.id} />}</>)}
+              {tab === "content" && (!sel ? <div className="muted">Pick a section from the tree.</div> : <><Loading q={section} />{section.data && <Content key={section.data.section.key} data={section.data} docId={cur.d.id} run={run!} />}</>)}
             </div>
           </div>
         </>
