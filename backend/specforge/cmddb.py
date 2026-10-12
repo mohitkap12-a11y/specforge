@@ -18,6 +18,8 @@ from typing import Any, Iterator
 from .core.db import row
 from .core.hashing import sha256_file, stable_hash
 
+PROGRESS_EVERY = 2000   # rows scanned between progress / cancellation checks
+
 MI_DEFAULT_LAYOUT: dict[str, Any] = {
     "_note": "Default NVMe-MI request layout. VERIFY against the NVMe-MI revision under test; override in Settings.",
     "nmimt": {"byte": 1, "hi": 6, "lo": 3},
@@ -314,6 +316,8 @@ def import_source(conn: sqlite3.Connection, source_id: int, mi_layout: dict | No
     id_col, test_col, script_col, seq_col = mapping.get("id"), mapping.get("test"), mapping.get("script"), mapping.get("seq")
     for r in iter_source_rows(src["path"], mapping):
         total += 1
+        if progress and total % PROGRESS_EVERY == 0:      # polled on rows SCANNED (decode failures included), so cancellation is honoured
+            progress(total)
         try:
             d = decode_row(r, mapping, layout)
             seq = int(_meta(r, seq_col, total))
@@ -333,8 +337,8 @@ def import_source(conn: sqlite3.Connection, source_id: int, mi_layout: dict | No
         if len(batch) >= 20000:
             _flush(conn, batch)
             batch = []
-            if progress:
-                progress(total)
+    if progress:
+        progress(total)                                    # last chance to cancel before the import is finalised
     _flush(conn, batch)
     conn.executemany("INSERT INTO cmd_signature(source_id,signature,interface,queue,cs,opcode,nsid,dwords_json,count) VALUES(?,?,?,?,?,?,?,?,?)",
                      [(source_id, k, v["interface"], v["queue"], v["cs"], v["opcode"], v["nsid"], json.dumps(v["dwords"]), v["count"])
