@@ -105,20 +105,6 @@ def test_overrides_survive_catalog_rebuild(conn, parsed_set):
     assert row["observability"] == "unobservable" and row["na_reason"] == "internal behaviour"
 
 
-def test_template_scenarios_validate_and_link(conn, parsed_set):
-    cmds, fields = scenarios.catalog_context(conn, 1)
-    sc = rows(conn, "SELECT * FROM scenario WHERE set_id=1 AND origin='template'")
-    assert len(sc) == 152
-    for s in sc:
-        assert scenarios.validate_predicate(json.loads(s["predicate_json"]), cmds, fields) == [], s["sid"]
-        assert s["state"] == "approved"
-    n_links = conn.execute("SELECT COUNT(*) FROM scenario_item").fetchone()[0]
-    assert n_links == len(sc)
-    # regenerating is idempotent
-    scenarios.generate_templates(conn, 1)
-    assert conn.execute("SELECT COUNT(*) FROM scenario WHERE origin='template'").fetchone()[0] == 152
-
-
 def test_predicate_validator_rejects_bad_predicates(conn, parsed_set):
     cmds, fields = scenarios.catalog_context(conn, 1)
     good = {"steps": [{"command": "cmd:admin:06", "interface": "pcie", "queue": "admin", "cs": None, "opcode": 6,

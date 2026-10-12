@@ -47,9 +47,10 @@ def test_end_to_end_via_api(client, demo_dir):
     assert client.get(f"/api/sets/{sid}/references").json()["summary"]["broken"] == 0
     cat = wait(client, client.post(f"/api/sets/{sid}/catalog/build").json()["job"])
     assert cat["items"] == 195 and "templates" not in cat           # the product no longer auto-generates single-command scenarios
-    from specforge import scenarios
+    from seed import generate_templates
+
     from specforge.core.db import connect
-    assert scenarios.generate_templates(connect(), sid)["generated"] == 152      # fixture only: gives the coverage engine scenarios to match
+    assert generate_templates(connect(), sid)["generated"] == 152      # test seed: gives the coverage engine scenarios to match
 
     src = client.post("/api/cmddb", json={"path": str(demo_dir / "cmds-a.db")}).json()["id"]
     assert client.get("/api/cmddb/suggest", params={"path": str(demo_dir / "cmds-a.db")}).json()["mapping"]["table"] == "commands"
@@ -72,10 +73,7 @@ def test_end_to_end_via_api(client, demo_dir):
     wb = load_workbook(io.BytesIO(client.get(f"/api/coverage/{cov}/export", params={"format": "xlsx"}).content))
     assert {"Summary", "By command", "Gaps", "Scenarios", "Evidence", "Unknown commands", "Specs"} <= set(wb.sheetnames)
 
-    # scenario review rules: invalid predicate cannot be approved; templates are protected from bulk changes
-    draft = client.get(f"/api/sets/{sid}/scenarios", params={"origin": "template", "limit": 1}).json()["scenarios"][0]
-    bad = {"steps": [{"command": "cmd:admin:06", "interface": "pcie", "queue": "admin", "opcode": 99, "fields": []}]}
-    assert client.patch(f"/api/scenarios/{draft['id']}", json={"predicate": bad}).status_code == 409      # templates are managed by the catalog build
+    # scenario review rules: an invalid predicate cannot be edited in or approved
     from specforge.core.db import connect
 
     c2 = connect()
@@ -83,9 +81,9 @@ def test_end_to_end_via_api(client, demo_dir):
                (sid, "M:edit", "manual", "manual", "submission", "{}"))
     c2.commit()
     manual = c2.execute("SELECT id FROM scenario WHERE sid='M:edit'").fetchone()[0]
+    bad = {"steps": [{"command": "cmd:admin:06", "interface": "pcie", "queue": "admin", "opcode": 99, "fields": []}]}
     assert client.patch(f"/api/scenarios/{manual}", json={"predicate": bad}).status_code == 422
-    client.post("/api/scenarios/bulk", json={"ids": [draft["id"]], "state": "rejected"})
-    assert client.get(f"/api/sets/{sid}/scenarios", params={"origin": "template", "limit": 1}).json()["scenarios"][0]["state"] == "approved"
+    assert client.post("/api/scenarios/bulk", json={"ids": [manual], "state": "approved"}).json()["refused"][0]["id"] == manual
 
 
 def test_settings_and_provider_errors(client):

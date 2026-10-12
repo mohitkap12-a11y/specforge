@@ -1,9 +1,6 @@
 """Regression tests for the ninth round of Macroscope findings (review of 9b63e8d)."""
-import json
 import sqlite3
 
-import pytest
-from llm_helpers import Fake, settings
 
 from specforge import cmddb
 from specforge.core.db import rows
@@ -40,14 +37,3 @@ def test_constant_sequence_and_id_do_not_break_ordering_or_error_reporting(conn,
     assert (r["decoded"], r["undecodable"]) == (3, 1) and r["errors"][0]["row"] == 7        # constant id is reported, not a KeyError
     assert {x["seq"] for x in rows(conn, "SELECT seq FROM decoded_command WHERE source_id=?", (sid,))} == {5}
 
-
-def test_limit_zero_means_none_and_negative_is_rejected(conn, parsed_set, ws):
-    from specforge.ai import generate_ai_scenarios
-    from specforge.llm.service import LLMService
-
-    calls = []
-    svc = LLMService(conn, settings(), Fake([lambda m: calls.append(1) or json.dumps({"testable": False})]))
-    stats = generate_ai_scenarios(conn, 1, svc, None, limit=0)
-    assert stats["requirements"] == 0 and calls == []                                     # nothing was sent to the model
-    with pytest.raises(ValueError):
-        generate_ai_scenarios(conn, 1, svc, None, limit=-1)

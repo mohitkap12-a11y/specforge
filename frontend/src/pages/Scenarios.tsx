@@ -12,7 +12,6 @@ const LIMIT = 100;
 
 function Drawer({ s, setId, onClose }: { s: Scenario; setId: number; onClose: () => void }) {
   const qc = useQueryClient();
-  const editable = s.origin !== "template";
   const [title, setTitle] = useState(s.title);
   const [desc, setDesc] = useState(s.description ?? "");
   const [pred, setPred] = useState(JSON.stringify(s.predicate, null, 2));
@@ -42,15 +41,14 @@ function Drawer({ s, setId, onClose }: { s: Scenario; setId: number; onClose: ()
     <aside className="drawer" aria-label="Scenario detail">
       <div className="row"><h2 className="grow">{s.sid}</h2><button onClick={onClose}>Close</button></div>
       <div className="row"><Badge value={s.state} label={s.state} /><span className="badge">{s.origin}</span><span className="badge">{s.observability}</span></div>
-      {!editable && <p className="muted small">Template scenarios are generated from the catalog and are read-only. They change only when the catalog is rebuilt.</p>}
-      <label>Title<input style={{ width: "100%" }} value={title} disabled={!editable} onChange={(e) => setTitle(e.target.value)} /></label>
-      <label>Description<textarea rows={3} value={desc} disabled={!editable} onChange={(e) => setDesc(e.target.value)} /></label>
+            <label>Title<input style={{ width: "100%" }} value={title} onChange={(e) => setTitle(e.target.value)} /></label>
+      <label>Description<textarea rows={3} value={desc} onChange={(e) => setDesc(e.target.value)} /></label>
       <h3>Predicate</h3>
-      <textarea rows={16} spellCheck={false} value={pred} disabled={!editable} onChange={(e) => setPred(e.target.value)} aria-label="Predicate JSON" />
+      <textarea rows={16} spellCheck={false} value={pred} onChange={(e) => setPred(e.target.value)} aria-label="Predicate JSON" />
       {errors.length > 0 ? <div className="toast bad" role="alert">{errors.map((e, i) => <div key={i}>{e}</div>)}</div>
         : !parseErr && live.data && debounced === pred && <div className="toast ok">Predicate is valid.</div>}
       <ErrorNote error={save.error} />
-      {editable && (
+      {(
         <div className="row" style={{ margin: "10px 0" }}>
           <button disabled={!dirty || !!parseErr || save.isPending} onClick={() => save.mutate(body())}>Save{s.state === "approved" && JSON.stringify(parsed) !== JSON.stringify(s.predicate) ? " (resets to draft)" : ""}</button>
           <button className="primary" disabled={s.state === "approved" && !dirty || !!parseErr || save.isPending} onClick={() => save.mutate({ ...body(), state: "approved" })}>Approve</button>
@@ -92,7 +90,6 @@ export default function ScenariosPage() {
   });
   const [showGen, setShowGen] = useState(false);
   const rows = list.data?.scenarios ?? [];
-  const reviewable = rows.filter((s) => s.origin !== "template");
   const current = rows.find((s) => s.id === open);
   const toggle = (id: number) => setChecked((c) => { const n = new Set(c); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
@@ -102,7 +99,7 @@ export default function ScenariosPage() {
       <div className="row" style={{ marginBottom: 12 }}>
         <SetPicker sel={sel} />
         <select value={origin} onChange={(e) => setOrigin(e.target.value)} aria-label="Origin">
-          <option value="">All origins</option><option value="cross">Cross-command</option><option value="template">Template (legacy)</option><option value="ai">AI (legacy)</option>
+          <option value="">All origins</option><option value="cross">Cross-command</option>
         </select>
         <select value={state} onChange={(e) => setState(e.target.value)} aria-label="State">
           <option value="">All states</option><option value="draft">Draft</option><option value="approved">Approved</option><option value="rejected">Rejected</option>
@@ -136,12 +133,12 @@ export default function ScenariosPage() {
           <div className="scroll">
             <table className="t">
               <thead><tr>
-                <th><input type="checkbox" aria-label="Select all reviewable" checked={reviewable.length > 0 && reviewable.every((s) => checked.has(s.id))}
-                  onChange={(e) => setChecked(e.target.checked ? new Set(reviewable.map((s) => s.id)) : new Set())} /></th>
+                <th><input type="checkbox" aria-label="Select all" checked={rows.length > 0 && rows.every((s) => checked.has(s.id))}
+                  onChange={(e) => setChecked(e.target.checked ? new Set(rows.map((s) => s.id)) : new Set())} /></th>
                 <th>ID</th><th>Title</th><th>Origin</th><th>State</th><th>Observability</th><th>Items</th></tr></thead>
               <tbody>{rows.map((s) => (
                 <tr key={s.id} className={`click ${open === s.id ? "sel" : ""}`} onClick={() => setOpen(s.id)}>
-                  <td onClick={(e) => e.stopPropagation()}><input type="checkbox" aria-label={`Select ${s.sid}`} disabled={s.origin === "template"} checked={checked.has(s.id)} onChange={() => toggle(s.id)} /></td>
+                  <td onClick={(e) => e.stopPropagation()}><input type="checkbox" aria-label={`Select ${s.sid}`} checked={checked.has(s.id)} onChange={() => toggle(s.id)} /></td>
                   <td className="mono small">{s.sid}</td><td>{s.title}</td><td>{s.origin}</td><td><Badge value={s.state} label={s.state} /></td>
                   <td className="small">{s.observability}</td><td>{s.items.length}</td>
                 </tr>

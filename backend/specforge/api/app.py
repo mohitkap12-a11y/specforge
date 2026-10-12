@@ -413,8 +413,6 @@ def create_app() -> FastAPI:
             raise HTTPException(422, f"observability must be one of {sorted(OBSERVABILITY)}")
         pred = jloads(s["predicate_json"])
         if "predicate" in body:
-            if s["origin"] == "template":
-                raise HTTPException(409, "template scenarios are generated from the catalog and cannot be edited; create a manual scenario instead")
             cmds, fields = scenarios.catalog_context(conn(), s["set_id"])
             errs = scenarios.validate_predicate(body["predicate"], cmds, fields)
             if errs:
@@ -465,8 +463,8 @@ def create_app() -> FastAPI:
         ctx: dict[int, tuple] = {}
         for sid in ids:
             s = row(conn(), "SELECT id,set_id,origin,predicate_json FROM scenario WHERE id=?", (sid,))
-            if not s or s["origin"] == "template":
-                refused.append({"id": sid, "errors": ["template scenarios are managed by the catalog build"]})
+            if not s:
+                refused.append({"id": sid, "errors": ["scenario not found"]})
                 continue
             if new_state == "approved":     # same rule as PATCH: only valid predicates can be approved
                 if s["set_id"] not in ctx:

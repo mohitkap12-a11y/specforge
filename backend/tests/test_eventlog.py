@@ -7,11 +7,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from specforge import eventlog, jobs
-from specforge.ai import AIOutput, generate_ai_scenarios
+from specforge.crossgen import AIOutput
 from specforge.core.db import connect
 from specforge.llm.service import LLMService
 
-from llm_helpers import Fake, reply_for, settings
+from llm_helpers import Fake, settings
 
 
 @pytest.fixture(autouse=True)
@@ -148,17 +148,6 @@ def test_llm_gives_up_is_an_error_event(conn):
     assert ev[-1]["level"] == "error" and "gave up after 2 attempts" in ev[-1]["message"]
 
 
-def test_ai_agent_narrates_each_decision(conn, parsed_set):
-    req, base = reply_for(conn)
-    bad_quote = {**base, "title": "bad quote", "quotes": ["the controller shall levitate above the namespace"]}
-    svc = LLMService(conn, settings(), Fake([json.dumps({"testable": True, "scenarios": [base, bad_quote]})]))
-    generate_ai_scenarios(conn, 1, svc, [req["key"]])
-    msgs = [e["message"] for e in events(conn, sources=["agent"])]
-    assert msgs[0].startswith("Scenario agent starting") and msgs[1].startswith("[1/1] Reading requirement")
-    assert any("Rejected draft 'bad quote'" in m and "ungrounded" in m for m in msgs)
-    assert any("Drafted scenario" in m for m in msgs) and msgs[-1].startswith("Scenario agent finished")
-
-
 def test_parser_catalog_import_and_coverage_log_their_steps(conn, parsed_set, demo_dir):
     from specforge import cmddb, coverage
 
@@ -170,7 +159,6 @@ def test_parser_catalog_import_and_coverage_log_their_steps(conn, parsed_set, de
         by_source.setdefault(e["source"], []).append(e["message"])
     assert any(m.startswith("Audit: 0 error(s)") for m in by_source["parser"]) and any("finished in" in m for m in by_source["parser"])
     assert any(m.startswith("Catalog built: 195 items") for m in by_source["catalog"])
-    assert any(m.startswith("Template scenarios: 152 generated") for m in by_source["scenarios"])
     assert any(m.startswith("Import done:") for m in by_source["import"])
     assert any(m.startswith("Coverage run #1 done: 30.0% covered") for m in by_source["coverage"])
 

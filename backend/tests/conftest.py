@@ -36,8 +36,10 @@ def conn(ws):
 
 @pytest.fixture()
 def parsed_set(conn, demo_dir):
-    """Base 2.4 + NVM CS 1.3 + MI 2.0 parsed and grouped in spec set 1, catalog + templates built."""
-    from specforge import catalog, scenarios
+    """Base 2.4 + NVM CS 1.3 + MI 2.0 parsed and grouped in spec set 1, catalog built and single-command scenarios seeded (see seed.py)."""
+    from seed import generate_templates
+
+    from specforge import catalog
     from specforge.ingest import store
 
     ids = []
@@ -50,5 +52,5 @@ def parsed_set(conn, demo_dir):
         conn.execute("INSERT INTO spec_set_member VALUES(1,?)", (i,))
     conn.commit()
     catalog.build_catalog(conn, 1)
-    scenarios.generate_templates(conn, 1)
+    generate_templates(conn, 1)
     return 1

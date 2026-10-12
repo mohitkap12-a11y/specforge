@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 from . import eventlog
-from .ai import AIOutput, _catalog_for, _grounded, _record, to_predicate
 from .catalog import _mention_patterns
 from .core.db import jloads, rows
 from .ingest.normalize import norm_text
@@ -38,6 +39,46 @@ PASSAGE_CHARS = 2_000        # budget for one connected passage
 CATALOG_CHARS = 9_000
 MAX_COMMANDS = 14
 MAX_ENTRIES_PER_COMMAND = 80
+
+# ----------------------------------------------------------------------------- model output
+
+class AIField(BaseModel):
+    dw: int | Literal["nmd0", "nmd1"]
+    hi: int
+    lo: int
+    op: Literal["eq", "ne", "in", "range", "mask"] = "eq"
+    value: Any
+
+
+class AICapture(BaseModel):
+    dw: int | Literal["nmd0", "nmd1"]
+    hi: int
+    lo: int
+
+
+class AIStep(BaseModel):
+    command: str = Field(description="catalog command key, e.g. cmd:admin:06")
+    note: str = Field(default="", description="what this step is for in the test flow (setup / stimulus / follow-up check)")
+    fields: list[AIField] = []
+    capture: dict[str, AICapture] = {}
+
+
+class AIScenario(BaseModel):
+    title: str
+    description: str = ""
+    observability: Literal["submission", "stimulus"]
+    steps: list[AIStep]
+    order: Literal["strict", "any"] = "strict"
+    scope: Literal["global", "test", "script"] = "test"
+    within: int | None = None
+    quotes: list[str] = Field(description="verbatim excerpts of the requirement that justify the scenario")
+
+
+class AIOutput(BaseModel):
+    testable: bool
+    reason: str = ""
+    scenarios: list[AIScenario] = []
+
 
 SYSTEM = """You write functional test scenarios for a device specification, the way a test-script developer does.
 A scenario is an ordered sequence of SEVERAL commands; it is checked against a log of SUBMITTED commands only
@@ -63,6 +104,55 @@ Rules:
   behaviour are visible, the device's response cannot be verified.
 - Each scenario needs 1+ quotes copied EXACTLY (character for character) from SECTION or RELATED text.
 - Reply with one JSON object only."""
+
+
+# ----------------------------------------------------------------------------- helpers
+
+def _catalog_for(conn: sqlite3.Connection, set_id: int, cmd_key: str) -> list[dict]:
+    out: list[dict] = []
+    for r in rows(conn, "SELECT key,kind,label,attrs_json FROM catalog_item WHERE set_id=? AND (key=? OR parent_key=? OR "
+                        "parent_key IN (SELECT key FROM catalog_item WHERE set_id=? AND parent_key=?))",
+                  (set_id, cmd_key, cmd_key, set_id, cmd_key)):
+        x = jloads(r["attrs_json"], {})
+        if r["kind"] == "command":
+            out.append({"command": r["key"], "name": x["name"], "interface": x["interface"], "queue": x["queue"]})
+        elif r["kind"] in ("field", "reserved"):
+            out.append({"command": cmd_key, "field": r["label"], "dw": x["dw"], "hi": x["hi"], "lo": x["lo"],
+                        "reserved": r["kind"] == "reserved"})
+        elif r["kind"] == "value" and not x.get("reserved_value"):
+            out.append({"command": cmd_key, "value_of": x["field"], "value": x["vlo"] if x["vlo"] == x["vhi"] else [x["vlo"], x["vhi"]],
+                        "meaning": x.get("desc", "")[:60]})
+    return out
+
+
+def _grounded(quote: str, corpus: str) -> bool:
+    q = norm_text(quote)     # case-sensitive: "the controller shall" must not match "The Controller SHALL"
+    return len(q) >= 8 and q in norm_text(corpus)
+
+
+def to_predicate(sc: AIScenario, cmds: dict[str, dict]) -> dict:
+    steps = []
+    for st in sc.steps:
+        c = cmds.get(st.command)
+        if c is None:
+            raise ValueError(f"unknown command {st.command}")
+        steps.append({"command": st.command, "interface": c["interface"], "queue": c["queue"],
+                      "cs": c["cs"] if c["queue"] == "io" else None, "opcode": c["opcode"],
+                      "fields": [f.model_dump() for f in st.fields],
+                      **({"note": st.note} if st.note else {}),
+                      **({"capture": {k: v.model_dump() for k, v in st.capture.items()}} if st.capture else {})})
+    pred: dict[str, Any] = {"scope": sc.scope, "order": sc.order, "steps": steps}
+    if sc.within is not None:   # 0 must reach validation (it is invalid), not silently mean 'unlimited'
+        pred["within"] = sc.within
+    return pred
+
+
+def _record(conn, set_id, key, svc, state, output, error, meta=None):
+    cfg = svc.task_cfg("generate")          # the row is labelled "cross"; provider / model are those configured for generation
+    conn.execute("INSERT INTO enrichment(set_id,item_key,task,provider,model,prompt_version,state,output_json,error) VALUES(?,?,?,?,?,?,?,?,?)",
+                 (set_id, key, "cross", (meta or {}).get("provider", cfg["provider"]), cfg["model"], PROMPT_VERSION, state,
+                  json.dumps(output) if output is not None else None, error))
+    conn.commit()
 
 
 # ----------------------------------------------------------------------------- reading the spec set
@@ -311,12 +401,12 @@ def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMServ
         except LLMError as e:
             stats["failed"] += 1
             eventlog.emit("error", "agent", f"{tag}: model failed: {str(e)[:200]}", section=u["section_key"], error=str(e))
-            _record(conn, set_id, u["section_key"], "cross", svc, "failed", None, str(e))
+            _record(conn, set_id, u["section_key"], svc, "failed", None, str(e))
             continue
         if not out.testable or not out.scenarios:
             stats["not_testable"] += 1
             eventlog.emit("info", "agent", f"{tag}: no multi-command flow found: {(out.reason or 'no reason given')[:200]}", section=u["section_key"])
-            _record(conn, set_id, u["section_key"], "cross", svc, "not_testable", out.model_dump(), out.reason, meta)
+            _record(conn, set_id, u["section_key"], svc, "not_testable", out.model_dump(), out.reason, meta)
             continue
         # a successful answer replaces this section's earlier unreviewed drafts; approved / rejected scenarios are never touched
         conn.execute("DELETE FROM scenario WHERE set_id=? AND origin='cross' AND state='draft' AND sid LIKE ? ESCAPE '\\'",
@@ -365,7 +455,7 @@ def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMServ
                 links |= {k for k, t in req_text.items() if t and (nq in t or t in nq)}
             conn.executemany("INSERT OR IGNORE INTO scenario_item(scenario_id,item_key) VALUES(?,?)", [(cur.lastrowid, k) for k in sorted(links)])
             eventlog.emit("info", "agent", f"{tag}: drafted '{sc.title[:120]}' ({len(sc.steps)} steps, awaiting review)", section=u["section_key"], sid=sid, predicate=pred)
-        _record(conn, set_id, u["section_key"], "cross", svc, "ok" if created else "needs_review", out.model_dump(), "; ".join(problems) or None, meta)
+        _record(conn, set_id, u["section_key"], svc, "ok" if created else "needs_review", out.model_dump(), "; ".join(problems) or None, meta)
         conn.commit()
     eventlog.emit("info" if not stats["failed"] else "warn", "agent", "Cross-command agent finished: " + ", ".join(f"{v} {k}" for k, v in stats.items()), **stats)
     return stats

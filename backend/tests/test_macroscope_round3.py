@@ -3,7 +3,6 @@ import json
 import sqlite3
 
 from fastapi.testclient import TestClient
-from llm_helpers import Fake, reply_for, settings
 
 from specforge import catalog, cmddb, scenarios
 from specforge.core.db import rows
@@ -126,37 +125,3 @@ def test_create_set_is_all_or_nothing(ws):
         assert client.post("/api/sets", json={"name": "a", "document_ids": [4242]}).status_code == 409
         assert client.get("/api/sets").json() == []                      # nothing half-created, and the connection is not left mid-transaction
         assert client.post("/api/sets", json={"name": "a", "document_ids": []}).status_code == 200
-
-
-# ------------------------------------------------------------------ ai
-
-def _gen(conn, key, scenario):
-    from specforge.ai import generate_ai_scenarios
-    from specforge.llm.service import LLMService
-
-    svc = LLMService(conn, settings(), Fake([json.dumps({"testable": True, "scenarios": [scenario]})]))
-    return generate_ai_scenarios(conn, 1, svc, [key])
-
-
-def test_ai_scenario_equal_to_an_approved_template_still_needs_review(conn, parsed_set):
-    req, base = reply_for(conn)
-    base["scope"] = "global"             # same predicate as the approved template for 'reserved CDW10[15:08] set'
-    tmpl = rows(conn, "SELECT id,predicate_json FROM scenario WHERE sid='T:cmd:admin:06/dw10[15:08]:rsvd'")[0]
-    assert json.loads(tmpl["predicate_json"])["steps"][0]["fields"][0]["op"] == "ne"
-    base["quotes"] = ["The Identify command returns a data structure to the host."]
-    stats = _gen(conn, req["key"], base)
-    assert stats["created"] == 1
-    linked = {r[0] for r in conn.execute("SELECT item_key FROM scenario_item WHERE scenario_id=?", (tmpl["id"],))}
-    assert req["key"] not in linked                                       # not silently attached to the approved template
-    ai = rows(conn, "SELECT id,state,predicate_json FROM scenario WHERE origin='ai'")[0]
-    assert ai["state"] == "draft" and ai["predicate_json"] == tmpl["predicate_json"]
-    assert [r[0] for r in conn.execute("SELECT item_key FROM scenario_item WHERE scenario_id=?", (ai["id"],))] == [req["key"]]
-
-
-def test_ai_output_is_validated_against_the_commands_it_was_shown(conn, parsed_set):
-    req, base = reply_for(conn)
-    base["quotes"] = ["The Identify command returns a data structure to the host."]
-    other = {**base, "steps": [{"command": "cmd:admin:09", "fields": []}]}      # a real catalog command, but not in this requirement's context
-    stats = _gen(conn, req["key"], other)
-    assert (stats["created"], stats["rejected"]) == (0, 1)
-    assert rows(conn, "SELECT COUNT(*) AS n FROM scenario WHERE origin='ai'")[0]["n"] == 0

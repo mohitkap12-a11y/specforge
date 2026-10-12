@@ -43,7 +43,7 @@ The tool's scenarios are cross-command: behaviour that needs several commands (s
 
 Each selected section is one unit and one model call. The model reads the section (sub-sections, tables, normative statements) plus the passages connected to it anywhere in the spec set: references the section makes, references elsewhere that point into it, other commands the section names, normative statements elsewhere naming its commands, and the other sections selected in the same request. `plan` shows exactly what would be read before any model call. Opcodes, bit ranges and values come from the catalog slice for the commands involved; a draft must pass schema, verbatim-quote grounding, predicate validation, involve at least two different commands, and de-duplicate, then waits as a draft for approval. Regenerating a section replaces its unreviewed drafts only. A scenario is linked to the commands it drives and the requirements it quotes.
 
-Coverage is judged on commands and requirements (`DIRECT_KINDS`); fields, values and reserved bits remain in the catalog as the vocabulary scenarios are validated against. `scenarios.generate_templates` (single-command scenarios) is no longer part of the product flow and is kept only as a test fixture for the coverage engine.
+Coverage is judged on commands and requirements (`DIRECT_KINDS`); fields, values and reserved bits remain in the catalog as the vocabulary scenarios are validated against.
 
 ## Scenario predicates
 

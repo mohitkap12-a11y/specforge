@@ -19,7 +19,7 @@ from specforge.ingest.pdf import parse_pdf
 # ------------------------------------------------------------------ ai grounding
 
 def test_grounding_is_case_sensitive_but_ignores_layout():
-    from specforge.ai import _grounded
+    from specforge.crossgen import _grounded
 
     corpus = "The Controller SHALL abort the\ncommand – with status Invalid Field."
     assert not _grounded("the controller shall abort", corpus)          # case differs: a different sentence, not a quote
