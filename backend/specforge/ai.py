@@ -96,8 +96,22 @@ def build_context(conn: sqlite3.Connection, set_id: int, item: dict) -> dict[str
                                 "meaning": x.get("desc", "")[:60]})
     ctx_text = a["text"]
     # neighbouring sentences from the same section (grounding corpus)
-    sec = conn.execute("SELECT text FROM ir_node WHERE key=?", (item.get("parent_key") or "",)).fetchone()
-    return {"requirement": a["text"], "catalog": catalog, "command": cmd_key, "context_text": ctx_text + (("\n" + sec[0]) if sec and sec[0] else "")}
+    section_text = _section_text(conn, set_id, item["key"])
+    return {"requirement": a["text"], "catalog": catalog, "command": cmd_key, "context_text": ctx_text + (("\n" + section_text) if section_text else "")}
+
+
+def _section_text(conn: sqlite3.Connection, set_id: int, req_key: str) -> str:
+    """Text of the section holding a requirement, looked up only in the set's ACTIVE parse runs."""
+    parent = req_key.rsplit("/req:", 1)[0]
+    runs = "JOIN parse_run r ON r.id=n.run_id AND r.active=1 JOIN spec_set_member m ON m.document_id=r.document_id AND m.set_id=?"
+    if "/fig:" in parent:  # requirement inside a table: use the section that contains the table
+        t = conn.execute(f"SELECT n.attrs_json FROM ir_node n {runs} WHERE n.key=?", (set_id, parent)).fetchone()
+        sec = jloads(t[0], {}).get("section") if t else None
+        if not sec:
+            return ""
+        parent = parent.split("/fig:", 1)[0] + f"/sec:{sec}"
+    r = conn.execute(f"SELECT n.text FROM ir_node n {runs} WHERE n.key=?", (set_id, parent)).fetchone()
+    return r[0] or "" if r else ""
 
 
 def _grounded(quote: str, corpus: str) -> bool:

@@ -121,8 +121,13 @@ KNOWN = {
 }
 
 
+def _open_ro(path: str) -> sqlite3.Connection:
+    """Open read-only through a properly escaped file URI (paths may contain '?', '#', '%')."""
+    return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+
+
 def list_tables(path: str) -> dict[str, list[str]]:
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = _open_ro(path)
     try:
         out = {}
         for (name,) in con.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'"):
@@ -182,6 +187,20 @@ def _value(row_: sqlite3.Row, spec: Any, default=None):
     return row_[spec] if spec in row_.keys() else default
 
 
+DEFAULT_CSI_NAMES = {"0": "nvm", "1": "kv", "2": "zns"}  # Command Set Identifier values; extend via mapping["cs_map"]
+
+
+def _norm_cs(v: Any, mapping: dict) -> str:
+    s = str(v if v is not None else "nvm").strip().lower()
+    names = {**DEFAULT_CSI_NAMES, **{str(k): str(x).lower() for k, x in (mapping.get("cs_map") or {}).items()}}
+    if s.startswith("0x"):
+        try:
+            s = str(int(s, 16))
+        except ValueError:
+            pass
+    return names.get(s, s) or "nvm"
+
+
 def _norm_queue(q: Any) -> str:
     s = str(q or "").strip().lower()
     if s in ("admin", "adm", "0", "asq", "admin_queue"):
@@ -199,7 +218,7 @@ def _norm_iface(i: Any) -> str:
 
 
 def iter_source_rows(path: str, mapping: dict) -> Iterator[sqlite3.Row]:
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    con = _open_ro(path)
     con.row_factory = sqlite3.Row
     try:
         order = mapping.get("seq") or mapping.get("id")
@@ -216,7 +235,7 @@ def iter_source_rows(path: str, mapping: dict) -> Iterator[sqlite3.Row]:
 
 def decode_row(r: sqlite3.Row, mapping: dict, layout: dict) -> dict[str, Any]:
     iface = _norm_iface(_value(r, _col(mapping, "interface"), "pcie"))
-    cs = str(_value(r, _col(mapping, "cs"), "nvm") or "nvm").lower()
+    cs = _norm_cs(_value(r, _col(mapping, "cs"), "nvm"), mapping)
     mi_col = _col(mapping, "mi_msg")
     sqe_col = _col(mapping, "sqe")
     cdw = mapping.get("cdw")

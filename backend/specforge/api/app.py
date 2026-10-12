@@ -60,11 +60,11 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ specs
     @app.post("/api/specs/upload")
-    async def upload(files: list[UploadFile] = File(...)):
+    def upload(files: list[UploadFile] = File(...)):   # sync on purpose: runs in the thread pool, never blocks the event loop
         out = []
         for f in files:
             suffix = Path(f.filename or "").suffix.lower()
-            if suffix not in (".pdf", ".docx", ".dotx"):
+            if suffix not in (".pdf", ".docx"):
                 raise HTTPException(400, f"Unsupported file type: {f.filename}")
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=config.workspace_dir() / "uploads") as tmp:
                 shutil.copyfileobj(f.file, tmp)
@@ -114,7 +114,12 @@ def create_app() -> FastAPI:
 
     @app.post("/api/runs/{run_id}/activate")
     def activate(run_id: int):
-        store.activate_run(conn(), run_id)
+        try:
+            store.activate_run(conn(), run_id)
+        except KeyError:
+            raise HTTPException(404, "parse run not found")
+        except ValueError as e:
+            raise HTTPException(409, str(e))
         return {"ok": True}
 
     @app.get("/api/runs/{run_id}")
@@ -303,11 +308,25 @@ def create_app() -> FastAPI:
 
     @app.post("/api/scenarios/bulk")
     def bulk(body: dict = Body(...)):
-        ids = body["ids"]
-        q = ",".join("?" * len(ids))
-        conn().execute(f"UPDATE scenario SET state=? WHERE id IN ({q}) AND origin<>'template'", [body["state"], *ids])
+        ids, new_state = body["ids"], body["state"]
+        updated, refused = [], []
+        ctx: dict[int, tuple] = {}
+        for sid in ids:
+            s = row(conn(), "SELECT id,set_id,origin,predicate_json FROM scenario WHERE id=?", (sid,))
+            if not s or s["origin"] == "template":
+                refused.append({"id": sid, "errors": ["template scenarios are managed by the catalog build"]})
+                continue
+            if new_state == "approved":     # same rule as PATCH: only valid predicates can be approved
+                if s["set_id"] not in ctx:
+                    ctx[s["set_id"]] = scenarios.catalog_context(conn(), s["set_id"])
+                errs = scenarios.validate_predicate(jloads(s["predicate_json"]), *ctx[s["set_id"]])
+                if errs:
+                    refused.append({"id": sid, "errors": errs})
+                    continue
+            conn().execute("UPDATE scenario SET state=? WHERE id=?", (new_state, sid))
+            updated.append(sid)
         conn().commit()
-        return {"ok": True}
+        return {"ok": not refused, "updated": updated, "refused": refused}
 
     @app.post("/api/scenarios/validate")
     def validate(body: dict = Body(...)):

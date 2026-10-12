@@ -39,8 +39,10 @@ def submit(conn, type_: str, fn: Callable[..., Any], payload: dict | None = None
             result = fn(c, prog)
             c.execute("UPDATE job SET state='done', result_json=?, updated=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(result, default=str), job_id))
         except InterruptedError:
+            c.rollback()  # discard the aborted job's partial writes
             c.execute("UPDATE job SET state='cancelled', updated=CURRENT_TIMESTAMP WHERE id=?", (job_id,))
         except Exception as e:  # noqa: BLE001
+            c.rollback()
             c.execute("UPDATE job SET state='failed', error=?, updated=CURRENT_TIMESTAMP WHERE id=?", (f"{e!r}\n{traceback.format_exc()[-1500:]}", job_id))
         finally:
             c.commit()

@@ -126,7 +126,6 @@ def generate_templates(conn: sqlite3.Connection, set_id: int) -> dict[str, int]:
     for i in items:
         i["attrs"] = jloads(i.pop("attrs_json"), {})
     cmds = {i["key"]: {**i["attrs"], "key": i["key"]} for i in items if i["kind"] == "command"}
-    conn.execute("DELETE FROM scenario WHERE set_id=? AND origin='template'", (set_id,))
     out: list[tuple] = []
     links: list[tuple[str, str]] = []
 
@@ -161,10 +160,23 @@ def generate_templates(conn: sqlite3.Connection, set_id: int) -> dict[str, int]:
             step = {"command": cmd["key"], "interface": "mi", "queue": "admin", "cs": None, "opcode": cmd["opcode"], "fields": []}
             put(f"T:{i['key']}", "mi_tunnel", f"{cmd['name']} carried in an NVMe-MI Admin message", "submission",
                 {"scope": "global", "order": "strict", "steps": [step]}, i["key"])
-    conn.executemany("INSERT INTO scenario(set_id,sid,origin,kind,title,description,observability,predicate_json,state,provenance_json)"
-                     " VALUES(?,?,?,?,?,?,?,?,?,?)", out)
+    # Upsert by sid: ids and reviewer decisions (state) of existing template scenarios are preserved, so
+    # old coverage results keep pointing at the same scenarios; templates that no longer apply are removed.
+    existing = {r["sid"]: r["id"] for r in rows(conn, "SELECT id,sid FROM scenario WHERE set_id=? AND origin='template'", (set_id,))}
+    keep = {o[1] for o in out}
+    for sid_old, id_old in existing.items():
+        if sid_old not in keep:
+            conn.execute("DELETE FROM scenario WHERE id=?", (id_old,))
+    for o in out:
+        if o[1] in existing:
+            conn.execute("UPDATE scenario SET kind=?, title=?, description=?, observability=?, predicate_json=?, provenance_json=? WHERE id=?",
+                         (o[3], o[4], o[5], o[6], o[7], o[9], existing[o[1]]))
+        else:
+            conn.execute("INSERT INTO scenario(set_id,sid,origin,kind,title,description,observability,predicate_json,state,provenance_json)"
+                         " VALUES(?,?,?,?,?,?,?,?,?,?)", o)
     ids = {r["sid"]: r["id"] for r in rows(conn, "SELECT id,sid FROM scenario WHERE set_id=?", (set_id,))}
-    conn.executemany("INSERT OR IGNORE INTO scenario_item(scenario_id,item_key) VALUES(?,?)", [(ids[s], k) for s, k in links if s in ids])
+    conn.execute("DELETE FROM scenario_item WHERE scenario_id IN (SELECT id FROM scenario WHERE set_id=? AND origin='template')", (set_id,))
+    conn.executemany("INSERT OR IGNORE INTO scenario_item(scenario_id,item_key) VALUES(?,?)", [(ids[s_], k) for s_, k in links if s_ in ids])
     conn.commit()
     kinds: dict[str, int] = {}
     for o in out:

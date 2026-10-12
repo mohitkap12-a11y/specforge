@@ -118,7 +118,7 @@ def eval_sequence(conn: sqlite3.Connection, source_id: int, pred: dict, sigs_by:
     for _, seq_rows in rows_by_scope.items():
         seq_rows.sort(key=lambda r: (r["test_id"], r["seq"]))
 
-        def attempt(step_i: int, start: int, env: dict, chosen: list[dict], used: set) -> list[dict] | None:
+        def attempt(step_i: int, start: int, env: dict, chosen: list[tuple[int, dict]], used: set) -> list[tuple[int, dict]] | None:
             if step_i == len(steps):
                 return chosen
             st = steps[step_i]
@@ -127,38 +127,42 @@ def eval_sequence(conn: sqlite3.Connection, source_id: int, pred: dict, sigs_by:
                 r = seq_rows[idx]
                 if idx in used or r["signature"] not in cand_sigs[step_i]:
                     continue
-                if within is not None and chosen and abs(r["seq"] - chosen[-1]["seq"]) > within:
+                if within is not None and chosen and abs(r["seq"] - chosen[-1][1]["seq"]) > within:
                     continue
                 sig = cand_sigs[step_i][r["signature"]]
                 if not step_matches_sig(st, sig, env):
                     continue
                 env2 = dict(env)
-                for name, c in (st.get("capture") or {}).items():
-                    v = get_bits(sig["dwords"], c["dw"], c["hi"], c["lo"])
+                for name, cap in (st.get("capture") or {}).items():
+                    v = get_bits(sig["dwords"], cap["dw"], cap["hi"], cap["lo"])
                     if v is not None:
                         env2[name] = v
-                res = attempt(step_i + 1, idx + 1, env2, chosen + [r], used | {idx})
+                res = attempt(step_i + 1, idx + 1, env2, chosen + [(idx, r)], used | {idx})
                 if res is not None:
                     return res
             return None
 
-        # count disjoint occurrences scanning left to right
+        # count disjoint occurrences: rows of an earlier match are never reused
+        consumed: set[int] = set()
         pos = 0
-        while pos < len(seq_rows):
+        while True:
             found = None
-            for first in range(pos, len(seq_rows)):
-                if seq_rows[first]["signature"] not in cand_sigs[0]:
-                    continue
-                found = attempt(0, first, {}, [], set()) if order == "strict" else attempt(0, 0, {}, [], set())
-                if found:
-                    break
+            if order == "strict":
+                for first in range(pos, len(seq_rows)):
+                    if first in consumed or seq_rows[first]["signature"] not in cand_sigs[0]:
+                        continue
+                    found = attempt(0, first, {}, [], consumed)
+                    if found:
+                        break
+            else:
+                found = attempt(0, 0, {}, [], consumed)
             if not found:
                 break
             matches += 1
             if len(evidence) < EVIDENCE_LIMIT:
-                evidence.extend(found)
-            last = max(seq_rows.index(x) for x in found if x in seq_rows)
-            pos = last + 1
+                evidence.extend(r for _, r in found)
+            consumed |= {i for i, _ in found}
+            pos = max(i for i, _ in found) + 1
     return matches, evidence[:EVIDENCE_LIMIT]
 
 

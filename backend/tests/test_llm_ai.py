@@ -5,34 +5,13 @@ import httpx
 import pytest
 
 from specforge.ai import generate_ai_scenarios
-from specforge.core import config
 from specforge.core.db import rows
 from specforge.llm.base import LLMError
 from specforge.llm.ollama import OllamaProvider
 from specforge.llm.opencode import OpenCodeProvider
 from specforge.llm.service import LLMService, extract_json
 
-
-class Fake:
-    name = "fake"
-
-    def __init__(self, replies):
-        self.replies, self.calls = list(replies), 0
-
-    def generate(self, messages, **kw):
-        self.calls += 1
-        r = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
-        return r(messages) if callable(r) else r
-
-    def list_models(self): return []
-    def health(self): return {"ok": True}
-    def embed(self, t, **kw): return []
-
-
-def settings():
-    s = config.deep_merge(config.DEFAULT_SETTINGS, {})
-    s["tasks"]["generate"]["model"] = "fake-model"
-    return s
+from llm_helpers import Fake, reply_for, settings
 
 
 def test_extract_json_variants():
@@ -101,16 +80,8 @@ def test_service_repairs_invalid_output_and_caches(conn):
         bad.generate_model("generate", [{"role": "user", "content": "q3"}], AIOutput, "v1")
 
 
-def _reply_for(conn):
-    req = next(r for r in rows(conn, "SELECT * FROM catalog_item WHERE kind='requirement'") if "Invalid Field in Command if a reserved" in r["label"])
-    text = json.loads(req["attrs_json"])["text"]
-    step = {"command": "cmd:admin:06", "fields": [{"dw": 10, "hi": 15, "lo": 8, "op": "ne", "value": 0}]}
-    base = {"title": "Identify with reserved CDW10[15:08] set", "observability": "stimulus", "steps": [step], "quotes": [text[:60]]}
-    return req, base
-
-
 def test_ai_scenarios_are_grounded_validated_and_drafts(conn, parsed_set):
-    req, base = _reply_for(conn)
+    req, base = reply_for(conn)
 
     def reply(messages):
         # one good scenario, one with an invented quote, one with a bit range that does not exist, one duplicate of the first
@@ -132,7 +103,7 @@ def test_ai_scenarios_are_grounded_validated_and_drafts(conn, parsed_set):
 
 
 def test_ai_not_testable_and_failures_are_recorded(conn, parsed_set):
-    req, _ = _reply_for(conn)
+    req, _ = reply_for(conn)
     svc = LLMService(conn, settings(), Fake(['{"testable": false, "reason": "controller internal"}']))
     assert generate_ai_scenarios(conn, 1, svc, [req["key"]])["not_testable"] == 1
     assert rows(conn, "SELECT COUNT(*) AS n FROM scenario WHERE origin='ai'")[0]["n"] == 0

@@ -27,7 +27,7 @@ def _fmt_of(path: str | Path) -> str:
     raise ValueError(f"Unsupported spec format: {suf}")
 
 
-def detect_document(path: str | Path) -> dict[str, Any]:
+def detect_document(path: str | Path, filename: str | None = None) -> dict[str, Any]:
     """Cheap identity detection used by the upload step (family / version / pages)."""
     from .normalize import detect_identity
 
@@ -46,7 +46,7 @@ def detect_document(path: str | Path) -> dict[str, Any]:
         d = docx.Document(str(path))
         text = "\f".join(p.text for p in d.paragraphs[:80])
         pages, title = 0, d.core_properties.title or ""
-    fam, ver = detect_identity(text, Path(path).name)
+    fam, ver = detect_identity(text, filename or Path(path).name)
     return {"family": fam, "version": ver, "pages": pages, "title": title, "format": fmt}
 
 
@@ -58,7 +58,7 @@ def register_document(conn: sqlite3.Connection, src_path: str | Path, family: st
     existing = row(conn, "SELECT * FROM spec_document WHERE sha256=?", (sha,))
     if existing:
         return existing
-    info = detect_document(src)
+    info = detect_document(src, filename)
     family = family or info["family"] or "unknown"
     version = version or info["version"] or "0"
     dest = workspace_dir() / "specs" / f"{sha[:16]}{src.suffix.lower()}"
@@ -124,9 +124,11 @@ def run_parse(conn: sqlite3.Connection, document_id: int, settings: dict | None 
 
 
 def activate_run(conn: sqlite3.Connection, run_id: int) -> None:
-    r = row(conn, "SELECT document_id FROM parse_run WHERE id=?", (run_id,))
+    r = row(conn, "SELECT document_id, status FROM parse_run WHERE id=?", (run_id,))
     if not r:
         raise KeyError(run_id)
+    if r["status"] != "done":
+        raise ValueError(f"parse run {run_id} is '{r['status']}'; only finished runs can be activated")
     conn.execute("UPDATE parse_run SET active=0 WHERE document_id=?", (r["document_id"],))
     conn.execute("UPDATE parse_run SET active=1 WHERE id=?", (run_id,))
     conn.commit()

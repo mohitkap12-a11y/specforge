@@ -58,66 +58,67 @@ def _cells(rows) -> list[list[str]]:
     return [[clean(c) for c in (r or [])] for r in rows if r is not None]
 
 
-def _extract_page(args: tuple[str, int, bool]) -> dict[str, Any]:
-    path, pno, allow_fallback = args
-    import pymupdf as fitz  # PyMuPDF
+def _extract_chunk(args: tuple[str, list[int], bool]) -> list[dict[str, Any]]:
+    """Extract a list of pages with ONE document handle (and one lazily opened pdfplumber handle)."""
+    path, pnos, allow_fallback = args
+    import pymupdf as fitz
 
     doc = fitz.open(path)
-    page = doc[pno]
-    H, W = page.rect.height, page.rect.width
-    tables: list[dict] = []
+    plumber = None
+    out = []
     try:
-        tf = page.find_tables()
-        for t in tf.tables:
-            rows = _cells(t.extract())
-            if rows:
-                tables.append({"bbox": [float(v) for v in t.bbox], "rows": rows, "extractor": "pymupdf",
-                               "quality": _table_quality(rows)})
-    except Exception:  # pragma: no cover - defensive
-        pass
-    weak = [t for t in tables if t["quality"] < QUALITY_FALLBACK_THRESHOLD]
-    if allow_fallback and weak:
-        try:
-            import pdfplumber
+        for pno in pnos:
+            page = doc[pno]
+            H, W = page.rect.height, page.rect.width
+            tables: list[dict] = []
+            try:
+                for t in page.find_tables().tables:
+                    rows = _cells(t.extract())
+                    if rows:
+                        tables.append({"bbox": [float(v) for v in t.bbox], "rows": rows, "extractor": "pymupdf",
+                                       "quality": _table_quality(rows)})
+            except Exception:  # pragma: no cover - defensive
+                pass
+            if allow_fallback and any(t["quality"] < QUALITY_FALLBACK_THRESHOLD for t in tables):
+                try:
+                    if plumber is None:
+                        import pdfplumber
 
-            with pdfplumber.open(path) as pdf:
-                pp = pdf.pages[pno]
-                for pt in pp.find_tables():
-                    rows = _cells(pt.extract())
-                    q = _table_quality(rows)
-                    bb = [float(v) for v in pt.bbox]
-                    for t in list(tables):
-                        if _overlap(t["bbox"], bb) > 0.6 and q > t["quality"]:
-                            tables.remove(t)
-                            tables.append({"bbox": bb, "rows": rows, "extractor": "pdfplumber", "quality": q})
-        except Exception:  # pragma: no cover
-            pass
-    tables.sort(key=lambda t: (t["bbox"][1], t["bbox"][0]))
-
-    lines: list[dict] = []
-    d = page.get_text("dict")
-    bi = 0
-    for b in d.get("blocks", []):
-        if b.get("type") != 0:
-            continue
-        bi += 1
-        for ln in b.get("lines", []):
-            spans = [s for s in ln.get("spans", []) if s.get("text", "").strip() != ""]
-            if not spans:
-                continue
-            text = "".join(s["text"] for s in ln["spans"])
-            if not text.strip():
-                continue
-            x0, y0, x1, y1 = ln["bbox"]
-            lines.append({
-                "text": text, "x0": x0, "y0": y0, "x1": x1, "y1": y1, "block": bi,
-                "size": max(s["size"] for s in spans),
-                "bold": any((s["flags"] & 16) or "bold" in s["font"].lower() for s in spans),
-            })
-    lines.sort(key=lambda l: (round(l["y0"], 0), l["x0"]))
-    raw_chars = nospace_len(page.get_text("text"))
-    doc.close()
-    return {"page": pno + 1, "height": H, "width": W, "lines": lines, "tables": tables, "raw_chars": raw_chars}
+                        plumber = pdfplumber.open(path)
+                    for pt in plumber.pages[pno].find_tables():
+                        rows = _cells(pt.extract())
+                        q = _table_quality(rows)
+                        bb = [float(v) for v in pt.bbox]
+                        for t in list(tables):
+                            if _overlap(t["bbox"], bb) > 0.6 and q > t["quality"]:
+                                tables.remove(t)
+                                tables.append({"bbox": bb, "rows": rows, "extractor": "pdfplumber", "quality": q})
+                except Exception:  # pragma: no cover
+                    pass
+            tables.sort(key=lambda t: (t["bbox"][1], t["bbox"][0]))
+            lines: list[dict] = []
+            bi = 0
+            for b in page.get_text("dict").get("blocks", []):
+                if b.get("type") != 0:
+                    continue
+                bi += 1
+                for ln in b.get("lines", []):
+                    spans = [s for s in ln.get("spans", []) if s.get("text", "").strip() != ""]
+                    text = "".join(s["text"] for s in ln.get("spans", []))
+                    if not spans or not text.strip():
+                        continue
+                    x0, y0, x1, y1 = ln["bbox"]
+                    lines.append({"text": text, "x0": x0, "y0": y0, "x1": x1, "y1": y1, "block": bi,
+                                  "size": max(s["size"] for s in spans),
+                                  "bold": any((s["flags"] & 16) or "bold" in s["font"].lower() for s in spans)})
+            lines.sort(key=lambda l: (round(l["y0"], 0), l["x0"]))
+            out.append({"page": pno + 1, "height": H, "width": W, "lines": lines, "tables": tables,
+                        "raw_chars": nospace_len(page.get_text("text"))})
+    finally:
+        doc.close()
+        if plumber is not None:
+            plumber.close()
+    return out
 
 
 def _overlap(a: list[float], b: list[float]) -> float:
@@ -130,22 +131,29 @@ def _overlap(a: list[float], b: list[float]) -> float:
 
 def extract_pages(path: str, workers: int = 1, progress: Callable[[int, int], None] | None = None,
                   allow_fallback: bool = True) -> list[dict]:
+    import multiprocessing
+
     import pymupdf as fitz
 
-    n = fitz.open(path).page_count
-    args = [(path, i, allow_fallback) for i in range(n)]
-    out: list[dict] = []
+    with fitz.open(path) as d:
+        n = d.page_count
     if workers <= 1 or n < 8:
-        for i, a in enumerate(args):
-            out.append(_extract_page(a))
-            if progress and (i % 10 == 0 or i == n - 1):
-                progress(i + 1, n)
-    else:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            for i, r in enumerate(ex.map(_extract_page, args, chunksize=max(1, n // (workers * 8)))):
-                out.append(r)
-                if progress and (i % 10 == 0 or i == n - 1):
-                    progress(i + 1, n)
+        chunks = [list(range(i, min(n, i + 10))) for i in range(0, n, 10)]
+        out: list[dict] = []
+        for c in chunks:
+            out += _extract_chunk((path, c, allow_fallback))
+            if progress:
+                progress(len(out), n)
+        return out
+    size = max(1, -(-n // (workers * 4)))
+    chunks = [list(range(i, min(n, i + size))) for i in range(0, n, size)]
+    out = []
+    # spawn: the API process is multi-threaded, and forking it can deadlock the children
+    with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as ex:
+        for res in ex.map(_extract_chunk, [(path, c, allow_fallback) for c in chunks]):
+            out += res
+            if progress:
+                progress(len(out), n)
     return out
 
 
@@ -267,7 +275,6 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
     acct = {"body": 0, "heading": 0, "caption": 0, "excluded": 0, "table_cells": 0, "table_lines": 0}
 
     cur = front
-    para_block = None
     last_table: Table | None = None
     last_table_page = 0
     carry_caption: dict | None = None  # caption left at a page bottom whose table starts on the next page
@@ -275,15 +282,13 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
     labels_used: Counter = Counter()
 
     def add_text(sec: Section, text: str, new_para: bool, page: int):
-        nonlocal para_block
         text = clean(text)
         if not text:
             return
         acct["body"] += nospace_len(text)
         if new_para or not sec.paragraphs:
             # merge across blocks/pages when the previous paragraph is visibly unfinished
-            if sec.paragraphs and not re.search(r"[.:;!?)\]]\s*$", sec.paragraphs[-1]) and text[:1].islower() \
-                    and para_block is not None:
+            if sec.paragraphs and not re.search(r"[.:;!?)\]]\s*$", sec.paragraphs[-1]) and text[:1].islower():
                 sec.paragraphs[-1] += " " + text
             else:
                 sec.paragraphs.append(text)
