@@ -211,6 +211,15 @@ def _norm_cs(v: Any, mapping: dict) -> str:
     return names.get(s, s) or "nvm"
 
 
+def _meta(r: sqlite3.Row, spec: Any, default: Any) -> Any:
+    """Resolve a mapping entry for bookkeeping columns: a column name, a {"const": ...}, or the default when absent/NULL."""
+    if spec is None:
+        return default
+    if isinstance(spec, dict):
+        return spec.get("const", default)
+    return r[spec] if spec in r.keys() and r[spec] is not None else default
+
+
 def _norm_queue(q: Any) -> str:
     s = str(q or "").strip().lower()
     if s in ("admin", "adm", "0", "asq", "admin_queue"):
@@ -231,8 +240,12 @@ def iter_source_rows(path: str, mapping: dict) -> Iterator[sqlite3.Row]:
     con = _open_ro(path)
     con.row_factory = sqlite3.Row
     try:
-        order = mapping.get("seq") or mapping.get("id")
-        sql = f'SELECT * FROM {_q(mapping["table"])}' + (f' ORDER BY {_q(mapping["test"])}, {_q(order)}' if mapping.get("test") and order and isinstance(order, str) else "")
+        cols = [c for c in (mapping.get("seq"), mapping.get("id")) if isinstance(c, str)]       # constants cannot be ordered by
+        order = cols[0] if cols else None
+        test = mapping.get("test") if isinstance(mapping.get("test"), str) else None
+        sql = f'SELECT * FROM {_q(mapping["table"])}'
+        if order:
+            sql += f' ORDER BY {_q(test)}, {_q(order)}' if test else f' ORDER BY {_q(order)}'
         cur = con.execute(sql)
         while True:
             chunk = cur.fetchmany(20000)
@@ -303,19 +316,18 @@ def import_source(conn: sqlite3.Connection, source_id: int, mi_layout: dict | No
         total += 1
         try:
             d = decode_row(r, mapping, layout)
-            seq = int(r[seq_col]) if seq_col and seq_col in r.keys() and r[seq_col] is not None else total
+            seq = int(_meta(r, seq_col, total))
         except Exception as e:  # noqa: BLE001
             bad += 1
             if len(errors) < 25:
-                errors.append({"row": r[id_col] if id_col and id_col in r.keys() else total, "error": str(e)})
+                errors.append({"row": _meta(r, id_col, total), "error": str(e)})
             continue
         s = sigs.get(d["signature"])
         if s is None:
             s = sigs[d["signature"]] = {"interface": d["interface"], "queue": d["queue"], "cs": d["cs"], "opcode": d["opcode"],
                                         "nsid": d["nsid"], "dwords": d["dwords"], "count": 0}
         s["count"] += 1
-        batch.append((source_id, r[id_col] if id_col and id_col in r.keys() else total,
-                      str(r[test_col]) if test_col and test_col in r.keys() else "", str(r[script_col]) if script_col and script_col in r.keys() else "",
+        batch.append((source_id, _meta(r, id_col, total), str(_meta(r, test_col, "")), str(_meta(r, script_col, "")),
                       seq,
                       d["interface"], d["queue"], d["cs"], d["opcode"], d["nsid"], d["signature"]))
         if len(batch) >= 20000:

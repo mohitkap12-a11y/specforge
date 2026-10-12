@@ -391,6 +391,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/sets/{set_id}/scenarios/ai")
     def ai_generate(set_id: int, body: dict = Body(default={})):
+        lim = body.get("limit")
+        if lim is not None and (not isinstance(lim, int) or isinstance(lim, bool) or lim < 0):
+            raise HTTPException(422, "limit must be a non-negative integer")
         st = settings()
 
         def work(c, prog):

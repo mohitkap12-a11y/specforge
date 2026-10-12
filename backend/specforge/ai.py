@@ -145,8 +145,10 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
     # skip requirements that already have scenarios
     have = {r[0] for r in conn.execute("SELECT DISTINCT si.item_key FROM scenario_item si JOIN scenario s ON s.id=si.scenario_id WHERE s.set_id=?", (set_id,))}
     reqs = [r for r in reqs if r["key"] not in have]
-    if limit:
-        reqs = reqs[:limit]
+    if limit is not None:
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        reqs = reqs[:limit]       # 0 means "none", not "everything"
     existing = {r["predicate_json"] for r in rows(conn, "SELECT predicate_json FROM scenario WHERE set_id=?", (set_id,))}
     stats = {"requirements": len(reqs), "created": 0, "not_testable": 0, "rejected": 0, "failed": 0, "duplicates": 0}
     for n, req in enumerate(reqs):
