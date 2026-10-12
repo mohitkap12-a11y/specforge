@@ -75,8 +75,16 @@ def submit(conn, type_: str, fn: Callable[..., Any], payload: dict | None = None
 def cancel(job_id: int, db_file: str | None = None) -> None:
     from .core.config import db_path
 
+    db = str(db_file or db_path())
+    c = connect(db)
+    try:
+        job = row(c, "SELECT state FROM job WHERE id=?", (job_id,))
+    finally:
+        c.close()
+    if not job or job["state"] not in ("queued", "running"):
+        return          # unknown or finished: a stale event would cancel whichever job later gets this id
     with _plock:
-        _cancel.setdefault((str(db_file or db_path()), job_id), threading.Event()).set()
+        _cancel.setdefault((db, job_id), threading.Event()).set()
 
 
 def _overlay(j: dict | None, conn) -> dict | None:

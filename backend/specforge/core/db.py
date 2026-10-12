@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS coverage_run(
 CREATE TABLE IF NOT EXISTS coverage_result(
   run_id INTEGER NOT NULL REFERENCES coverage_run(id) ON DELETE CASCADE, scenario_id INTEGER NOT NULL,
   state TEXT NOT NULL, match_count INTEGER DEFAULT 0, evidence_json TEXT,
+  sid TEXT, origin TEXT, kind TEXT, title TEXT, observability TEXT, review_state TEXT, predicate_json TEXT,   -- snapshot of the scenario as judged
   PRIMARY KEY(run_id, scenario_id)
 );
 CREATE TABLE IF NOT EXISTS item_result(

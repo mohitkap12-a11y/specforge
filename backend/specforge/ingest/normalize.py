@@ -85,7 +85,7 @@ def parse_hex_value(cell: str) -> int | None:
 def parse_value_range(cell: str) -> tuple[int, int] | None:
     """'01h' -> (1,1); '04h to 0Fh' / '04h-0Fh' / '04h:0Fh' -> (4,15)."""
     c = clean(cell).translate(_DASHES)
-    parts = re.split(r"\s*(?:to|-|:|\.\.)\s*", c, maxsplit=1)
+    parts = re.split(r"\s*(?:to|-|:|\.\.)\s*", c, maxsplit=1, flags=re.I)
     if len(parts) == 2:
         a, b = parse_hex_value(parts[0]), parse_hex_value(parts[1])
         if a is not None and b is not None:
@@ -168,7 +168,10 @@ def split_sentences(text: str) -> list[str]:
         return []
     protected = t
     for i, a in enumerate(_ABBREV):
-        protected = protected.replace(a, a.replace(".", f"\u0001{i}\u0001"))
+        if a == "etc.":     # "etc." often ENDS a sentence: protect it only when the text goes on in lower case
+            protected = re.sub(r"etc\.(?!\s+[A-Z0-9(\"'])", f"etc\u0001{i}\u0001", protected)
+        else:
+            protected = protected.replace(a, a.replace(".", f"\u0001{i}\u0001"))
     # protect section numbers like 5.1.13 and hex like 01h.
     protected = re.sub(r"(\d)\.(\d)", "\\1\u0002\\2", protected)
     parts = re.split(r"(?<=[.!?;])\s+(?=[A-Z0-9(\"'])", protected)

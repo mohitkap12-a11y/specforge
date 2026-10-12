@@ -19,31 +19,18 @@ def build_dataset(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     if not run:
         raise KeyError(f"coverage run {run_id}")
     summary = jloads(run["summary_json"], {})
-    src = row(conn, "SELECT * FROM cmd_source WHERE id=?", (run["source_id"],))
-    sset = row(conn, "SELECT * FROM spec_set WHERE id=?", (run["set_id"],))
-    specs = rows(conn, """SELECT d.family,d.version,d.filename,d.sha256,d.format,r.id AS parse_run,r.parser_version,r.audit_json
-                          FROM spec_set_member m JOIN spec_document d ON d.id=m.document_id
-                          LEFT JOIN parse_run r ON r.document_id=d.id AND r.active=1 WHERE m.set_id=?""", (run["set_id"],))
-    for s in specs:
-        a = jloads(s.pop("audit_json"), {})
-        s["audit_score"], s["errors"], s["warnings"] = a.get("score"), a.get("errors"), a.get("warnings")
+    meta = jloads(run["meta_json"], {})            # captured when the run was made: later edits to the workspace cannot change it
     items = rows(conn, """SELECT item_key AS key,kind,parent_key,label,observability,na_reason,attrs_json,state,covered,total
-                          FROM item_result WHERE run_id=? ORDER BY rowid""", (run_id,))     # the run's own snapshot
+                          FROM item_result WHERE run_id=? ORDER BY rowid""", (run_id,))
     for i in items:
         a = jloads(i.pop("attrs_json"), {})
         i["command"] = a.get("command") or (i["key"] if i["kind"] == "command" else "")
-    scen = rows(conn, """SELECT s.id,s.sid,s.origin,s.kind,s.title,s.observability,s.state,s.predicate_json,
-                                r.state AS result, r.match_count, r.evidence_json
-                         FROM scenario s LEFT JOIN coverage_result r ON r.scenario_id=s.id AND r.run_id=?
-                         WHERE s.set_id=? ORDER BY s.id""", (run_id, run["set_id"]))
-    models = sorted({(jloads(s["provenance_json"], {}) or {}).get("model", "") for s in rows(
-        conn, "SELECT provenance_json FROM scenario WHERE set_id=? AND origin='ai'", (run["set_id"],))} - {""})
-    issues = rows(conn, """SELECT d.family,d.version,p.severity,p.kind,p.node_key,p.page,p.message,p.state FROM parse_issue p
-                           JOIN parse_run r ON r.id=p.run_id AND r.active=1 JOIN spec_document d ON d.id=r.document_id
-                           JOIN spec_set_member m ON m.document_id=d.id AND m.set_id=? WHERE p.severity<>'info'""", (run["set_id"],))
-    header = {"tool_version": __version__, "coverage_run": run_id, "created": run["created"], "spec_set": sset["name"] if sset else "",
-              "command_db": src["path"] if src else "", "command_db_sha256": src["sha256"] if src else "",
-              "commands_imported": src["row_count"] if src else 0, "ai_models": models,
+    scen = rows(conn, """SELECT scenario_id AS id,sid,origin,kind,title,observability,review_state AS state,predicate_json,
+                                state AS result,match_count,evidence_json FROM coverage_result WHERE run_id=? ORDER BY scenario_id""", (run_id,))
+    specs, issues = meta.get("specs", []), meta.get("issues", [])
+    header = {"tool_version": __version__, "coverage_run": run_id, "created": run["created"], "spec_set": meta.get("spec_set", ""),
+              "command_db": meta.get("command_db", ""), "command_db_sha256": meta.get("source_sha256", ""),
+              "commands_imported": meta.get("commands_imported", 0), "ai_models": meta.get("ai_models", []),
               "scenarios_approved": sum(1 for s in scen if s["state"] == "approved"),
               "scenarios_draft": sum(1 for s in scen if s["state"] == "draft")}
     return {"header": header, "summary": summary, "specs": specs, "items": items, "scenarios": scen, "issues": issues}
@@ -134,8 +121,8 @@ def to_xlsx(ds) -> bytes:
     ev = []
     for s in ds["scenarios"]:
         for e in jloads(s["evidence_json"], []) or []:
-            ev.append([s["sid"], e.get("src_row_id"), e.get("test_id"), e.get("script"), e.get("seq")])
-    sheet("Evidence", ["scenario", "db row id", "test", "script", "seq"], ev)
+            ev.append([s["sid"], e.get("src_row_id"), e.get("test_id"), e.get("script"), e.get("seq"), e.get("error")])
+    sheet("Evidence", ["scenario", "db row id", "test", "script", "seq", "error"], ev)
     sheet("Unknown commands", ["interface", "queue", "opcode", "commands"],
           [[u["interface"], u["queue"], f"{u['opcode']:#04x}", u["commands"]] for u in ds["summary"].get("unknown_commands", [])])
     sheet("Specs", ["family", "version", "file", "sha256", "format", "parse run", "parser", "audit score", "errors", "warnings"],

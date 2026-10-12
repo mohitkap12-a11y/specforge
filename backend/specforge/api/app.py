@@ -22,6 +22,13 @@ from ..llm.base import LLMError
 from ..llm.service import LLMService, make_provider
 
 
+def need(body: Any, *keys: str) -> None:
+    """422 (not a 500) when a JSON body is not an object or lacks required fields."""
+    if not isinstance(body, dict) or any(k not in body for k in keys):
+        missing = keys if not isinstance(body, dict) else [k for k in keys if k not in body]
+        raise HTTPException(422, f"required fields: {', '.join(missing)}")
+
+
 def safe_join(root: Path, rel: str) -> Path | None:
     """Resolve rel under root; None unless the result is an existing file INSIDE root (is_relative_to, not a string prefix test)."""
     root = root.resolve()
@@ -172,6 +179,7 @@ def create_app() -> FastAPI:
 
     @app.put("/api/runs/{run_id}/tables/correction")
     def correct_table(run_id: int, body: dict = Body(...)):
+        need(body, 'key', 'header', 'rows')
         r = row(conn(), "SELECT d.family,d.version FROM parse_run r JOIN spec_document d ON d.id=r.document_id WHERE r.id=?", (run_id,))
         if not r:
             raise HTTPException(404)
@@ -252,6 +260,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/sets/{set_id}/references/choose")
     def choose_ref(set_id: int, body: dict = Body(...)):
+        need(body, 'src_key', 'raw', 'chosen_key')
         refs.choose_reference(conn(), set_id, body["src_key"], body["raw"], body["chosen_key"])
         return {"ok": True}
 
@@ -288,6 +297,7 @@ def create_app() -> FastAPI:
 
     @app.put("/api/sets/{set_id}/catalog/override")
     def override(set_id: int, body: dict = Body(...)):
+        need(body, 'key')
         catalog.set_override(conn(), set_id, body["key"], body.get("observability"), body.get("na_reason"))
         return {"ok": True}
 
@@ -335,6 +345,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/scenarios/bulk")
     def bulk(body: dict = Body(...)):
+        need(body, 'ids', 'state')
         ids, new_state = body["ids"], body["state"]
         updated, refused = [], []
         ctx: dict[int, tuple] = {}
@@ -357,6 +368,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/scenarios/validate")
     def validate(body: dict = Body(...)):
+        need(body, 'set_id', 'predicate')
         cmds, fields = scenarios.catalog_context(conn(), body["set_id"])
         return {"errors": scenarios.validate_predicate(body["predicate"], cmds, fields)}
 
@@ -379,6 +391,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/cmddb")
     def add_source(body: dict = Body(...)):
+        need(body, 'path')
         try:
             sid = cmddb.register_source(conn(), body["path"], body.get("mapping"), body.get("name"))
         except Exception as e:  # noqa: BLE001
@@ -427,6 +440,7 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------ coverage + reports
     @app.post("/api/coverage/run")
     def run_cov(body: dict = Body(...)):
+        need(body, 'set_id', 'source_id')
         def work(c, prog):
             rid = coverage.run_coverage(c, body["set_id"], body["source_id"], progress=lambda a, b: prog("matching scenarios", a, b))
             return {"run_id": rid}
@@ -475,10 +489,14 @@ def create_app() -> FastAPI:
 
     @app.get("/api/coverage/{run_id}/evidence")
     def cov_evidence(run_id: int, item: str):
-        out = rows(conn(), """SELECT s.id,s.sid,s.title,s.state,s.observability,r.state AS result,r.match_count,r.evidence_json
-                              FROM scenario_item si JOIN scenario s ON s.id=si.scenario_id
-                              JOIN coverage_run cr ON cr.id=? AND cr.set_id=s.set_id
-                              LEFT JOIN coverage_result r ON r.scenario_id=s.id AND r.run_id=? WHERE si.item_key=?""", (run_id, run_id, item))
+        # scenarios and their links are read from the run's own snapshot, not from the live (editable) tables
+        it = row(conn(), "SELECT detail_json FROM item_result WHERE run_id=? AND item_key=?", (run_id, item))
+        ids = (jloads(it["detail_json"], {}) if it else {}).get("scenario_ids", [])
+        if not ids:
+            return []
+        q = ",".join("?" * len(ids))
+        out = rows(conn(), f"""SELECT scenario_id AS id,sid,title,review_state AS state,observability,state AS result,match_count,evidence_json
+                               FROM coverage_result WHERE run_id=? AND scenario_id IN ({q}) ORDER BY scenario_id""", [run_id, *ids])
         for s in out:
             s["evidence"] = jloads(s.pop("evidence_json"), [])
         return out

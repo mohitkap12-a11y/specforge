@@ -151,6 +151,8 @@ def eval_sequence(conn: sqlite3.Connection, source_id: int, pred: dict, sigs_by:
                     v = get_bits(sig["dwords"], cap["dw"], cap["hi"], cap["lo"])
                     if v is not None:
                         env2[name] = v
+                    else:
+                        env2.pop(name, None)     # an absent dword must not leave an earlier binding behind for later comparisons
                 res = attempt(step_i + 1, idx + 1, env2, chosen + [(idx, r)], used | {idx})
                 if res is not None:
                     return res
@@ -191,13 +193,15 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
     sigs_by = _load_sigs(conn, source_id)
     scen = rows(conn, "SELECT * FROM scenario WHERE set_id=?", (set_id,))
     cur = conn.execute("INSERT INTO coverage_run(set_id,source_id,meta_json) VALUES(?,?,?)",
-                       (set_id, source_id, json.dumps({"source_sha256": src["sha256"], "scenarios": len(scen)})))
+                       (set_id, source_id, json.dumps(_run_meta(conn, set_id, src, scen))))
     run_id = cur.lastrowid
     results: dict[int, dict] = {}
     batch = []
     for n, s in enumerate(scen):
-        if s["state"] != "approved":
-            continue  # drafts / rejected scenarios never count
+        snap = (s["sid"], s["origin"], s["kind"], s["title"], s["observability"], s["state"], s["predicate_json"])
+        if s["state"] != "approved":      # drafts / rejected scenarios never count, but the run still records that they existed
+            batch.append((run_id, s["id"], "not_evaluated", 0, "[]", *snap))
+            continue
         pred = json.loads(s["predicate_json"])
         try:
             count, ev = (eval_single if len(pred["steps"]) == 1 else eval_sequence)(conn, source_id, pred, sigs_by)
@@ -207,10 +211,11 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
         else:
             st = "matched" if count > 0 else "not_matched"
         results[s["id"]] = {"state": st, "count": count}
-        batch.append((run_id, s["id"], st, count, json.dumps(ev)))
+        batch.append((run_id, s["id"], st, count, json.dumps(ev), *snap))
         if progress and n % 200 == 0:
             progress(n, len(scen))
-    conn.executemany("INSERT INTO coverage_result(run_id,scenario_id,state,match_count,evidence_json) VALUES(?,?,?,?,?)", batch)
+    conn.executemany("INSERT INTO coverage_result(run_id,scenario_id,state,match_count,evidence_json,sid,origin,kind,title,observability,review_state,predicate_json)"
+                     " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", batch)
 
     items = rows(conn, "SELECT * FROM catalog_item WHERE set_id=?", (set_id,))
     links: dict[str, list[int]] = defaultdict(list)
@@ -220,6 +225,8 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
     item_res: dict[str, dict] = {}
     for it in items:
         item_res[it["key"]] = _item_state(it, links.get(it["key"], []), scen_state, results)
+        if links.get(it["key"]):          # which scenarios this item was judged by, as of this run
+            item_res[it["key"]].setdefault("detail", {})["scenario_ids"] = sorted(links[it["key"]])
     # aggregate fields from their children
     children: dict[str, list[dict]] = defaultdict(list)
     for it in items:
@@ -239,6 +246,23 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
     conn.execute("UPDATE coverage_run SET summary_json=? WHERE id=?", (json.dumps(summary), run_id))
     conn.commit()
     return run_id  # type: ignore[return-value]
+
+
+def _run_meta(conn: sqlite3.Connection, set_id: int, src: dict, scen: list[dict]) -> dict[str, Any]:
+    """Everything a report needs to describe this run later, captured now (spec versions, audit state, models, inputs)."""
+    specs = rows(conn, """SELECT d.family,d.version,d.filename,d.sha256,d.format,r.id AS parse_run,r.parser_version,r.audit_json
+                          FROM spec_set_member m JOIN spec_document d ON d.id=m.document_id
+                          LEFT JOIN parse_run r ON r.document_id=d.id AND r.active=1 WHERE m.set_id=?""", (set_id,))
+    for s in specs:
+        a = jloads(s.pop("audit_json"), {})
+        s["audit_score"], s["errors"], s["warnings"] = a.get("score"), a.get("errors"), a.get("warnings")
+    issues = rows(conn, """SELECT d.family,d.version,p.severity,p.kind,p.node_key,p.page,p.message,p.state FROM parse_issue p
+                           JOIN parse_run r ON r.id=p.run_id AND r.active=1 JOIN spec_document d ON d.id=r.document_id
+                           JOIN spec_set_member m ON m.document_id=d.id AND m.set_id=? WHERE p.severity<>'info'""", (set_id,))
+    models = sorted({(jloads(s["provenance_json"], {}) or {}).get("model", "") for s in scen if s["origin"] == "ai"} - {""})
+    sset = row(conn, "SELECT name FROM spec_set WHERE id=?", (set_id,))
+    return {"source_sha256": src["sha256"], "scenarios": len(scen), "command_db": src["path"], "commands_imported": src["row_count"],
+            "spec_set": sset["name"] if sset else "", "specs": specs, "issues": issues, "ai_models": models}
 
 
 def _item_state(it: dict, scen_ids: list[int], scen_state: dict[int, str], results: dict[int, dict]) -> dict:
