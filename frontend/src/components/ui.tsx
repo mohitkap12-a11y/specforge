@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import type { LucideIcon } from "lucide-react";
+import { Inbox } from "lucide-react";
 import type { Counts } from "../types";
 
 const STATE_LABEL: Record<string, string> = {
@@ -46,12 +48,42 @@ export function ErrorNote({ error }: { error: unknown }) {
   if (!error) return null;
   return <div className="toast bad" role="alert">{error instanceof Error ? error.message : String(error)}</div>;
 }
-export function Empty({ children }: { children: ReactNode }) {
-  return <div className="card muted">{children}</div>;
+/** Empty state: a short explanation plus (optionally) the next action. */
+export function Empty({ children, icon: Icon = Inbox, title, action }: { children?: ReactNode; icon?: LucideIcon; title?: string; action?: ReactNode }) {
+  return (
+    <div className="empty">
+      <div className="ico"><Icon size={18} /></div>
+      {title && <h3>{title}</h3>}
+      {children && <p>{children}</p>}
+      {action && <div style={{ marginTop: 10 }}>{action}</div>}
+    </div>
+  );
 }
 export function Loading({ q }: { q: { isLoading: boolean; error: unknown } }) {
-  if (q.isLoading) return <div className="muted">Loading…</div>;
+  if (q.isLoading) return <div className="row muted" role="status"><span className="spinner" /> Loading…</div>;
   return <ErrorNote error={q.error} />;
+}
+export function PageHeader({ title, description, actions }: { title: string; description?: ReactNode; actions?: ReactNode }) {
+  return (
+    <header className="page-head">
+      <div><h1>{title}</h1>{description && <p>{description}</p>}</div>
+      {actions && <div className="actions">{actions}</div>}
+    </header>
+  );
+}
+/** Label + control + optional hint, used by forms (Settings, editors). */
+export function Field({ label, hint, children }: { label: string; hint?: ReactNode; children: ReactNode }) {
+  return <label className="field">{label}{children}{hint && <span className="hint">{hint}</span>}</label>;
+}
+export function Switch({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+  return <button type="button" role="switch" aria-checked={checked} aria-label={label} className="switch" onClick={() => onChange(!checked)} />;
+}
+export function Segmented<T extends string>({ value, options, onChange, label }: { value: T; options: { value: T; label: string }[]; onChange: (v: T) => void; label: string }) {
+  return (
+    <div className="segmented" role="group" aria-label={label}>
+      {options.map((o) => <button key={o.value} type="button" className={o.value === value ? "on" : ""} aria-pressed={o.value === value} onClick={() => onChange(o.value)}>{o.label}</button>)}
+    </div>
+  );
 }
 
 export function Pager({ total, offset, limit, onChange }: { total: number; offset: number; limit: number; onChange: (o: number) => void }) {

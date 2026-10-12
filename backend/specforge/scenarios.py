@@ -14,6 +14,7 @@ import json
 import sqlite3
 from typing import Any
 
+from . import eventlog
 from .core.config import TEMPLATE_VERSION
 from .core.db import jloads, rows
 
@@ -239,6 +240,7 @@ def generate_templates(conn: sqlite3.Connection, set_id: int) -> dict[str, int]:
     kinds: dict[str, int] = {}
     for o in out:
         kinds[o[3]] = kinds.get(o[3], 0) + 1
+    eventlog.emit("info", "scenarios", f"Template scenarios: {len(out)} generated ({', '.join(f'{n} {k}' for k, n in sorted(kinds.items()))})", set_id=set_id, kinds=kinds)
     return {"generated": len(out), **kinds}
 
 

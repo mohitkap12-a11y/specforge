@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
-import { Badge, Empty, ErrorNote, Loading, Pager } from "../components/ui";
+import { Link } from "react-router-dom";
+import { ListTree } from "lucide-react";
+import { Badge, Empty, ErrorNote, Loading, Pager, PageHeader } from "../components/ui";
 import { SetPicker, useSelectedSet } from "../components/SetPicker";
 import { useDebounced } from "../hooks";
 import type { CatalogItem } from "../types";
@@ -67,7 +69,7 @@ export default function CatalogPage() {
   const live = open ? (list.data ? list.data.items.find((i) => i.key === open.key) ?? null : open) : null;
   return (
     <>
-      <h1>Catalog</h1>
+      <PageHeader title="Catalog" description="Every command, field, value and reserved bit that can be covered. Mark what cannot be observed from submissions." />
       <div className="row" style={{ marginBottom: 12 }}>
         <SetPicker sel={sel} />
         <select value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Kind"><option value="">All kinds</option>{KINDS.map((k) => <option key={k}>{k}</option>)}</select>
@@ -79,7 +81,7 @@ export default function CatalogPage() {
       </div>
       <ErrorNote error={sel.error ?? list.error} />
       {sel.setId !== null && <Loading q={list} />}
-      {list.data && list.data.total === 0 && <Empty>No catalog items. Build the catalog for this set on the Sets page (or relax the filters).</Empty>}
+      {list.data && list.data.total === 0 && <Empty icon={ListTree} title="No catalog items" action={<Link to="/sets"><button>Go to Sets</button></Link>}>Build the catalog for this set, or relax the filters.</Empty>}
       {list.data && list.data.total > 0 && (
         <div className="card">
           <div className="scroll">

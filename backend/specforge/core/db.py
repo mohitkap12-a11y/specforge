@@ -138,6 +138,13 @@ CREATE TABLE IF NOT EXISTS item_result(
   PRIMARY KEY(run_id, item_key)
 );
 
+CREATE TABLE IF NOT EXISTS event_log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, level TEXT NOT NULL, source TEXT NOT NULL,
+  job_id INTEGER, message TEXT NOT NULL, data_json TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_event_job ON event_log(job_id, id);
+CREATE INDEX IF NOT EXISTS ix_event_source ON event_log(source, id);
+
 CREATE TABLE IF NOT EXISTS job(
   id INTEGER PRIMARY KEY, type TEXT NOT NULL, state TEXT NOT NULL, progress INTEGER DEFAULT 0,
   total INTEGER DEFAULT 0, message TEXT, payload_json TEXT, result_json TEXT, error TEXT,

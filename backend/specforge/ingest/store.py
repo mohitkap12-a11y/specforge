@@ -5,9 +5,11 @@ import hashlib
 import json
 import shutil
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .. import eventlog
 from ..core.config import PARSER_VERSION, workspace_dir
 from ..core.db import jloads, row, rows
 from ..core.hashing import sha256_file, sha256_text, stable_hash
@@ -94,6 +96,9 @@ def run_parse(conn: sqlite3.Connection, document_id: int, settings: dict | None 
                        (document_id, PARSER_VERSION, stable_hash(cfg)))
     run_id = cur.lastrowid
     conn.commit()
+    t0 = time.monotonic()
+    eventlog.emit("info", "parser", f"Parsing {doc['family']} {doc['version']} ({doc['format'].upper()}, {doc['filename']}) as run #{run_id}",
+                  run_id=run_id, document_id=document_id, parser_version=PARSER_VERSION, config=cfg)
     try:
         w = workers if workers is not None else settings.get("parser", {}).get("workers", 0)
         w = w or max(1, (os.cpu_count() or 2) - 1)
@@ -103,8 +108,18 @@ def run_parse(conn: sqlite3.Connection, document_id: int, settings: dict | None 
             spec = parse_docx(doc["path"], doc["family"], doc["version"],
                               progress=(lambda s, a, b: progress(s, a, b)) if progress else None)
         spec.family, spec.version = doc["family"], doc["version"]
+        eventlog.emit("info", "parser", f"Extracted {spec.pages} pages: {len(spec.sections) - 1} sections, {len(spec.tables)} tables, {len(spec.requirements)} normative statements",
+                      run_id=run_id, workers=w)
         apply_corrections(conn, spec)
         issues, summary = audit_spec(spec)
+        by_kind: dict[str, int] = {}
+        for i in issues:
+            by_kind[f"{i['severity']}:{i['kind']}"] = by_kind.get(f"{i['severity']}:{i['kind']}", 0) + 1
+        errors = sum(1 for i in issues if i["severity"] == "error")
+        eventlog.emit("error" if errors else "info", "parser", f"Audit: {errors} error(s), {sum(1 for i in issues if i['severity'] == 'warning')} warning(s), "
+                      f"{'coverage-ready' if summary.get('coverage_ready') else 'NOT coverage-ready'}", run_id=run_id, issues_by_kind=by_kind, summary=summary)
+        for i in [x for x in issues if x["severity"] == "error"][:10]:
+            eventlog.emit("error", "parser", f"{i['kind']}: {i['message']}", run_id=run_id, node=i.get("node_key"), page=i.get("page"))
         _store_ir(conn, run_id, spec, issues)
         stats = {"pages": spec.pages, "sections": len(spec.sections) - 1, "tables": len(spec.tables),
                  "requirements": len(spec.requirements), "references": len(spec.references),
@@ -116,9 +131,11 @@ def run_parse(conn: sqlite3.Connection, document_id: int, settings: dict | None 
         conn.commit()
         if make_active:
             activate_run(conn, run_id)
+        eventlog.emit("info", "parser", f"Run #{run_id} finished in {time.monotonic() - t0:.1f}s{' and set active' if make_active else ''}", run_id=run_id, stats=stats)
     except Exception as e:  # noqa: BLE001
         conn.execute("UPDATE parse_run SET status='failed', error=? WHERE id=?", (repr(e), run_id))
         conn.commit()
+        eventlog.emit("error", "parser", f"Run #{run_id} failed: {e!r}", run_id=run_id)
         raise
     return run_id  # type: ignore[return-value]
 

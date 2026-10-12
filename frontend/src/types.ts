@@ -10,7 +10,7 @@ export interface SpecDoc {
 }
 export interface Job {
   id: number; type: string; state: "queued" | "running" | "done" | "failed" | "cancelled";
-  progress: number; total: number; message: string | null; error: string | null; result: Record<string, any> | null;
+  progress: number; total: number; message: string | null; error: string | null; result: Record<string, any> | null; created?: string;
 }
 export interface TreeNode { key: string; number: string | null; title: string; parent_key: string | null; page_from: number | null; page_to: number | null }
 export interface SectionData {
@@ -20,7 +20,7 @@ export interface SectionData {
   references: { raw: string; kind: string; target_family: string | null; target_label: string | null }[];
 }
 export interface Issue { id: number; severity: string; kind: string; node_key: string | null; page: number | null; message: string; state: string; note: string | null }
-export interface SpecSet { id: number; name: string; members: any[]; catalog_items: number; scenarios: number }
+export interface SpecSet { id: number; name: string; members: any[]; catalog_items: number; scenarios: number; scenarios_approved: number; scenarios_draft: number }
 export interface Scenario {
   id: number; sid: string; origin: string; state: "draft" | "approved" | "rejected"; title: string; description: string | null;
   observability: string; predicate: any; provenance: Record<string, any>; items: string[];
@@ -59,3 +59,6 @@ export interface DecodedCommand {
   id: number; src_row_id: number | null; test_id: string | null; seq: number | null; interface: string; queue: string; cs: string | null;
   opcode: number; nsid: number | null; dwords: Record<string, number>;
 }
+
+export type LogLevel = "debug" | "info" | "warn" | "error";
+export interface LogEvent { id: number; ts: string; level: LogLevel; source: string; job_id: number | null; message: string; data: Record<string, any> }

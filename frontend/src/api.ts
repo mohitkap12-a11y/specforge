@@ -1,4 +1,4 @@
-import type { CatalogItem, CmdSource, DecodedCommand, RefResult, CovItem, CovRun, CovSummary, Evidence, Issue, Job, Scenario, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { LogEvent, CatalogItem, CmdSource, DecodedCommand, RefResult, CovItem, CovRun, CovSummary, Evidence, Issue, Job, Scenario, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -88,8 +88,14 @@ export const api = {
   covDiff: (a: number, b: number) => req<{ gained: string[]; lost: string[]; summary: Record<string, number> }>("GET", `/api/coverage/${a}/diff/${b}`),
   exportUrl: (id: number, format: string, which = "gaps") => `/api/coverage/${id}/export${qs({ format, which })}`,
 
+  logs: (f: { after_id?: number; before_id?: number; limit?: number; level?: string; source?: string; job_id?: number; q?: string }) =>
+    req<{ items: LogEvent[]; newest_id: number; has_older: boolean; sources: string[] }>("GET", `/api/logs${qs(f)}`),
+  clearLogs: () => req<{ deleted: number }>("DELETE", "/api/logs"),
+  activeJobs: () => req<Job[]>("GET", "/api/jobs?state=active"),
   jobs: () => req<Job[]>("GET", "/api/jobs"),
   job: (id: number) => req<Job>("GET", `/api/jobs/${id}`),
   cancelJob: (id: number) => req("POST", `/api/jobs/${id}/cancel`),
 };
 export const fileUrl = (docId: number) => `/api/documents/${docId}/file`;
+
+export const logStreamUrl = (f: { after_id?: number; level?: string; source?: string; job_id?: number }) => `/api/logs/stream${qs(f)}`;
