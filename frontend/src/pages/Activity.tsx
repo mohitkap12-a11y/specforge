@@ -6,7 +6,7 @@ import { api, logStreamUrl } from "../api";
 import { Badge, Empty, ErrorNote, Loading, PageHeader, Segmented } from "../components/ui";
 import { useToast } from "../components/Toasts";
 import { useDebounced } from "../hooks";
-import { trimRows } from "../util";
+import { bufferPaused, trimRows } from "../util";
 import type { Job, LogEvent, LogLevel } from "../types";
 
 const MAX_ROWS = 4000;       // kept while following the live tail
@@ -94,6 +94,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
   const [stick, setStick] = useState(true);
   const box = useRef<HTMLDivElement>(null);
   const pendingRef = useRef<LogEvent[]>([]);
+  const gapRef = useRef(false);                  // the pause buffer overflowed: events were dropped, so resuming reloads instead of appending
   const stickRef = useRef(true);                  // mirrors `stick` so the live-append callback can read it without re-subscribing
   const liveRef = useRef(live);
   liveRef.current = live;
@@ -118,7 +119,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
     let es: EventSource | null = null;
     let cancelled = false;
     view.current += 1; setOlderBusy(false);
-    setLoading(true); setError(null); setEvents([]); pendingRef.current = []; setPending(0); setOpenIds(new Set()); setConnected(false);
+    setLoading(true); setError(null); setEvents([]); pendingRef.current = []; gapRef.current = false; setPending(0); setOpenIds(new Set()); setConnected(false);
     const token = view.current;                    // clearing the log bumps this: a response that started before it must not repopulate the list
     api.logs({ limit: 400, level, source: sources || undefined, job_id: job, q: q || undefined }).then((r) => {
       if (cancelled) return;
@@ -131,7 +132,12 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
         const batch = (JSON.parse(m.data) as LogEvent[]).filter(matchesQuery);
         if (!batch.length) return;
         if (liveRef.current) append(batch);
-        else { pendingRef.current.push(...batch); setPending(pendingRef.current.length); }
+        else {
+          const b = bufferPaused(pendingRef.current, batch, HARD_MAX_ROWS);
+          pendingRef.current = b.buf;
+          if (b.overflowed) gapRef.current = true;
+          setPending(pendingRef.current.length);
+        }
       };
     }).catch((e) => { if (!cancelled) { setError(e); setLoading(false); } });
     return () => { cancelled = true; es?.close(); };
@@ -140,7 +146,9 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
 
   useEffect(() => { if (events.length >= MAX_ROWS) setHasOlder(true); }, [events.length]);   // rows trimmed from the top still exist in the database
   useEffect(() => {   // resuming flushes what arrived while paused
-    if (live && pendingRef.current.length) { append(pendingRef.current); pendingRef.current = []; setPending(0); }
+    if (!live || !pendingRef.current.length) return;
+    if (gapRef.current) { gapRef.current = false; pendingRef.current = []; setPending(0); setReload((n) => n + 1); return; }   // events were dropped while paused: refetch
+    append(pendingRef.current); pendingRef.current = []; setPending(0);
   }, [live, append]);
 
   useLayoutEffect(() => { if (stick && box.current) box.current.scrollTop = box.current.scrollHeight; }, [events, stick, loading]);
@@ -149,7 +157,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
 
   const loadOlder = async () => {
     const first = events[0];
-    if (!first || olderBusy) return;                 // one request at a time: a double click must not prepend the same page twice
+    if (!first || olderBusy || events.length >= HARD_MAX_ROWS) return;                 // one request at a time: a double click must not prepend the same page twice
     const token = view.current;
     const el = box.current;
     const before = el?.scrollHeight ?? 0;
@@ -185,7 +193,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
     try {
       const r = await api.clearLogs();
       view.current += 1; setOlderBusy(false);          // discard any in-flight "older" page
-      pendingRef.current = []; setPending(0);          // events buffered while paused were deleted too: resuming must not bring them back
+      pendingRef.current = []; gapRef.current = false; setPending(0);          // events buffered while paused were deleted too: resuming must not bring them back
       setEvents([]); setHasOlder(false); setOpenIds(new Set());
       toast.push({ title: `Cleared ${r.deleted} events`, tone: "ok" });
     } catch (e) { setError(e); }
@@ -216,7 +224,8 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
       <ErrorNote error={error} />
       <div className="logbox" ref={box} onScroll={onScroll} role="log" aria-live="off" aria-label="Activity log">
         {loading && <div className="row muted" style={{ padding: 16 }}><span className="spinner" /> Loading…</div>}
-        {!loading && hasOlder && <div style={{ padding: 10, textAlign: "center" }}><button className="sm" onClick={loadOlder} disabled={olderBusy}>{olderBusy && <span className="spinner" />}Load older events</button></div>}
+        {!loading && hasOlder && events.length >= HARD_MAX_ROWS && <div className="muted small" style={{ padding: 10, textAlign: "center" }}>Showing {events.length.toLocaleString()} events, the most this view holds. Narrow the filters or export to go further back.</div>}
+        {!loading && hasOlder && events.length < HARD_MAX_ROWS && <div style={{ padding: 10, textAlign: "center" }}><button className="sm" onClick={loadOlder} disabled={olderBusy}>{olderBusy && <span className="spinner" />}Load older events</button></div>}
         {!loading && events.length === 0 && <div style={{ padding: 28 }}><Empty title="No events match" icon={Layers}>Events appear here as soon as something runs: parsing a spec, building a catalog, an AI call. Try another view or a lower level.</Empty></div>}
         {events.map((e) => <Row key={e.id} e={e} open={openIds.has(e.id)} onToggle={toggle} onJob={onJob} />)}
         {!stick && events.length > 0 && (

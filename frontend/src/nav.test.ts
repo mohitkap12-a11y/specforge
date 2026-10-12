@@ -26,3 +26,10 @@ describe("trimRows", () => {
   });
   it("leaves short lists alone", () => expect(trimRows([1, 2], true, 4, 8)).toEqual([1, 2]));
 });
+
+import { bufferPaused } from "./util";
+
+describe("bufferPaused", () => {
+  it("accumulates under the cap", () => expect(bufferPaused([1, 2], [3], 5)).toEqual({ buf: [1, 2, 3], overflowed: false }));
+  it("keeps the newest events and reports the overflow", () => expect(bufferPaused([1, 2, 3], [4, 5], 4)).toEqual({ buf: [2, 3, 4, 5], overflowed: true }));
+});

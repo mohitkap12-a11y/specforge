@@ -21,3 +21,9 @@ export function trimRows<T>(rows: T[], following: boolean, soft: number, hard: n
   const max = following ? soft : hard;
   return rows.length > max ? rows.slice(rows.length - max) : rows;
 }
+
+/** Append to the buffer that collects events while the log is paused, keeping at most `max` (newest). `overflowed` means events were dropped. */
+export function bufferPaused<T>(buf: T[], batch: T[], max: number): { buf: T[]; overflowed: boolean } {
+  const all = [...buf, ...batch];
+  return all.length > max ? { buf: all.slice(all.length - max), overflowed: true } : { buf: all, overflowed: false };
+}
