@@ -51,7 +51,7 @@ function Drawer({ s, setId, onClose }: { s: Scenario; setId: number; onClose: ()
       <ErrorNote error={save.error} />
       {editable && (
         <div className="row" style={{ margin: "10px 0" }}>
-          <button disabled={!dirty || !!parseErr || save.isPending} onClick={() => save.mutate(body())}>Save{s.state === "approved" && dirty ? " (resets to draft)" : ""}</button>
+          <button disabled={!dirty || !!parseErr || save.isPending} onClick={() => save.mutate(body())}>Save{s.state === "approved" && JSON.stringify(parsed) !== JSON.stringify(s.predicate) ? " (resets to draft)" : ""}</button>
           <button className="primary" disabled={s.state === "approved" && !dirty || !!parseErr || save.isPending} onClick={() => save.mutate({ ...body(), state: "approved" })}>Approve</button>
           <button className="danger" disabled={s.state === "rejected" || save.isPending} onClick={() => save.mutate({ state: "rejected" })}>Reject</button>
         </div>

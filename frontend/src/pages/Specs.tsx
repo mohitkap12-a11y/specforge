@@ -28,10 +28,10 @@ function RunRow({ doc, run, prev }: { doc: SpecDoc; run: ParseRun; prev?: ParseR
           {run === doc.runs[0] && <button disabled={reparse.isPending} onClick={() => reparse.mutate()}>Reparse</button>}
         </td>
       </tr>
-      {(run.error || act.error || cmp.error || diff) && (
+      {(run.error || act.error || cmp.error || reparse.error || diff) && (
         <tr><td colSpan={5}>
           {run.error && <div className="toast bad">{run.error}</div>}
-          <ErrorNote error={act.error ?? cmp.error} />
+          <ErrorNote error={act.error ?? cmp.error ?? reparse.error} />
           {diff && <pre>{JSON.stringify(diff.summary ?? diff, null, 1)}</pre>}
         </td></tr>
       )}
