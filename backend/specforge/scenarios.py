@@ -113,6 +113,9 @@ def validate_predicate(pred: dict, commands: dict[str, dict] | None = None, fiel
             if not bitrange(q, f):
                 continue
             hi, lo = f["hi"], f["lo"]
+            if st.get("interface") == "pcie" and (f.get("dw") in range(4, 10) or (f.get("dw") == 0 and hi >= 16)):
+                errs.append(f"{q}: {f.get('dw')}[{hi}:{lo}] (CID, MPTR, data pointers) is not preserved when commands are de-duplicated and cannot be matched")
+                continue
             op = f.get("op", "eq")
             if not _in(op, OPS):
                 errs.append(f"{q}.op {op!r} not in {sorted(OPS)}")

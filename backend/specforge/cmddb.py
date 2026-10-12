@@ -162,10 +162,12 @@ def suggest_mapping(path: str) -> dict[str, Any]:
                 m[k] = low[n]
                 break
     cdw = {str(i): low[f"cdw{i}"] for i in range(16) if f"cdw{i}" in low}
-    if len(cdw) >= 11:
+    if len(cdw) >= 11 and "0" in cdw:
         m["cdw"] = cdw
     warnings = []
-    if "sqe" not in m and "cdw" not in m and "mi_msg" not in m:
+    if cdw and "0" not in cdw:
+        warnings.append("CDW columns found but cdw0 (opcode) is missing; map cdw0 or provide SQE bytes.")
+    elif "sqe" not in m and "cdw" not in m and "mi_msg" not in m:
         warnings.append("No SQE blob, CDW columns or MI message column recognised; set the mapping manually.")
     if "interface" not in m:
         m["interface"] = {"const": "mi" if "mi_msg" in m and "sqe" not in m and "cdw" not in m else "pcie"}

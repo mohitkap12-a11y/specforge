@@ -163,12 +163,16 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
             cmd = None
             if name is not None:
                 cands = by_name.get(_cmd_norm(name), [])
-                same = [c for c in cands if c["ir"] is ir] or cands
-                if len(same) == 1:
-                    cmd = same[0]
-                elif len(same) > 1:
-                    issues.append({"severity": "warning", "kind": "ambiguous_field_table", "key": t["key"],
-                                   "message": f"'{t['caption']}' matches {len(same)} commands: {[c['key'] for c in same]}"})
+                same = [c for c in cands if c["ir"] is ir]
+                if not same:    # defined in another spec: only when it is unambiguous, never across revisions of one family
+                    same = [c for c in cands if c["ir"]["family"] != ir["family"]]
+                    same = same if len(same) == 1 else []
+                if len(same) > 1:
+                    # one opcode-table row can stand for a whole opcode range (e.g. 11h to 14h): every command gets the table
+                    for other in same:
+                        other["fields"].append({"table": t, "dw": dw, "ir": ir})
+                    continue
+                if same:
                     cmd = same[0]
             if cmd is None:
                 # section ancestry fallback
@@ -203,14 +207,16 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
 
     def value_rows(t: dict) -> list[tuple[tuple[int, int], dict]]:
         out = []
+        desc_i = find_col(t["header"], "description")        # header text is matched case-insensitively
+        if desc_i is None:
+            desc_i = 2 if len(t["header"]) > 2 and find_col(t["header"], "o/m") is not None else 1
         for r in t["rows"]:
             if not r:
                 continue
             rg = parse_value_range(r[0])
             if rg is None:
                 continue
-            out.append((rg, {"desc": clean(r[2] if len(r) > 2 and "O/M" in " ".join(t["header"]) else r[1] if len(r) > 1 else ""),
-                             "row": r}))
+            out.append((rg, {"desc": clean(r[desc_i]) if desc_i < len(r) else "", "row": r}))
         return out
 
     # ---- commands, fields, values

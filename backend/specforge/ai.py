@@ -152,6 +152,9 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
     for n, req in enumerate(reqs):
         req["attrs"] = jloads(req.pop("attrs_json"), {})
         ctx = build_context(conn, set_id, req)
+        # validate against what the model was shown: the requirement's own command, not the whole set
+        scoped_cmds = {k: v for k, v in cmds.items() if k == ctx["command"]}
+        scoped_fields = {k: v for k, v in fields.items() if k == ctx["command"]}
         user = ("REQUIREMENT:\n" + ctx["requirement"] + "\n\nCATALOG (the only commands/fields you may use):\n" +
                 json.dumps(ctx["catalog"], indent=1)[:12000] + "\n\nCONTEXT:\n" + ctx["context_text"][:6000])
         msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
@@ -172,8 +175,8 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
             if not sc.quotes or not all(_grounded(qt, ctx["context_text"]) for qt in sc.quotes):
                 errs.append("ungrounded quote(s)")
             try:
-                pred = to_predicate(sc, cmds)
-                errs += validate_predicate(pred, cmds, fields)
+                pred = to_predicate(sc, scoped_cmds)
+                errs += validate_predicate(pred, scoped_cmds, scoped_fields)
             except ValueError as e:
                 pred, errs = None, errs + [str(e)]
             if errs:
@@ -183,10 +186,13 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
             pj = json.dumps(pred)
             if pj in existing:
                 stats["duplicates"] += 1
-                dup = conn.execute("SELECT id FROM scenario WHERE set_id=? AND predicate_json=? ORDER BY id LIMIT 1", (set_id, pj)).fetchone()
-                if dup:   # the scenario already exists: this requirement must still be linked to it to count as covered by it
+                dup = conn.execute("SELECT id,state FROM scenario WHERE set_id=? AND predicate_json=? ORDER BY id LIMIT 1", (set_id, pj)).fetchone()
+                if dup and dup["state"] != "approved":   # an unreviewed draft: this requirement joins it and is reviewed with it
                     conn.execute("INSERT OR IGNORE INTO scenario_item(scenario_id,item_key) VALUES(?,?)", (dup[0], req["key"]))
-                continue
+                    continue
+                # an APPROVED scenario has the same predicate: the requirement -> scenario mapping is still an AI interpretation,
+                # so it gets its own draft and keeps the review gate instead of being linked to the approved scenario
+                stats["duplicates"] -= 1
             existing.add(pj)
             sid = f"AI:{req['key']}#{created + 1}"
             cur = conn.execute("INSERT OR IGNORE INTO scenario(set_id,sid,origin,kind,title,description,observability,predicate_json,state,provenance_json)"

@@ -121,7 +121,8 @@ CREATE INDEX IF NOT EXISTS ix_dc_src_test ON decoded_command(source_id, test_id,
 CREATE INDEX IF NOT EXISTS ix_dc_sig ON decoded_command(source_id, signature);
 
 CREATE TABLE IF NOT EXISTS coverage_run(
-  id INTEGER PRIMARY KEY, set_id INTEGER NOT NULL, source_id INTEGER NOT NULL, summary_json TEXT,
+  id INTEGER PRIMARY KEY, set_id INTEGER NOT NULL REFERENCES spec_set(id) ON DELETE CASCADE,
+  source_id INTEGER NOT NULL REFERENCES cmd_source(id) ON DELETE CASCADE, summary_json TEXT,
   meta_json TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS coverage_result(

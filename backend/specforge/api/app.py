@@ -201,10 +201,19 @@ def create_app() -> FastAPI:
 
     @app.post("/api/sets")
     def create_set(body: dict = Body(...)):
-        cur = conn().execute("INSERT INTO spec_set(name) VALUES(?)", (body["name"],))
-        for d in body.get("document_ids", []):
-            conn().execute("INSERT OR IGNORE INTO spec_set_member(set_id,document_id) VALUES(?,?)", (cur.lastrowid, d))
-        conn().commit()
+        ids = body.get("document_ids", [])
+        name = body.get("name")
+        if not isinstance(ids, list) or not isinstance(name, str) or not name.strip():
+            raise HTTPException(422, "name (string) and document_ids (list) are required")
+        c = conn()
+        try:   # all or nothing: never leave a half-created set or an open transaction on the shared connection
+            cur = c.execute("INSERT INTO spec_set(name) VALUES(?)", (name,))
+            for d in ids:
+                c.execute("INSERT OR IGNORE INTO spec_set_member(set_id,document_id) VALUES(?,?)", (cur.lastrowid, d))
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise HTTPException(409, "could not create the set (duplicate name or unknown document id)")
         return {"id": cur.lastrowid}
 
     @app.put("/api/sets/{set_id}/members")
@@ -225,7 +234,8 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/sets/{set_id}")
     def delete_set(set_id: int):
-        conn().execute("DELETE FROM ref_choice WHERE set_id=?", (set_id,))        # also covers databases created before the FKs existed
+        conn().execute("DELETE FROM coverage_run WHERE set_id=?", (set_id,))      # explicit deletes also cover databases created before the FKs existed
+        conn().execute("DELETE FROM ref_choice WHERE set_id=?", (set_id,))
         conn().execute("DELETE FROM item_override WHERE set_id=?", (set_id,))
         conn().execute("DELETE FROM spec_set WHERE id=?", (set_id,))
         conn().commit()
@@ -406,7 +416,12 @@ def create_app() -> FastAPI:
                 args.append(val)
         out = rows(conn(), sql + " ORDER BY d.id LIMIT ? OFFSET ?", [*args, min(limit, 1000), offset])
         for r in out:
-            r["dwords"] = jloads(r.pop("dwords_json"))
+            dw = jloads(r.pop("dwords_json"))
+            if r["interface"] == "pcie":   # commands are de-duplicated on a signature that ignores CID and pointers: don't show one row's values for another
+                dw = {k: v for k, v in dw.items() if k not in ("4", "5", "6", "7", "8", "9")}
+                if "0" in dw:
+                    dw["0"] &= 0xFFFF
+            r["dwords"] = dw
         return out
 
     # ------------------------------------------------------------------ coverage + reports
