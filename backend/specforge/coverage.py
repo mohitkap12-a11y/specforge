@@ -311,7 +311,7 @@ def _aggregate(kids: list[dict]) -> dict:
     return {"state": st, "covered": cov, "total": total, "detail": detail}
 
 
-DIRECT_KINDS = ("command", "value", "boundary", "reserved", "mi_tunnel", "workflow", "requirement")
+DIRECT_KINDS = ("command", "requirement")      # what cross-command scenarios are judged against; fields / values only provide the vocabulary
 
 
 def _counts(states: list[str]) -> dict[str, Any]:

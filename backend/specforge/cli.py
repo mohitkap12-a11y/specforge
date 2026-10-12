@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import catalog, cmddb, coverage, refs, reports, scenarios
+from . import catalog, cmddb, coverage, refs, reports
 from .core import config
 from .core.db import connect, row, rows
 from .ingest import store
@@ -66,7 +66,6 @@ def cmd_catalog(a):
     conn = _conn()
     res = catalog.build_catalog(conn, a.set_id)
     print(f"catalog: {res['items']} items {res['kinds']}")
-    print("templates:", scenarios.generate_templates(conn, a.set_id))
     print("references:", refs.summarize(refs.resolve_references(conn, a.set_id)))
 
 
@@ -108,7 +107,7 @@ def main(argv=None):
     s.add_argument("--workers", type=int, default=None); s.add_argument("--set", help="add to (and create) this spec set"); s.set_defaults(fn=cmd_ingest)
     s = sub.add_parser("reparse", help="parse a registered document again"); s.add_argument("document_id", type=int); s.add_argument("--activate", action="store_true")
     s.add_argument("--previous", type=int, help="run id to diff against"); s.add_argument("--workers", type=int, default=None); s.set_defaults(fn=cmd_reparse)
-    s = sub.add_parser("catalog", help="build catalog + template scenarios for a spec set"); s.add_argument("set_id", type=int); s.set_defaults(fn=cmd_catalog)
+    s = sub.add_parser("catalog", help="build the catalog for a spec set"); s.add_argument("set_id", type=int); s.set_defaults(fn=cmd_catalog)
     s = sub.add_parser("coverage", help="import a command DB and run coverage"); s.add_argument("set_id", type=int); s.add_argument("db")
     s.add_argument("--out", help="directory for the report"); s.add_argument("--format", default="xlsx", choices=sorted(reports.EXPORTS)); s.set_defaults(fn=cmd_coverage)
     s = sub.add_parser("models", help="list models from Ollama and OpenCode"); s.set_defaults(fn=cmd_models)

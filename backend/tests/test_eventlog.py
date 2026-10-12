@@ -169,10 +169,10 @@ def test_parser_catalog_import_and_coverage_log_their_steps(conn, parsed_set, de
     for e in events(conn):
         by_source.setdefault(e["source"], []).append(e["message"])
     assert any(m.startswith("Audit: 0 error(s)") for m in by_source["parser"]) and any("finished in" in m for m in by_source["parser"])
-    assert any(m.startswith("Catalog built: 229 items") for m in by_source["catalog"])
-    assert any(m.startswith("Template scenarios: 186 generated") for m in by_source["scenarios"])
+    assert any(m.startswith("Catalog built: 195 items") for m in by_source["catalog"])
+    assert any(m.startswith("Template scenarios: 152 generated") for m in by_source["scenarios"])
     assert any(m.startswith("Import done:") for m in by_source["import"])
-    assert any(m.startswith("Coverage run #1 done: 19.29% covered") for m in by_source["coverage"])
+    assert any(m.startswith("Coverage run #1 done: 30.0% covered") for m in by_source["coverage"])
 
 
 # ---------------------------------------------------------------- API
@@ -389,7 +389,7 @@ def test_sets_report_approved_and_draft_scenario_counts(client):
 
 
 @pytest.mark.parametrize("bad", [1, "cmd:admin:06", {"a": 1}, [1, 2], ["ok", None]])
-def test_ai_generation_validates_item_keys_before_submitting(client, bad):
-    r = client.post("/api/sets/1/scenarios/ai", json={"item_keys": bad})
-    assert r.status_code == 422 and "item_keys" in r.text
+def test_cross_generation_validates_the_selection_before_submitting(client, bad):
+    r = client.post("/api/sets/1/scenarios/cross", json={"section_keys": bad})
+    assert r.status_code == 422 and "section_keys" in r.text
     assert client.get("/api/jobs").json() == []                     # nothing was queued

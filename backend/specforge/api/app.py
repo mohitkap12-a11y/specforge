@@ -13,8 +13,8 @@ from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import __version__, catalog, cmddb, coverage, eventlog, jobs, refs, reports, scenarios
-from ..ai import generate_ai_scenarios
+from .. import __version__, catalog, cmddb, coverage, crossgen, eventlog, jobs, refs, reports, scenarios
+from ..crossgen import generate_cross_scenarios
 from ..core import config
 from ..core.db import get_conn, jloads, row, rows
 from ..ingest import store
@@ -338,10 +338,8 @@ def create_app() -> FastAPI:
     @app.post("/api/sets/{set_id}/catalog/build")
     def build_cat(set_id: int):
         def work(c, prog):
-            prog("building catalog", 0, 2)
+            prog("building catalog", 0, 1)
             res = catalog.build_catalog(c, set_id)
-            prog("generating template scenarios", 1, 2)
-            res["templates"] = scenarios.generate_templates(c, set_id)
             return {**res, "issues": res["issues"][:500]}
         audit(f"Catalog build requested for set #{set_id}", set_id=set_id)
         return {"job": jobs.submit(conn(), "catalog", work, {"set_id": set_id}, DB)}
@@ -495,21 +493,50 @@ def create_app() -> FastAPI:
         cmds, fields = scenarios.catalog_context(conn(), body["set_id"])
         return {"errors": scenarios.validate_predicate(body["predicate"], cmds, fields)}
 
-    @app.post("/api/sets/{set_id}/scenarios/ai")
-    def ai_generate(set_id: int, body: dict = Body(default={})):
-        lim = body.get("limit")
-        if lim is not None and (not isinstance(lim, int) or isinstance(lim, bool) or lim < 0):
-            raise HTTPException(422, "limit must be a non-negative integer")
-        keys = body.get("item_keys")
-        if keys is not None and not (isinstance(keys, list) and all(isinstance(k, str) for k in keys)):
-            raise HTTPException(422, "item_keys must be a list of catalog item keys (strings)")
+    def _selection(body: dict) -> tuple[list[str], list[str]]:
+        out = []
+        for name in ("section_keys", "command_keys"):
+            v = body.get(name, [])
+            if not (isinstance(v, list) and all(isinstance(k, str) for k in v)):
+                raise HTTPException(422, f"{name} must be a list of strings")
+            out.append(v)
+        if not (out[0] or out[1]):
+            raise HTTPException(422, "select at least one command or section")
+        return out[0], out[1]
+
+    @app.get("/api/sets/{set_id}/sections")
+    def sections(set_id: int, q: str | None = None, limit: int = 400):
+        try:
+            return crossgen.list_sections(conn(), set_id, q, min(max(limit, 1), 2000))
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+
+    @app.post("/api/sets/{set_id}/scenarios/cross/plan")
+    def cross_plan(set_id: int, body: dict = Body(...)):
+        secs, cmds = _selection(body)
+        try:
+            return {"units": crossgen.plan(conn(), set_id, secs, cmds)}
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/sets/{set_id}/scenarios/cross")
+    def cross_generate(set_id: int, body: dict = Body(...)):
+        secs, cmds = _selection(body)
+        focus, mx = body.get("focus", ""), body.get("max_per_section", 6)
+        if not isinstance(focus, str):
+            raise HTTPException(422, "focus must be a string")
+        if not isinstance(mx, int) or isinstance(mx, bool) or not 1 <= mx <= 20:
+            raise HTTPException(422, "max_per_section must be an integer from 1 to 20")
+        try:
+            crossgen.build_units(conn(), set_id, secs, cmds)       # reject a bad selection now, not inside the job
+        except ValueError as e:
+            raise HTTPException(422, str(e))
         st = settings()
 
         def work(c, prog):
-            svc = LLMService(c, st)
-            return generate_ai_scenarios(c, set_id, svc, body.get("item_keys"), body.get("limit"), progress=lambda a, b: prog("AI scenarios", a, b))
-        audit(f"AI scenario generation requested for set #{set_id}", set_id=set_id, limit=lim, item_keys=len(keys or []) or None)
-        return {"job": jobs.submit(conn(), "ai-scenarios", work, {"set_id": set_id}, DB)}
+            return generate_cross_scenarios(c, set_id, LLMService(c, st), secs, cmds, focus, mx, progress=lambda a, b: prog("cross-command scenarios", a, b))
+        audit(f"Cross-command scenario generation requested for set #{set_id}", set_id=set_id, sections=len(secs), commands=len(cmds), focus=focus or None)
+        return {"job": jobs.submit(conn(), "cross-scenarios", work, {"set_id": set_id}, DB)}
 
     # ------------------------------------------------------------------ command DBs
     @app.get("/api/cmddb/suggest")

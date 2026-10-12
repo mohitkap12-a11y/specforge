@@ -4,7 +4,7 @@
  spec PDF/DOCX ──► [L1 parse] ──► IR (versioned, stable keys) ──► audit ─┐
                                                                          ▼
  other spec versions ──► spec set ──► [L2 references] ──► [L3 catalog] ──► [L5 scenarios] ─┐
-                                                              (denominator)   templates + AI drafts │
+                                                              (denominator)   AI cross-command drafts │
  command DB (SQLite) ──► [decode] ──► signatures ───────────────────────────────────────► [L6 coverage] ──► reports
 ```
 
@@ -14,8 +14,8 @@ Every layer has its own cache key and can be re-run alone.
 |---|---|---|---|---|
 | L1 parse | `ingest/pdf.py`, `ingest/docx.py` | file (sha256) | IR nodes, issues, audit | yes |
 | L2 references | `refs.py` | IR of a spec set | resolved / ambiguous / external-not-loaded / broken | yes |
-| L3 catalog | `catalog.py` | IR + refs | items: command, field, value, reserved, boundary, mi_tunnel, workflow, requirement | yes |
-| L5 scenarios | `scenarios.py`, `workflows.py`, `ai.py` | catalog | predicates (templates: deterministic; AI: drafts) | templates yes; AI cached |
+| L3 catalog | `catalog.py` | IR + refs | items: command, field, value, reserved, boundary, mi_tunnel, requirement | yes |
+| L5 scenarios | `scenarios.py`, `crossgen.py`, `ai.py` | catalog | predicates (AI drafts per section) | AI cached |
 | decode | `cmddb.py` | SQLite dump + mapping | signatures + ordered rows | yes |
 | L6 coverage | `coverage.py` | approved scenarios + signatures | item states + evidence | yes |
 
@@ -37,11 +37,13 @@ Every layer has its own cache key and can be re-run alone.
 
 Command-level items come from opcode tables. Field tables are linked by caption (`Identify – Command Dword 10`, `... NMD0`) with section ancestry as fallback; value tables via the figure referenced in the field description. Each item is `submission` (checkable from the submitted entry), `stimulus` (only the triggering submission is visible) or `unobservable` (listed as N/A, excluded from the percentage). Reviewers can override with `PUT /api/sets/{id}/catalog/override`.
 
-## Cross-command scenarios
+## Cross-command scenarios (section-driven)
 
-Single-command scenarios only show that a command was submitted. Functional tests chain commands, so the catalog also holds `workflow` items (`workflows.py`): recipes such as *Set Features FID=x then Get Features FID=x (SEL=current)*, *Create I/O CQ, Create I/O SQ, Write, Read, Delete SQ, Delete CQ*, *namespace create, attach, identify, write, read, detach, delete*, *Write then Read of the same range*, *SMART log before and after I/O*, *reserved field set, then Error Information log*, and NVMe-MI / in-band parity. Recipes name commands and field abbreviations only; opcodes, bit ranges and enumerated values (every Feature Identifier, CNS, SEL, LID, DTYP) are resolved from the catalog, steps are linked with `capture` / `{"var": ...}`, each predicate is validated, and a recipe whose commands or fields are missing is skipped with a `workflow_skipped` catalog issue. Each workflow is its own coverage item (observability `stimulus`) linked only to its own scenario, so it never changes the verdict of the single-command items.
+The tool's scenarios are cross-command: behaviour that needs several commands (set up, exercise, observe; create before use, release after). They are generated per selected command or section (`crossgen.py`, API `/api/sets/{id}/scenarios/cross`, UI Scenarios page), never for a whole spec in one go. Nothing in it is specific to one specification family: it works from the parsed structure, the reference graph and the catalog.
 
-For AI drafting, the catalog records which other commands a requirement names (`mentions`); the model is given those commands' fields and values and may draft a multi-step scenario across them (steps carry a `note` with their role). Statements that relate commands are treated as `stimulus` rather than `unobservable`.
+Each selected section is one unit and one model call. The model reads the section (sub-sections, tables, normative statements) plus the passages connected to it anywhere in the spec set: references the section makes, references elsewhere that point into it, other commands the section names, normative statements elsewhere naming its commands, and the other sections selected in the same request. `plan` shows exactly what would be read before any model call. Opcodes, bit ranges and values come from the catalog slice for the commands involved; a draft must pass schema, verbatim-quote grounding, predicate validation, involve at least two different commands, and de-duplicate, then waits as a draft for approval. Regenerating a section replaces its unreviewed drafts only. A scenario is linked to the commands it drives and the requirements it quotes.
+
+Coverage is judged on commands and requirements (`DIRECT_KINDS`); fields, values and reserved bits remain in the catalog as the vocabulary scenarios are validated against. `scenarios.generate_templates` (single-command scenarios) is no longer part of the product flow and is kept only as a test fixture for the coverage engine.
 
 ## Scenario predicates
 

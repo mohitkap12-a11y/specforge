@@ -66,7 +66,7 @@ def test_report_and_evidence_come_from_the_run_not_from_live_tables(ws, conn, pa
     after = reports.build_dataset(conn, run)
     assert after == before
     assert any(s["sid"] == "D:1" and s["state"] == "draft" and s["result"] == "not_evaluated" for s in before["scenarios"])
-    assert len(before["scenarios"]) == 187 and {s["family"] for s in before["specs"]} == {"nvme-base", "nvme-nvm-cs", "nvme-mi"}
+    assert len(before["scenarios"]) == 153 and {s["family"] for s in before["specs"]} == {"nvme-base", "nvme-nvm-cs", "nvme-mi"}
     from specforge.api.app import create_app
 
     with TestClient(create_app()) as client:

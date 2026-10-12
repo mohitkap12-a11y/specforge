@@ -4,7 +4,7 @@ import { api } from "../api";
 import { FlaskConical } from "lucide-react";
 import { Badge, Empty, ErrorNote, Loading, Pager, PageHeader } from "../components/ui";
 import { SetPicker, useSelectedSet } from "../components/SetPicker";
-import { useJobs } from "../components/jobs";
+import CrossGenerator from "../components/CrossGenerator";
 import { useDebounced } from "../hooks";
 import type { Scenario } from "../types";
 
@@ -67,7 +67,6 @@ function Drawer({ s, setId, onClose }: { s: Scenario; setId: number; onClose: ()
 
 export default function ScenariosPage() {
   const sel = useSelectedSet();
-  const { track } = useJobs();
   const qc = useQueryClient();
   const [origin, setOrigin] = useState("");
   const [state, setState] = useState("");
@@ -91,7 +90,7 @@ export default function ScenariosPage() {
     mutationFn: (st: string) => api.bulkScenarios([...checked], st),
     onSuccess: () => { setChecked(new Set()); qc.invalidateQueries({ queryKey: ["scenarios"] }); },
   });
-  const ai = useMutation({ mutationFn: () => api.aiGenerate(sel.setId!, {}), onSuccess: (r) => track(r.job, "AI scenario generation") });
+  const [showGen, setShowGen] = useState(false);
   const rows = list.data?.scenarios ?? [];
   const reviewable = rows.filter((s) => s.origin !== "template");
   const current = rows.find((s) => s.id === open);
@@ -99,20 +98,21 @@ export default function ScenariosPage() {
 
   return (
     <>
-      <PageHeader title="Scenarios" description="Template scenarios come from the catalog. AI-drafted scenarios stay drafts until you approve them; only approved scenarios count toward coverage." />
+      <PageHeader title="Scenarios" description="Cross-command scenarios are drafted from selected spec sections and stay drafts until you approve them; only approved scenarios count toward coverage." />
       <div className="row" style={{ marginBottom: 12 }}>
         <SetPicker sel={sel} />
         <select value={origin} onChange={(e) => setOrigin(e.target.value)} aria-label="Origin">
-          <option value="">All origins</option><option value="template">Template</option><option value="ai">AI</option>
+          <option value="">All origins</option><option value="cross">Cross-command</option><option value="template">Template (legacy)</option><option value="ai">AI (legacy)</option>
         </select>
         <select value={state} onChange={(e) => setState(e.target.value)} aria-label="State">
           <option value="">All states</option><option value="draft">Draft</option><option value="approved">Approved</option><option value="rejected">Rejected</option>
         </select>
         <input placeholder="Search title or id…" value={q} onChange={(e) => setQ(e.target.value)} />
         <span className="grow" />
-        <button disabled={sel.setId === null || ai.isPending} onClick={() => ai.mutate()} title="Drafts scenarios from normative statements; nothing counts until you approve it">Generate with AI</button>
+        <button className={showGen ? "" : "primary"} disabled={sel.setId === null} onClick={() => setShowGen((v) => !v)}>{showGen ? "Hide generator" : "Generate cross-command scenarios"}</button>
       </div>
-      <ErrorNote error={sel.error ?? list.error ?? ai.error} />
+      <ErrorNote error={sel.error ?? list.error} />
+      {showGen && sel.setId !== null && <CrossGenerator setId={sel.setId} />}
       {checked.size > 0 && (
         <div className="card row">
           <strong>{checked.size} selected</strong>
@@ -130,7 +130,7 @@ export default function ScenariosPage() {
         </div>
       )}
       {sel.setId !== null && <Loading q={list} />}
-      {list.data && rows.length === 0 && <Empty icon={FlaskConical} title="No scenarios match">Build the catalog for this set on the Sets page to create template scenarios, or change the filters.</Empty>}
+      {list.data && rows.length === 0 && <Empty icon={FlaskConical} title="No scenarios match">Use “Generate cross-command scenarios” to draft some from the spec sections, or change the filters.</Empty>}
       {rows.length > 0 && (
         <div className="card">
           <div className="scroll">

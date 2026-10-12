@@ -7,7 +7,6 @@ Item kinds
   reserved    one per reserved bit range                     (direct, 'stimulus')
   boundary    min / max of an un-enumerated numeric field    (direct)
   mi_tunnel   admin command carried in an NVMe-MI message    (direct)
-  workflow    cross-command test flow (see workflows.py)     (direct, 'stimulus')
   requirement one per normative statement                    (linked scenarios; 'unobservable' unless linked)
 """
 from __future__ import annotations
@@ -31,7 +30,6 @@ from .ingest.normalize import (
     slug,
 )
 from .refs import load_set_irs
-from .workflows import build_workflow_items
 
 CS_BY_FAMILY = {"nvme-nvm-cs": "nvm", "nvme-zns-cs": "zns", "nvme-kv-cs": "kv", "nvme-slm-cs": "slm", "nvme-base": "base"}
 _CAP_CMD = re.compile(r"^(?P<name>.+?)\s*-\s*(?:command|request)\s+dword\s+(?P<dw>\d+)(?:\s*\((?P<tok>[^)]*)\))?", re.I)
@@ -310,12 +308,6 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
             if c["queue"] == "admin":
                 add(_item(f"{c['key']}/mi-tunnel", "mi_tunnel", c["key"], f"{c['name']} over NVMe-MI", "submission",
                           opcode=c["opcode"], command=c["key"]))
-
-    # ---- cross-command workflows (multi-step test flows resolved from the catalog built so far)
-    wf_items, wf_issues = build_workflow_items(items)
-    for it in wf_items:
-        add(it)
-    issues += wf_issues
 
     # ---- requirements
     cmd_by_section: dict[tuple[str, str], dict] = {}

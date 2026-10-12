@@ -78,6 +78,9 @@ def test_evidence_is_limited_to_the_runs_spec_set(ws, demo_dir):
         sets = [client.post("/api/sets", json={"name": f"s{i}", "document_ids": docs}).json()["id"] for i in (1, 2)]
         for s in sets:
             assert wait_job(client, client.post(f"/api/sets/{s}/catalog/build").json()["job"])["state"] == "done"
+            from specforge import scenarios
+            from specforge.core.db import connect
+            scenarios.generate_templates(connect(), s)       # fixture: the product no longer generates single-command scenarios
         src = client.post("/api/cmddb", json={"path": str(demo_dir / "cmds-a.db")}).json()["id"]
         wait_job(client, client.post(f"/api/cmddb/{src}/import").json()["job"])
         run = wait_job(client, client.post("/api/coverage/run", json={"set_id": sets[0], "source_id": src}).json()["job"])["result"]["run_id"]

@@ -248,8 +248,8 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
     return stats
 
 
-def _record(conn, set_id, key, task, svc, state, output, error, meta=None):
-    cfg = svc.task_cfg(task)
+def _record(conn, set_id, key, task, svc, state, output, error, meta=None, cfg_task="generate"):
+    cfg = svc.task_cfg(cfg_task)         # `task` labels the row; the provider / model are those configured for generation
     conn.execute("INSERT INTO enrichment(set_id,item_key,task,provider,model,prompt_version,state,output_json,error) VALUES(?,?,?,?,?,?,?,?,?)",
                  (set_id, key, task, (meta or {}).get("provider", cfg["provider"]), cfg["model"], PROMPT_VERSION, state,
                   json.dumps(output) if output is not None else None, error))

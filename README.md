@@ -4,7 +4,7 @@ Scenario and command **coverage for the NVMe / NVMe-MI specifications**, fully o
 
 1. Parse spec PDFs / DOCX (Base, NVM Command Set, MI, ...) into a versioned, cross-referenced model.
 2. Build the list of everything that can be covered (commands, fields, values, reserved bits, boundaries, normative statements).
-3. Generate scenarios: deterministic templates, plus AI-drafted scenarios (Ollama or OpenCode) that are grounded, validated and human-approved.
+3. Generate cross-command scenarios per selected command or section, drafted by AI (Ollama or OpenCode) from the section plus every connected passage in the spec set; grounded, validated and human-approved.
 4. Match scenarios against a SQLite dump of submitted commands and report **covered / partial / not covered / N/A**, with evidence.
 5. Export Excel / HTML / CSV / JSON reports.
 
@@ -17,7 +17,7 @@ Scenario and command **coverage for the NVMe / NVMe-MI specifications**, fully o
 |---|---|
 | PDF + DOCX parsing, versioning, reparse, diff, corrections, completeness audit | implemented, tested on **synthetic** specs |
 | Cross-spec references and spec sets | implemented, tested |
-| Catalog (coverage denominator) + template scenarios | implemented, tested |
+| Catalog (coverage denominator) | implemented, tested |
 | Command DB import (SQE + MI decoding) and coverage engine (single step, sequences, variables) | implemented, tested |
 | Ollama / OpenCode providers, AI scenario generation with grounding and validation | implemented, tested against a mock Ollama server and a stub `opencode` binary |
 | REST API, CLI, Excel/HTML/CSV/JSON reports | implemented, tested |
@@ -74,7 +74,7 @@ The **About** button in the top bar opens `/about.html`, a self-contained animat
 ```bash
 specforge make-demo ./demo            # synthetic Base / NVM CS / MI specs (PDF + DOCX) and a command DB
 specforge ingest demo/nvme-base-2.4.pdf demo/nvme-nvm-cs-1.3.pdf demo/nvme-mi-2.0.pdf --set demo
-specforge catalog 1                   # catalog + template scenarios for spec set #1
+specforge catalog 1                   # build the catalog for spec set #1
 specforge coverage 1 demo/demo-commands.db --out ./reports --format xlsx
 make ui                               # build the web UI once (needs Node 18+); FastAPI serves frontend/dist
 specforge serve                       # UI + API on http://127.0.0.1:8000  (API docs at /docs)

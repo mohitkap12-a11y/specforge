@@ -3,7 +3,6 @@ import json
 import sqlite3
 
 import pytest
-from fastapi.testclient import TestClient
 from llm_helpers import Fake, settings
 
 from specforge import cmddb
@@ -52,8 +51,3 @@ def test_limit_zero_means_none_and_negative_is_rejected(conn, parsed_set, ws):
     assert stats["requirements"] == 0 and calls == []                                     # nothing was sent to the model
     with pytest.raises(ValueError):
         generate_ai_scenarios(conn, 1, svc, None, limit=-1)
-    from specforge.api.app import create_app
-
-    with TestClient(create_app()) as client:
-        assert client.post("/api/sets/1/scenarios/ai", json={"limit": -1}).status_code == 422
-        assert client.post("/api/sets/1/scenarios/ai", json={"limit": "x"}).status_code == 422

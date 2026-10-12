@@ -118,8 +118,8 @@ def test_template_regeneration_keeps_ids_and_reviewer_decisions(conn, parsed_set
     scenarios.generate_templates(conn, 1)
     after = conn.execute("SELECT id,state FROM scenario WHERE sid=?", (sid,)).fetchone()
     assert (after[0], after[1]) == (before, "rejected")
-    assert conn.execute("SELECT COUNT(*) FROM scenario WHERE origin='template'").fetchone()[0] == 186
-    assert conn.execute("SELECT COUNT(*) FROM scenario_item").fetchone()[0] == 186
+    assert conn.execute("SELECT COUNT(*) FROM scenario WHERE origin='template'").fetchone()[0] == 152
+    assert conn.execute("SELECT COUNT(*) FROM scenario_item").fetchone()[0] == 152
 
 
 def test_ai_grounding_uses_the_requirements_section(conn, parsed_set):

@@ -46,7 +46,10 @@ def test_end_to_end_via_api(client, demo_dir):
     sid = client.post("/api/sets", json={"name": "demo", "document_ids": [d["id"] for d in docs]}).json()["id"]
     assert client.get(f"/api/sets/{sid}/references").json()["summary"]["broken"] == 0
     cat = wait(client, client.post(f"/api/sets/{sid}/catalog/build").json()["job"])
-    assert cat["items"] == 229 and cat["templates"]["generated"] == 186
+    assert cat["items"] == 195 and "templates" not in cat           # the product no longer auto-generates single-command scenarios
+    from specforge import scenarios
+    from specforge.core.db import connect
+    assert scenarios.generate_templates(connect(), sid)["generated"] == 152      # fixture only: gives the coverage engine scenarios to match
 
     src = client.post("/api/cmddb", json={"path": str(demo_dir / "cmds-a.db")}).json()["id"]
     assert client.get("/api/cmddb/suggest", params={"path": str(demo_dir / "cmds-a.db")}).json()["mapping"]["table"] == "commands"
@@ -54,7 +57,7 @@ def test_end_to_end_via_api(client, demo_dir):
     assert client.get(f"/api/cmddb/{src}/commands", params={"opcode": 6, "queue": "admin"}).json()[0]["dwords"]["0"] & 0xFF == 6
     cov = wait(client, client.post("/api/coverage/run", json={"set_id": sid, "source_id": src}).json()["job"])["run_id"]
     summ = client.get(f"/api/coverage/{cov}").json()["summary"]["overall"]
-    assert summ["covered"] == 38 and summ["stimulus_covered"] == 2
+    assert summ["covered"] == 9 and summ["stimulus_covered"] == 0
     items = client.get(f"/api/coverage/{cov}/items", params={"command": "cmd:admin:06", "state": "not_covered"}).json()
     assert items["total"] > 0
     ev = client.get(f"/api/coverage/{cov}/evidence", params={"item": "cmd:admin:06/dw10[07:00]=01h"}).json()

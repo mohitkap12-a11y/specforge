@@ -62,3 +62,10 @@ export interface DecodedCommand {
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export interface LogEvent { id: number; ts: string; level: LogLevel; source: string; job_id: number | null; message: string; data: Record<string, any> }
+
+export interface SectionRow { key: string; family: string; version: string; number: string; title: string; level: number; chars: number; commands: { key: string; name: string }[] }
+export interface CrossSelection { section_keys: string[]; command_keys: string[] }
+export interface CrossUnit {
+  section_key: string; title: string; family: string; version: string; primary_chars: number; own_commands: string[]; commands: string[];
+  related: { key: string; title: string; why: string; chars: number }[];
+}
