@@ -306,7 +306,14 @@ def create_app() -> FastAPI:
     @app.put("/api/sets/{set_id}/catalog/override")
     def override(set_id: int, body: dict = Body(...)):
         need(body, 'key')
-        catalog.set_override(conn(), set_id, body["key"], body.get("observability"), body.get("na_reason"))
+        obs, reason = body.get("observability"), body.get("na_reason")
+        if obs is not None and not (isinstance(obs, str) and obs in OBSERVABILITY):
+            raise HTTPException(422, f"observability must be one of {sorted(OBSERVABILITY)} (or null to clear the override)")
+        if reason is not None and not isinstance(reason, str):
+            raise HTTPException(422, "na_reason must be a string")
+        if not isinstance(body["key"], str):
+            raise HTTPException(422, "key must be a string")
+        catalog.set_override(conn(), set_id, body["key"], obs, reason)
         return {"ok": True}
 
     @app.get("/api/sets/{set_id}/scenarios")

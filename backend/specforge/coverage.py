@@ -6,6 +6,7 @@ command source.  Item states are rolled up from scenario results; nothing here c
 from __future__ import annotations
 
 import json
+from bisect import bisect_left
 import sqlite3
 from collections import defaultdict
 from typing import Any
@@ -124,24 +125,33 @@ def eval_sequence(conn: sqlite3.Connection, source_id: int, pred: dict, sigs_by:
         seq_rows.sort(key=lambda r: (r["test_id"], r["seq"], r["id"]))     # id breaks ties: rows arrive in several signature chunks
 
         budget = [MAX_SEARCH_STEPS]
-        failed: set = set()    # strict order: (step, start, captured values) states already proven dead within one search
+        failed: set = set()    # strict order: (step, start, captured values) proven dead. Rows are only ever consumed, never freed,
+        #                        so a dead state stays dead for the rest of this scan and the memo is never cleared.
+        # Only rows that can play a step are ever visited: candidate row indices per step, in command order.
+        cand_idx = [[i for i, r in enumerate(seq_rows) if r["signature"] in cand_sigs[k]] for k in range(len(steps))]
+        lo = [0] * len(steps)  # per step: everything before this position is consumed or known dead
+        consumed: set[int] = set()
 
-        def attempt(step_i: int, start: int, env: dict, chosen: list[tuple[int, dict]], used: set) -> list[tuple[int, dict]] | None:
+        def attempt(step_i: int, start: int, env: dict, chosen: list[tuple[int, dict]]) -> list[tuple[int, dict]] | None:
             if step_i == len(steps):
                 return chosen
             memo = (step_i, start, tuple(sorted(env.items())))
             if order == "strict" and memo in failed:
                 return None
             st = steps[step_i]
-            rng = range(start, len(seq_rows)) if order == "strict" else range(len(seq_rows))
-            for idx in rng:
-                r = seq_rows[idx]
-                if idx in used or r["signature"] not in cand_sigs[step_i]:
-                    continue
-                budget[0] -= 1
+            lst = cand_idx[step_i]
+            while lo[step_i] < len(lst) and lst[lo[step_i]] in consumed:
+                lo[step_i] += 1
+            pos0 = max(bisect_left(lst, start), lo[step_i]) if order == "strict" else lo[step_i]
+            for pos in range(pos0, len(lst)):
+                idx = lst[pos]
+                budget[0] -= 1                       # every visited candidate is charged, so the scan always terminates
                 if budget[0] < 0:
                     raise SearchBudgetExceeded(f"sequence search exceeded {MAX_SEARCH_STEPS} steps")
-                if within is not None and chosen and abs(r["id"] - chosen[-1][1]["id"]) > within:   # distance in the ordered command stream, not per-test seq
+                if idx in consumed or any(idx == c[0] for c in chosen):
+                    continue
+                r = seq_rows[idx]
+                if within is not None and chosen and abs(r["id"] - chosen[-1][1]["id"]) > within:   # distance in the command stream, not per-test seq
                     continue
                 sig = cand_sigs[step_i][r["signature"]]
                 if not step_matches_sig(st, sig, env):
@@ -153,34 +163,25 @@ def eval_sequence(conn: sqlite3.Connection, source_id: int, pred: dict, sigs_by:
                         env2[name] = v
                     else:
                         env2.pop(name, None)     # an absent dword must not leave an earlier binding behind for later comparisons
-                res = attempt(step_i + 1, idx + 1, env2, chosen + [(idx, r)], used | {idx})
+                res = attempt(step_i + 1, idx + 1, env2, chosen + [(idx, r)])
                 if res is not None:
                     return res
             if order == "strict":
                 failed.add(memo)
             return None
 
-        # count disjoint occurrences: rows of an earlier match are never reused, and every search restarts from the
-        # first row so a later start can still pair rows that an earlier greedy match skipped over
-        consumed: set[int] = set()
+        # Count disjoint occurrences. Every search starts from the first row, so a later start can still pair rows an earlier
+        # match skipped over; rows of earlier matches are never reused. Starts tried before a successful one are dead for good
+        # (consumption only removes options), so step 0's pointer moves past them: each candidate is examined O(1) times.
         while True:
-            failed.clear()
-            found = None
-            if order == "strict":
-                for first in range(len(seq_rows)):
-                    if first in consumed or seq_rows[first]["signature"] not in cand_sigs[0]:
-                        continue
-                    found = attempt(0, first, {}, [], consumed)
-                    if found:
-                        break
-            else:
-                found = attempt(0, 0, {}, [], consumed)
+            found = attempt(0, 0, {}, [])
             if not found:
                 break
             matches += 1
             if len(evidence) < EVIDENCE_LIMIT:
                 evidence.extend(r for _, r in found)
             consumed |= {i for i, _ in found}
+            lo[0] = max(lo[0], bisect_left(cand_idx[0], found[0][0]))
     return matches, evidence[:EVIDENCE_LIMIT]
 
 
