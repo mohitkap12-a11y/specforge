@@ -331,11 +331,24 @@ def create_app() -> FastAPI:
         if not s:
             raise HTTPException(404)
         if "predicate" in body:
+            if s["origin"] == "template":
+                raise HTTPException(409, "template scenarios are generated from the catalog and cannot be edited; create a manual scenario instead")
             cmds, fields = scenarios.catalog_context(conn(), s["set_id"])
             errs = scenarios.validate_predicate(body["predicate"], cmds, fields)
             if errs:
                 raise HTTPException(422, {"errors": errs})
+            # the scenario stays linked to its catalog items, so the edited predicate must still be about their commands
+            new_cmds = {st.get("command") for st in body["predicate"]["steps"]}
+            for item_key, kind, attrs in conn().execute(
+                    "SELECT si.item_key, c.kind, c.attrs_json FROM scenario_item si LEFT JOIN catalog_item c "
+                    "ON c.set_id=? AND c.key=si.item_key WHERE si.scenario_id=?", (s["set_id"], sid)).fetchall():
+                linked = (item_key if kind == "command" else jloads(attrs, {}).get("command")) if kind else None
+                if linked and linked not in new_cmds:
+                    raise HTTPException(422, {"errors": [f"the predicate no longer refers to {linked}, which {item_key} is linked to; "
+                                                         "create a new scenario for a different command"]})
             conn().execute("UPDATE scenario SET predicate_json=? WHERE id=?", (json.dumps(body["predicate"]), sid))
+            if s["state"] == "approved" and "state" not in body:
+                conn().execute("UPDATE scenario SET state='draft' WHERE id=?", (sid,))      # an edit invalidates the earlier approval
         if body.get("state") == "approved":
             cmds, fields = scenarios.catalog_context(conn(), s["set_id"])
             errs = scenarios.validate_predicate(jloads(row(conn(), "SELECT predicate_json FROM scenario WHERE id=?", (sid,))["predicate_json"]), cmds, fields)

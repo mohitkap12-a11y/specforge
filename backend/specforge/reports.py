@@ -48,9 +48,22 @@ def to_json(ds) -> bytes:
     return json.dumps(ds, indent=1, default=str).encode()
 
 
+def _csv_safe(v):
+    """Spreadsheet-injection guard: a text cell that starts like a formula gets a leading apostrophe."""
+    return "'" + v if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
+
+
+class _SafeWriter:
+    def __init__(self, w):
+        self.w = w
+
+    def writerow(self, row_):
+        self.w.writerow([_csv_safe(v) for v in row_])
+
+
 def to_csv(ds, which: str = "gaps") -> bytes:
     buf = io.StringIO()
-    w = csv.writer(buf)
+    w = _SafeWriter(csv.writer(buf))
     if which == "gaps":
         w.writerow(["key", "kind", "command", "label", "observability", "state"])
         for i in _gap_rows(ds):
@@ -130,6 +143,10 @@ def to_xlsx(ds) -> bytes:
     sheet("Parse issues", ["family", "version", "severity", "kind", "node", "page", "message", "state"],
           [[i["family"], i["version"], i["severity"], i["kind"], i["node_key"], i["page"], i["message"], i["state"]] for i in ds["issues"]])
     for w in wb.worksheets:
+        for row_ in w.iter_rows():
+            for c in row_:
+                if c.data_type == "f":        # report data is data: a title such as "=1+1" must stay text, never become a formula
+                    c.data_type = "s"
         for row_ in w.iter_rows(min_row=2):
             for c in row_:
                 c.alignment = Alignment(vertical="top", wrap_text=False)

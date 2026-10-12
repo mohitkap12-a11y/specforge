@@ -72,7 +72,15 @@ def test_end_to_end_via_api(client, demo_dir):
     # scenario review rules: invalid predicate cannot be approved; templates are protected from bulk changes
     draft = client.get(f"/api/sets/{sid}/scenarios", params={"origin": "template", "limit": 1}).json()["scenarios"][0]
     bad = {"steps": [{"command": "cmd:admin:06", "interface": "pcie", "queue": "admin", "opcode": 99, "fields": []}]}
-    assert client.patch(f"/api/scenarios/{draft['id']}", json={"predicate": bad}).status_code == 422
+    assert client.patch(f"/api/scenarios/{draft['id']}", json={"predicate": bad}).status_code == 409      # templates are managed by the catalog build
+    from specforge.core.db import connect
+
+    c2 = connect()
+    c2.execute("INSERT INTO scenario(set_id,sid,origin,title,observability,predicate_json,state) VALUES(?,?,?,?,?,?, 'draft')",
+               (sid, "M:edit", "manual", "manual", "submission", "{}"))
+    c2.commit()
+    manual = c2.execute("SELECT id FROM scenario WHERE sid='M:edit'").fetchone()[0]
+    assert client.patch(f"/api/scenarios/{manual}", json={"predicate": bad}).status_code == 422
     client.post("/api/scenarios/bulk", json={"ids": [draft["id"]], "state": "rejected"})
     assert client.get(f"/api/sets/{sid}/scenarios", params={"origin": "template", "limit": 1}).json()["scenarios"][0]["state"] == "approved"
 

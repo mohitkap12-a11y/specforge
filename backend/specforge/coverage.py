@@ -114,7 +114,7 @@ def eval_sequence(conn: sqlite3.Connection, source_id: int, pred: dict, sigs_by:
     for i in range(0, len(union), 500):
         part = union[i:i + 500]
         q = ",".join("?" * len(part))
-        for r in conn.execute(f"SELECT src_row_id,test_id,script,seq,signature FROM decoded_command WHERE source_id=? "
+        for r in conn.execute(f"SELECT id,src_row_id,test_id,script,seq,signature FROM decoded_command WHERE source_id=? "
                               f"AND signature IN ({q}) ORDER BY test_id,seq,id", [source_id, *part]):
             d = dict(r)
             rows_by_scope["" if scope == "global" else (d["test_id"] if scope == "test" else d["script"])].append(d)
@@ -141,7 +141,7 @@ def eval_sequence(conn: sqlite3.Connection, source_id: int, pred: dict, sigs_by:
                 budget[0] -= 1
                 if budget[0] < 0:
                     raise SearchBudgetExceeded(f"sequence search exceeded {MAX_SEARCH_STEPS} steps")
-                if within is not None and chosen and abs(r["seq"] - chosen[-1][1]["seq"]) > within:
+                if within is not None and chosen and abs(r["id"] - chosen[-1][1]["id"]) > within:   # distance in the ordered command stream, not per-test seq
                     continue
                 sig = cand_sigs[step_i][r["signature"]]
                 if not step_matches_sig(st, sig, env):
