@@ -96,6 +96,9 @@ pre { background: var(--surface-2); border: 1px solid var(--border); padding: 10
 .crumbs { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; min-width: 0; margin-right: auto; }
 .crumbs strong { color: var(--text); font-weight: 550; }
 .iconbtn { display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: var(--radius-sm); border: 1px solid transparent; background: none; color: var(--text-2); cursor: pointer; position: relative; padding: 0; }
+.iconbtn.about-btn { width: auto; padding: 0 10px; gap: 6px; grid-auto-flow: column; font-weight: 500; }
+.about-lbl { font-size: 13px; }
+@media (max-width: 640px) { .about-lbl { display: none; } .iconbtn.about-btn { width: 34px; padding: 0; } }
 .iconbtn:hover { background: var(--hover); color: var(--text); border-color: var(--border); text-decoration: none; }
 .iconbtn .dot { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--link); box-shadow: 0 0 0 2px var(--bg); }
 .menu-btn, .search-mobile { display: none; }

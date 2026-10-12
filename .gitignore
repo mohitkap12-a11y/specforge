@@ -9,3 +9,6 @@ frontend/dist/
 *.db
 *.db-wal
 *.db-shm
+backend/specforge/web/
+backend/dist/
+backend/build/

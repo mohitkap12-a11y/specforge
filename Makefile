@@ -1,4 +1,4 @@
-.PHONY: install test lint demo serve ui ui-dev
+.PHONY: install test lint demo serve ui ui-dev package
 install:
 	pip install -e "backend[dev]"
 test:
@@ -13,3 +13,8 @@ ui:
 	cd frontend && npm ci && npm run build
 ui-dev:
 	cd frontend && npm run dev
+# Self-contained wheel (backend + built UI): dist at backend/dist/*.whl. Install anywhere with `pip install <wheel>`.
+package: ui
+	rm -rf backend/specforge/web backend/dist backend/build
+	cp -r frontend/dist backend/specforge/web
+	cd backend && pip wheel . --no-deps -w dist

@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>About SpecForge</title>
+<meta name="description" content="SpecForge: offline NVMe / NVMe-MI specification coverage, from spec to evidence." />
+<style>
+  :root {
+    --bg: #05060d; --bg2: #0b0d1a; --card: rgba(255,255,255,.04); --line: rgba(255,255,255,.10);
+    --text: #f3f4fa; --dim: #a6abc4; --a: #7c5cff; --b: #22d3ee; --c: #34d399; --d: #fbbf24; --e: #fb7185;
+    --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-snap-type: y proximity; scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.6 var(--font); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+  a { color: inherit; }
+  #bg { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+  .blob { position: fixed; z-index: 0; border-radius: 50%; filter: blur(90px); opacity: .35; pointer-events: none; animation: drift 24s ease-in-out infinite alternate; }
+  .b1 { width: 520px; height: 520px; background: var(--a); top: -140px; left: -120px; }
+  .b2 { width: 460px; height: 460px; background: var(--b); bottom: -160px; right: -100px; animation-delay: -9s; opacity: .25; }
+  @keyframes drift { to { transform: translate(120px, 80px) scale(1.15); } }
+
+  .bar { position: fixed; top: 0; left: 0; right: 0; z-index: 20; display: flex; align-items: center; gap: 14px; padding: 14px 24px;
+    background: linear-gradient(#05060dcc, #05060d00); backdrop-filter: blur(6px); }
+  .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.02em; text-decoration: none; }
+  .mark { width: 28px; height: 28px; border-radius: 8px; background: linear-gradient(135deg, var(--a), var(--b)); display: grid; place-items: center; font-size: 15px; box-shadow: 0 0 24px #7c5cff80; }
+  .bar .sp { flex: 1; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px; border-radius: 999px; border: 1px solid var(--line); background: var(--card);
+    color: var(--text); font: 600 14px var(--font); text-decoration: none; cursor: pointer; transition: transform .2s, background .2s, border-color .2s; }
+  .btn:hover { transform: translateY(-2px); background: rgba(255,255,255,.09); border-color: rgba(255,255,255,.25); }
+  .btn.primary { background: linear-gradient(135deg, var(--a), #4f8bff); border-color: transparent; box-shadow: 0 8px 30px #7c5cff55; }
+
+  .dots { position: fixed; right: 18px; top: 50%; transform: translateY(-50%); z-index: 20; display: flex; flex-direction: column; gap: 10px; }
+  .dots a { width: 9px; height: 9px; border-radius: 50%; background: rgba(255,255,255,.22); transition: .3s; display: block; }
+  .dots a.on { background: var(--b); transform: scale(1.5); box-shadow: 0 0 12px var(--b); }
+
+  section { position: relative; z-index: 1; min-height: 100vh; scroll-snap-align: start; display: flex; flex-direction: column; justify-content: center;
+    padding: 96px max(24px, 8vw) 72px; max-width: 1280px; margin: 0 auto; }
+  .eyebrow { font: 600 13px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--b); margin-bottom: 14px; }
+  h1 { font-size: clamp(44px, 8vw, 96px); line-height: 1.02; letter-spacing: -.045em; margin: 0 0 22px; }
+  h2 { font-size: clamp(30px, 4.6vw, 54px); line-height: 1.08; letter-spacing: -.035em; margin: 0 0 18px; }
+  h3 { margin: 0 0 6px; font-size: 19px; letter-spacing: -.01em; }
+  .grad { background: linear-gradient(100deg, #fff 10%, var(--b) 45%, var(--a) 90%); background-size: 200% auto; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shine 7s linear infinite; }
+  @keyframes shine { to { background-position: 200% center; } }
+  .lead { font-size: clamp(18px, 2vw, 24px); color: var(--dim); max-width: 760px; }
+  .lead b { color: var(--text); font-weight: 600; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+  .hint { margin-top: 46px; color: var(--dim); font-size: 13px; display: flex; align-items: center; gap: 10px; }
+  .hint i { width: 22px; height: 34px; border: 2px solid var(--dim); border-radius: 12px; position: relative; }
+  .hint i::after { content: ""; position: absolute; left: 50%; top: 6px; width: 3px; height: 7px; margin-left: -1.5px; border-radius: 2px; background: var(--b); animation: wheel 1.6s infinite; }
+  @keyframes wheel { 0% { opacity: 1; transform: translateY(0); } 100% { opacity: 0; transform: translateY(12px); } }
+
+  .rv { opacity: 0; transform: translateY(34px); transition: opacity .8s cubic-bezier(.2,.7,.2,1), transform .8s cubic-bezier(.2,.7,.2,1); transition-delay: var(--d, 0s); }
+  .in .rv, .rv.in { opacity: 1; transform: none; }
+
+  .grid { display: grid; gap: 16px; margin-top: 30px; }
+  .g3 { grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+  .g4 { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 24px; position: relative; overflow: hidden; transition: transform .3s, border-color .3s; }
+  .card:hover { transform: translateY(-6px); border-color: rgba(124,92,255,.6); }
+  .card::before { content: ""; position: absolute; inset: 0; background: radial-gradient(400px 120px at var(--mx, 50%) -20%, rgba(124,92,255,.22), transparent); opacity: 0; transition: .3s; }
+  .card:hover::before { opacity: 1; }
+  .card p { margin: 0; color: var(--dim); font-size: 15px; }
+  .ic { font-size: 26px; margin-bottom: 12px; }
+
+  /* problem / answer */
+  .vs { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 28px; }
+  .vs .card.bad { border-color: rgba(251,113,133,.35); } .vs .card.good { border-color: rgba(52,211,153,.4); }
+  .vs ul { margin: 10px 0 0; padding-left: 20px; color: var(--dim); font-size: 16px; } .vs li { margin: 6px 0; }
+  @media (max-width: 760px) { .vs { grid-template-columns: 1fr; } .dots { display: none; } }
+
+  /* pipeline */
+  .pipe { display: flex; align-items: stretch; gap: 0; margin-top: 36px; flex-wrap: wrap; }
+  .node { flex: 1 1 150px; min-width: 150px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; position: relative; margin: 6px; }
+  .node .n { font: 700 12px var(--mono); color: var(--b); }
+  .node h3 { margin-top: 6px; font-size: 17px; } .node p { margin: 0; color: var(--dim); font-size: 13.5px; }
+  .node::after { content: ""; position: absolute; right: -14px; top: 50%; width: 22px; height: 2px; background: linear-gradient(90deg, var(--b), transparent); }
+  .node:last-child::after { display: none; }
+  .flow { position: relative; height: 3px; margin: 26px 6px 0; background: var(--line); border-radius: 3px; overflow: hidden; }
+  .flow::after { content: ""; position: absolute; top: 0; left: -30%; width: 30%; height: 100%; background: linear-gradient(90deg, transparent, var(--b), var(--a), transparent); animation: run 3.2s linear infinite; }
+  @keyframes run { to { left: 100%; } }
+
+  /* rule */
+  .rule { display: flex; gap: 22px; align-items: center; flex-wrap: wrap; margin-top: 30px; }
+  .split { display: flex; flex: 1 1 280px; gap: 16px; }
+  .split .card { flex: 1; text-align: center; padding: 22px 14px; }
+  .split .card b { display: block; font-size: 15px; margin-bottom: 4px; }
+  .badge-code { color: var(--c); } .badge-ai { color: var(--d); }
+  .shield { border: 1px dashed rgba(251,191,36,.6); border-radius: 18px; padding: 20px 24px; flex: 1 1 280px; color: var(--dim); position: relative; }
+  .shield::before { content: "Human approval gate"; position: absolute; top: -11px; left: 18px; background: var(--bg); padding: 0 8px; font: 600 12px var(--mono); color: var(--d); }
+
+  /* coverage bars */
+  .bars { margin-top: 26px; display: grid; gap: 14px; }
+  .bar-row { display: grid; grid-template-columns: 150px 1fr 54px; gap: 14px; align-items: center; font-size: 15px; }
+  .track { height: 14px; border-radius: 9px; background: rgba(255,255,255,.07); overflow: hidden; }
+  .fill { height: 100%; width: 0; border-radius: 9px; transition: width 1.6s cubic-bezier(.2,.7,.2,1); background: var(--col); box-shadow: 0 0 16px var(--col); }
+  .in .fill { width: var(--w); }
+  .num { font: 600 15px var(--mono); text-align: right; }
+  .note { margin-top: 18px; font-size: 13px; color: var(--dim); }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 20px; font-size: 14px; color: var(--dim); }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 7px; background: var(--col); }
+
+  /* terminal */
+  .term { margin-top: 26px; background: #070913; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; box-shadow: 0 30px 80px #0008; max-width: 860px; }
+  .term .tb { display: flex; gap: 7px; padding: 11px 14px; background: #0e1122; border-bottom: 1px solid var(--line); }
+  .term .tb i { width: 11px; height: 11px; border-radius: 50%; background: #ff5f57; } .term .tb i:nth-child(2) { background: #febc2e; } .term .tb i:nth-child(3) { background: #28c840; }
+  .term pre { margin: 0; padding: 18px 20px; font: 14px/1.75 var(--mono); color: #cdd3f5; white-space: pre-wrap; min-height: 220px; }
+  .term .p { color: var(--c); } .term .cm { color: #6c7396; }
+  .caret { display: inline-block; width: 8px; height: 16px; background: var(--b); vertical-align: -3px; animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* stats */
+  .stat { font-size: clamp(38px, 5vw, 62px); font-weight: 800; letter-spacing: -.04em; background: linear-gradient(120deg, var(--b), var(--a)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .statlbl { color: var(--dim); font-size: 14px; }
+
+  /* roadmap */
+  .tl { margin-top: 30px; position: relative; padding-left: 30px; border-left: 2px solid var(--line); display: grid; gap: 18px; max-width: 820px; }
+  .tl .it { position: relative; } .tl .it::before { content: ""; position: absolute; left: -38px; top: 7px; width: 14px; height: 14px; border-radius: 50%; background: var(--bg); border: 2px solid var(--dim); }
+  .tl .done::before { background: var(--c); border-color: var(--c); box-shadow: 0 0 12px var(--c); } .tl .next::before { border-color: var(--d); animation: pulse 1.8s infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 #fbbf2488; } 100% { box-shadow: 0 0 0 14px #fbbf2400; } }
+  .tl p { margin: 2px 0 0; color: var(--dim); font-size: 15px; }
+  footer { position: relative; z-index: 1; text-align: center; padding: 30px; color: var(--dim); font-size: 13px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+    .rv { opacity: 1; transform: none; } .fill { width: var(--w); }
+  }
+  @media print { .bar, .dots, #bg, .blob, .hint { display: none; } body { background: #fff; color: #000; } section { min-height: auto; page-break-after: always; } .rv { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+<canvas id="bg" aria-hidden="true"></canvas>
+<div class="blob b1"></div><div class="blob b2"></div>
+
+<header class="bar">
+  <a class="logo" href="#top"><span class="mark">◆</span>SpecForge</a>
+  <span class="sp"></span>
+  <a class="btn" href="/" id="open-app">← Back to app</a>
+</header>
+<nav class="dots" id="dots" aria-label="Sections"></nav>
+
+<section id="top" data-title="Intro">
+  <div class="eyebrow rv">NVMe · NVMe-MI · fully offline</div>
+  <h1 class="rv" style="--d:.1s">Know exactly what your<br /><span class="grad">tests really cover.</span></h1>
+  <p class="lead rv" style="--d:.2s">SpecForge reads the NVMe specifications, builds the complete list of everything that <b>can</b> be tested, and proves from your own command logs what <b>was</b> tested, with evidence for every verdict.</p>
+  <div class="cta rv" style="--d:.3s">
+    <a class="btn primary" href="#why">See why it matters ↓</a>
+    <a class="btn" href="/">Open the workbench</a>
+  </div>
+  <div class="hint rv" style="--d:.5s"><i></i> Scroll, or use ↑ ↓ / Space / PageUp / PageDown</div>
+</section>
+
+<section id="why" data-title="Problem">
+  <div class="eyebrow rv">The problem</div>
+  <h2 class="rv">Coverage of a 1,000-page standard is judged by hand today.</h2>
+  <div class="vs">
+    <div class="card bad rv" style="--d:.1s"><h3>Without SpecForge</h3>
+      <ul><li>Coverage is a spreadsheet maintained manually</li><li>Spec revisions change; nobody knows what moved</li><li>“Are we covered?” is an opinion, not a measurement</li><li>Gaps are found late, in the field</li></ul></div>
+    <div class="card good rv" style="--d:.2s"><h3>With SpecForge</h3>
+      <ul><li>The denominator is generated from the spec itself</li><li>New revision? Reparse and diff, nothing silently lost</li><li>Every verdict links to the exact commands that prove it</li><li>Gaps are visible, ranked, and exportable today</li></ul></div>
+  </div>
+</section>
+
+<section id="how" data-title="How it works">
+  <div class="eyebrow rv">How it works</div>
+  <h2 class="rv">From PDF to evidence in six steps.</h2>
+  <div class="pipe">
+    <div class="node rv" style="--d:.05s"><span class="n">01</span><h3>Parse</h3><p>PDF / DOCX into a versioned, cross-referenced model with a self-audit.</p></div>
+    <div class="node rv" style="--d:.15s"><span class="n">02</span><h3>Link</h3><p>Resolve references across Base, NVM Command Set and MI specs.</p></div>
+    <div class="node rv" style="--d:.25s"><span class="n">03</span><h3>Catalog</h3><p>Commands, fields, values, reserved bits, boundaries, requirements.</p></div>
+    <div class="node rv" style="--d:.35s"><span class="n">04</span><h3>Scenarios</h3><p>Deterministic templates plus grounded, human-approved AI drafts.</p></div>
+    <div class="node rv" style="--d:.45s"><span class="n">05</span><h3>Match</h3><p>Compare with a SQLite dump of submitted commands.</p></div>
+    <div class="node rv" style="--d:.55s"><span class="n">06</span><h3>Report</h3><p>Excel, HTML, CSV and JSON with drill-down evidence.</p></div>
+  </div>
+  <div class="flow"></div>
+</section>
+
+<section id="trust" data-title="Trust">
+  <div class="eyebrow rv">The design rule</div>
+  <h2 class="rv">Code decides. <span class="grad">AI only drafts.</span></h2>
+  <p class="lead rv" style="--d:.1s">A coverage number you cannot reproduce is worthless. Verdicts come from deterministic code. AI is confined to suggesting scenarios, and nothing it writes counts until a person approves it.</p>
+  <div class="rule rv" style="--d:.2s">
+    <div class="split">
+      <div class="card"><b class="badge-code">Code (deterministic)</b><p>What exists<br />What is covered<br />Every verdict</p></div>
+      <div class="card"><b class="badge-ai">AI (assistive)</b><p>Drafts scenarios<br />Quotes the spec<br />Never scores</p></div>
+    </div>
+    <div class="shield">Drafts are schema-validated, grounded in verbatim spec quotes, de-duplicated, and have <b style="color:var(--text)">zero effect on coverage</b> until approved.</div>
+  </div>
+</section>
+
+<section id="cov" data-title="Coverage">
+  <div class="eyebrow rv">What management sees</div>
+  <h2 class="rv">An honest verdict for every requirement.</h2>
+  <div class="bars" id="bars">
+    <div class="bar-row rv"><span>Covered</span><div class="track"><div class="fill" style="--w:46%;--col:#30a46c"></div></div><span class="num" data-to="46">0%</span></div>
+    <div class="bar-row rv" style="--d:.1s"><span>Partial</span><div class="track"><div class="fill" style="--w:21%;--col:#e5a50a"></div></div><span class="num" data-to="21">0%</span></div>
+    <div class="bar-row rv" style="--d:.2s"><span>Not covered</span><div class="track"><div class="fill" style="--w:24%;--col:#e5484d"></div></div><span class="num" data-to="24">0%</span></div>
+    <div class="bar-row rv" style="--d:.3s"><span>N/A (excluded)</span><div class="track"><div class="fill" style="--w:9%;--col:#8b8fa8"></div></div><span class="num" data-to="9">0%</span></div>
+  </div>
+  <p class="note rv">Illustrative layout only, not measured results. Real numbers come from your specs and your command databases.</p>
+  <div class="legend rv">
+    <span><i style="--col:#30a46c"></i>Covered: proven from submitted commands</span>
+    <span><i style="--col:#7bd0a1"></i>Stimulus-only: sent, but the outcome is not visible</span>
+    <span><i style="--col:#8b8fa8"></i>N/A: controller-internal, listed and excluded</span>
+  </div>
+</section>
+
+<section id="feat" data-title="Capabilities">
+  <div class="eyebrow rv">Capabilities</div>
+  <h2 class="rv">Built for engineers, readable by executives.</h2>
+  <div class="grid g3">
+    <div class="card rv"><div class="ic">🔒</div><h3>Fully offline</h3><p>The tool, specs and command logs live on your machine. AI is optional and runs through the Ollama or OpenCode provider you configure.</p></div>
+    <div class="card rv" style="--d:.08s"><div class="ic">🧬</div><h3>Versioned &amp; stable</h3><p>Content-hashed specs, stable keys, reparse with diff. Your corrections survive every revision.</p></div>
+    <div class="card rv" style="--d:.16s"><div class="ic">🔍</div><h3>Parse audit</h3><p>Section, character, figure and bit-range checks. A spec is coverage-ready only with zero errors.</p></div>
+    <div class="card rv" style="--d:.24s"><div class="ic">🧪</div><h3>Sequences &amp; variables</h3><p>Scenarios span multi-step command flows, with values captured in one step and matched in the next.</p></div>
+    <div class="card rv" style="--d:.32s"><div class="ic">📡</div><h3>Live activity log</h3><p>See every parser stage and every AI prompt and reply as it happens, exportable for audit.</p></div>
+    <div class="card rv" style="--d:.40s"><div class="ic">📊</div><h3>Shareable reports</h3><p>Excel, HTML, CSV and JSON, with run-to-run comparison to show progress over time.</p></div>
+  </div>
+</section>
+
+<section id="demo" data-title="Demo">
+  <div class="eyebrow rv">Try it in minutes</div>
+  <h2 class="rv">One workflow, from CLI or the web UI.</h2>
+  <div class="term rv" style="--d:.1s">
+    <div class="tb"><i></i><i></i><i></i></div>
+    <pre id="term" data-lines='[
+"<span class=cm># synthetic demo data, no real specs needed</span>",
+"<span class=p>$</span> specforge make-demo ./demo",
+"<span class=p>$</span> specforge ingest demo/*.pdf --set demo",
+"<span class=p>$</span> specforge catalog 1",
+"<span class=p>$</span> specforge coverage 1 demo/demo-commands.db --out ./reports",
+"<span class=p>$</span> specforge serve   <span class=cm># UI + API on http://127.0.0.1:8000</span>"
+]'></pre>
+  </div>
+</section>
+
+<section id="num" data-title="At a glance">
+  <div class="eyebrow rv">At a glance</div>
+  <h2 class="rv">Engineered like a product.</h2>
+  <div class="grid g4">
+    <div class="card rv"><div class="stat"><span data-count="11">0</span></div><div class="statlbl">UI pages: dashboard to reports</div></div>
+    <div class="card rv" style="--d:.1s"><div class="stat"><span data-count="4">0</span></div><div class="statlbl">report formats: xlsx · html · csv · json</div></div>
+    <div class="card rv" style="--d:.2s"><div class="stat"><span data-count="2">0</span></div><div class="statlbl">AI providers: Ollama, OpenCode</div></div>
+    <div class="card rv" style="--d:.3s"><div class="stat"><span data-count="0">0</span></div><div class="statlbl">downloads at run time: everything runs locally</div></div>
+  </div>
+  <p class="note rv">Automated test suite and CI on Python 3.11 and 3.13.</p>
+</section>
+
+<section id="road" data-title="Status">
+  <div class="eyebrow rv">Where we are</div>
+  <h2 class="rv">Built and tested. Real-spec validation is next.</h2>
+  <div class="tl">
+    <div class="it done rv"><h3>Parsing, catalog, scenarios, coverage, reports</h3><p>Implemented and tested against synthetic NVMe-style specifications.</p></div>
+    <div class="it done rv" style="--d:.1s"><h3>Web workbench, REST API, CLI, live activity log</h3><p>Complete UI checked in a browser against the demo data.</p></div>
+    <div class="it next rv" style="--d:.2s"><h3>Run on the real NVMe Base, NVM CS and MI specifications</h3><p>Next milestone: verify parsing against the ratified PDFs and confirm the NVMe-MI header layout.</p></div>
+    <div class="it rv" style="--d:.3s"><h3>Roll out against production command logs</h3><p>Produce the first measured coverage baseline and track it release over release.</p></div>
+  </div>
+</section>
+
+<footer>SpecForge · NVMe / NVMe-MI coverage workbench · Press <b>F</b> for full screen · <a href="/">Back to app</a></footer>
+
+<script>
+(function () {
+  var reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var secs = [].slice.call(document.querySelectorAll("section"));
+
+  // side dots
+  var dots = document.getElementById("dots");
+  secs.forEach(function (s) { var a = document.createElement("a"); a.href = "#" + s.id; a.title = s.dataset.title; a.setAttribute("aria-label", s.dataset.title); dots.appendChild(a); });
+  var dotEls = [].slice.call(dots.children);
+
+  // reveal + counters + terminal on view
+  function countUp(el) {
+    var to = +(el.dataset.to || el.dataset.count), suffix = el.dataset.to ? "%" : "", t0 = performance.now(), dur = reduce ? 0 : 1500;
+    (function tick(t) { var p = dur ? Math.min(1, (t - t0) / dur) : 1; el.textContent = Math.round(to * (1 - Math.pow(1 - p, 3))) + suffix; if (p < 1) requestAnimationFrame(tick); })(t0);
+  }
+  var termDone = false;
+  function typeTerm() {
+    if (termDone) return; termDone = true;
+    var pre = document.getElementById("term"), lines = JSON.parse(pre.dataset.lines), i = 0;
+    if (reduce) { pre.innerHTML = lines.join("\n"); return; }
+    pre.innerHTML = '<span class="caret"></span>';
+    (function next() {
+      if (i >= lines.length) return;
+      var div = document.createElement("div"); div.innerHTML = lines[i++]; var tmp = div.textContent, full = lines[i - 1], n = 0;
+      var holder = document.createElement("span"); pre.insertBefore(holder, pre.querySelector(".caret"));
+      var step = setInterval(function () {
+        n += 2; if (n >= tmp.length) { clearInterval(step); holder.innerHTML = full + "\n"; setTimeout(next, 350); } else holder.textContent = tmp.slice(0, n);
+      }, 16);
+    })();
+  }
+  var io = new IntersectionObserver(function (es) {
+    es.forEach(function (e) {
+      if (!e.isIntersecting) return;
+      var s = e.target; s.classList.add("in");
+      s.querySelectorAll(".num,[data-count]").forEach(function (n) { if (!n.dataset.done) { n.dataset.done = 1; countUp(n); } });
+      if (s.id === "demo") typeTerm();
+    });
+  }, { threshold: 0.35 });
+  secs.forEach(function (s) { io.observe(s); });
+
+  // active dot
+  var io2 = new IntersectionObserver(function (es) {
+    es.forEach(function (e) { if (e.isIntersecting) { var i = secs.indexOf(e.target); dotEls.forEach(function (d, k) { d.classList.toggle("on", k === i); }); } });
+  }, { threshold: 0.55 });
+  secs.forEach(function (s) { io2.observe(s); });
+
+  // keyboard (presentation friendly)
+  function cur() { var y = scrollY + innerHeight / 2, k = 0; secs.forEach(function (s, i) { if (s.offsetTop <= y) k = i; }); return k; }
+  function go(i) { i = Math.max(0, Math.min(secs.length - 1, i)); secs[i].scrollIntoView({ behavior: reduce ? "auto" : "smooth" }); }
+  addEventListener("keydown", function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (["ArrowDown", "PageDown", " ", "ArrowRight"].indexOf(e.key) > -1) { e.preventDefault(); go(cur() + 1); }
+    else if (["ArrowUp", "PageUp", "ArrowLeft"].indexOf(e.key) > -1) { e.preventDefault(); go(cur() - 1); }
+    else if (e.key === "Home") { e.preventDefault(); go(0); } else if (e.key === "End") { e.preventDefault(); go(secs.length - 1); }
+    else if (e.key.toLowerCase() === "f") { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen && document.documentElement.requestFullscreen(); }
+  });
+
+  // card spotlight
+  document.querySelectorAll(".card").forEach(function (c) {
+    c.addEventListener("pointermove", function (e) { var r = c.getBoundingClientRect(); c.style.setProperty("--mx", (e.clientX - r.left) + "px"); });
+  });
+
+  // particle network background
+  var cv = document.getElementById("bg"), ctx = cv.getContext("2d"), W, H, P = [], mouse = { x: -999, y: -999 };
+  function size() { W = cv.width = innerWidth; H = cv.height = innerHeight; var n = Math.min(70, Math.floor(W * H / 22000)); P = []; for (var i = 0; i < n; i++) P.push({ x: Math.random() * W, y: Math.random() * H, vx: (Math.random() - .5) * .35, vy: (Math.random() - .5) * .35 }); }
+  addEventListener("resize", size); addEventListener("pointermove", function (e) { mouse.x = e.clientX; mouse.y = e.clientY; }); size();
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    for (var i = 0; i < P.length; i++) {
+      var p = P[i]; p.x += p.vx; p.y += p.vy; if (p.x < 0 || p.x > W) p.vx *= -1; if (p.y < 0 || p.y > H) p.vy *= -1;
+      ctx.fillStyle = "rgba(124,200,255,.55)"; ctx.beginPath(); ctx.arc(p.x, p.y, 1.6, 0, 6.3); ctx.fill();
+      for (var j = i + 1; j < P.length; j++) {
+        var q = P[j], d = Math.hypot(p.x - q.x, p.y - q.y);
+        if (d < 130) { ctx.strokeStyle = "rgba(124,92,255," + (0.22 * (1 - d / 130)) + ")"; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke(); }
+      }
+      var m = Math.hypot(p.x - mouse.x, p.y - mouse.y);
+      if (m < 160) { ctx.strokeStyle = "rgba(34,211,238," + (0.4 * (1 - m / 160)) + ")"; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(mouse.x, mouse.y); ctx.stroke(); }
+    }
+    requestAnimationFrame(draw);
+  }
+  if (!reduce) draw();
+})();
+</script>
+</body>
+</html>

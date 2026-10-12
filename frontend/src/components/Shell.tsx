@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, Layers, Menu, Moon, Search, Sun } from "lucide-react";
+import { ChevronLeft, Info, Layers, Menu, Moon, Search, Sun } from "lucide-react";
 import { api } from "../api";
 import { useJobs } from "./jobs";
 import { CommandPalette } from "./CommandPalette";
@@ -88,6 +88,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <button className="iconbtn" aria-label={dark ? "Switch to light theme" : "Switch to dark theme"} title="Toggle theme" onClick={() => setTheme(dark ? "light" : "dark")}>
             {dark ? <Sun size={17} /> : <Moon size={17} />}
           </button>
+          <a href="/about.html" target="_blank" rel="noopener" className="iconbtn about-btn" aria-label="About SpecForge (opens presentation page)" title="About SpecForge"><Info size={17} /><span className="about-lbl">About</span></a>
           <Link to="/settings" className="iconbtn" aria-label="Settings" title="Settings">{(() => { const I = NAV.find((n) => n.to === "/settings")!.icon; return <I size={17} />; })()}</Link>
         </header>
         <main className="main" id="main">{children}</main>
