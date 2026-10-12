@@ -311,7 +311,7 @@ def _aggregate(kids: list[dict]) -> dict:
     return {"state": st, "covered": cov, "total": total, "detail": detail}
 
 
-DIRECT_KINDS = ("command", "value", "boundary", "reserved", "mi_tunnel", "requirement")
+DIRECT_KINDS = ("command", "value", "boundary", "reserved", "mi_tunnel", "workflow", "requirement")
 
 
 def _counts(states: list[str]) -> dict[str, Any]:

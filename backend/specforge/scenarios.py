@@ -219,6 +219,8 @@ def generate_templates(conn: sqlite3.Connection, set_id: int) -> dict[str, int]:
             step = {"command": cmd["key"], "interface": "mi", "queue": "admin", "cs": None, "opcode": cmd["opcode"], "fields": []}
             put(f"T:{i['key']}", "mi_tunnel", f"{cmd['name']} carried in an NVMe-MI Admin message", "submission",
                 {"scope": "global", "order": "strict", "steps": [step]}, i["key"])
+        elif k == "workflow":
+            put(f"T:{i['key']}", "workflow", i["label"], i["observability"], a["predicate"], i["key"], a.get("description", ""))
     # Upsert by sid: ids and reviewer decisions (state) of existing template scenarios are preserved, so
     # old coverage results keep pointing at the same scenarios; templates that no longer apply are removed.
     existing = {r["sid"]: r["id"] for r in rows(conn, "SELECT id,sid FROM scenario WHERE set_id=? AND origin='template'", (set_id,))}

@@ -23,7 +23,7 @@ from .llm.base import LLMError
 from .llm.service import LLMService
 from .scenarios import catalog_context, validate_predicate
 
-PROMPT_VERSION = "ai-scenarios-v1"
+PROMPT_VERSION = "ai-scenarios-v2"
 
 
 class AIField(BaseModel):
@@ -42,6 +42,7 @@ class AICapture(BaseModel):
 
 class AIStep(BaseModel):
     command: str = Field(description="catalog command key, e.g. cmd:admin:06")
+    note: str = Field(default="", description="what this step is for in the test flow (setup / stimulus / follow-up check)")
     fields: list[AIField] = []
     capture: dict[str, AICapture] = {}
 
@@ -63,8 +64,9 @@ class AIOutput(BaseModel):
     scenarios: list[AIScenario] = []
 
 
-SYSTEM = """You turn ONE normative statement from an NVMe specification into test scenarios that can be checked
-against a log of SUBMITTED commands (submission queue entries / NVMe-MI requests). No completions are logged.
+SYSTEM = """You turn ONE normative statement from an NVMe specification into test scenarios, the way a test-script
+developer writes them, that can be checked against a log of SUBMITTED commands (submission queue entries / NVMe-MI
+requests). No completions are logged.
 
 Rules:
 - Only use commands and bit ranges listed under CATALOG. Never invent opcodes, commands or bit positions.
@@ -74,31 +76,50 @@ Rules:
   reply testable=false with a reason and no scenarios.
 - Each scenario needs 1+ quotes copied EXACTLY (character for character) from the REQUIREMENT or CONTEXT text.
 - Field values are integers (decimal). Use 'eq','ne','in' (list),'range' ({"lo","hi"}) or 'mask' ({"mask","value"}).
-- Use multiple steps only when the statement requires an ordering of several commands.
-Reply with one JSON object only."""
+
+Cross-command scenarios (preferred whenever the statement involves more than one command):
+- When the statement relates commands (a precondition such as "after X is created", a command that refers to what
+  another configured or created, a command whose effect is read back by another), write ONE scenario with one step
+  per command, in the order a test would run them: setup, the stimulus the statement is about, then the follow-up
+  that observes it. Give each step a short 'note' naming its role.
+- Link steps through values. In an earlier step add "capture": {"name": {"dw":..,"hi":..,"lo":..}} and in a later step's
+  field use "value": {"var": "name"} with op 'eq' or 'ne' (e.g. the FID set by Set Features is the FID read by Get
+  Features; the QID of Create I/O Submission Queue is the SQID of Abort). A captured value is a single integer.
+- Use order 'strict' when the statement requires an order, otherwise 'any'. Scope 'test' keeps the steps in one test.
+- Use a single step only when the statement really concerns one command. Reply with one JSON object only."""
+
+
+def _catalog_for(conn: sqlite3.Connection, set_id: int, cmd_key: str) -> list[dict]:
+    out: list[dict] = []
+    for r in rows(conn, "SELECT key,kind,label,attrs_json FROM catalog_item WHERE set_id=? AND (key=? OR parent_key=? OR "
+                        "parent_key IN (SELECT key FROM catalog_item WHERE set_id=? AND parent_key=?))",
+                  (set_id, cmd_key, cmd_key, set_id, cmd_key)):
+        x = jloads(r["attrs_json"], {})
+        if r["kind"] == "command":
+            out.append({"command": r["key"], "name": x["name"], "interface": x["interface"], "queue": x["queue"]})
+        elif r["kind"] in ("field", "reserved"):
+            out.append({"command": cmd_key, "field": r["label"], "dw": x["dw"], "hi": x["hi"], "lo": x["lo"],
+                        "reserved": r["kind"] == "reserved"})
+        elif r["kind"] == "value" and not x.get("reserved_value"):
+            out.append({"command": cmd_key, "value_of": x["field"], "value": x["vlo"] if x["vlo"] == x["vhi"] else [x["vlo"], x["vhi"]],
+                        "meaning": x.get("desc", "")[:60]})
+    return out
 
 
 def build_context(conn: sqlite3.Connection, set_id: int, item: dict) -> dict[str, Any]:
+    """The requirement, its grounding text and the catalog slice the model may use: the requirement's own command plus
+    every other command the statement names (recorded at catalog build as `mentions`), so cross-command flows are possible."""
     a = item["attrs"]
     cmd_key = a.get("command")
+    commands = ([cmd_key] if cmd_key else []) + [k for k in a.get("mentions", []) if k != cmd_key]
     catalog: list[dict] = []
-    if cmd_key:
-        for r in rows(conn, "SELECT key,kind,label,attrs_json FROM catalog_item WHERE set_id=? AND (key=? OR parent_key=? OR "
-                            "parent_key IN (SELECT key FROM catalog_item WHERE set_id=? AND parent_key=?))",
-                      (set_id, cmd_key, cmd_key, set_id, cmd_key)):
-            x = jloads(r["attrs_json"], {})
-            if r["kind"] == "command":
-                catalog.append({"command": r["key"], "name": x["name"], "interface": x["interface"], "queue": x["queue"]})
-            elif r["kind"] in ("field", "reserved"):
-                catalog.append({"command": cmd_key, "field": r["label"], "dw": x["dw"], "hi": x["hi"], "lo": x["lo"],
-                                "reserved": r["kind"] == "reserved"})
-            elif r["kind"] == "value" and not x.get("reserved_value"):
-                catalog.append({"command": cmd_key, "value_of": x["field"], "value": x["vlo"] if x["vlo"] == x["vhi"] else [x["vlo"], x["vhi"]],
-                                "meaning": x.get("desc", "")[:60]})
+    for k in commands:
+        catalog += _catalog_for(conn, set_id, k)
     ctx_text = a["text"]
     # neighbouring sentences from the same section (grounding corpus)
     section_text = _section_text(conn, set_id, item["key"])
-    return {"requirement": a["text"], "catalog": catalog, "command": cmd_key, "context_text": ctx_text + (("\n" + section_text) if section_text else "")}
+    return {"requirement": a["text"], "catalog": catalog, "command": cmd_key, "commands": commands,
+            "context_text": ctx_text + (("\n" + section_text) if section_text else "")}
 
 
 def _section_text(conn: sqlite3.Connection, set_id: int, req_key: str) -> str:
@@ -129,6 +150,7 @@ def to_predicate(sc: AIScenario, cmds: dict[str, dict]) -> dict:
         steps.append({"command": st.command, "interface": c["interface"], "queue": c["queue"],
                       "cs": c["cs"] if c["queue"] == "io" else None, "opcode": c["opcode"],
                       "fields": [f.model_dump() for f in st.fields],
+                      **({"note": st.note} if st.note else {}),
                       **({"capture": {k: v.model_dump() for k, v in st.capture.items()}} if st.capture else {})})
     pred: dict[str, Any] = {"scope": sc.scope, "order": sc.order, "steps": steps}
     if sc.within is not None:   # 0 must reach validation (it is invalid), not silently mean 'unlimited'
@@ -163,8 +185,8 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
         eventlog.emit("info", "agent", f"[{n + 1}/{len(reqs)}] Reading requirement: {req['label'][:140]}", key=req["key"], command=ctx["command"],
                       requirement=eventlog.clip(ctx["requirement"], 1500), context_chars=len(ctx["context_text"]))
         # validate against what the model was shown: the requirement's own command, not the whole set
-        scoped_cmds = {k: v for k, v in cmds.items() if k == ctx["command"]}
-        scoped_fields = {k: v for k, v in fields.items() if k == ctx["command"]}
+        scoped_cmds = {k: v for k, v in cmds.items() if k in ctx["commands"]}
+        scoped_fields = {k: v for k, v in fields.items() if k in ctx["commands"]}
         user = ("REQUIREMENT:\n" + ctx["requirement"] + "\n\nCATALOG (the only commands/fields you may use):\n" +
                 json.dumps(ctx["catalog"], indent=1)[:12000] + "\n\nCONTEXT:\n" + ctx["context_text"][:6000])
         msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]

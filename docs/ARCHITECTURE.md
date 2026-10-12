@@ -14,8 +14,8 @@ Every layer has its own cache key and can be re-run alone.
 |---|---|---|---|---|
 | L1 parse | `ingest/pdf.py`, `ingest/docx.py` | file (sha256) | IR nodes, issues, audit | yes |
 | L2 references | `refs.py` | IR of a spec set | resolved / ambiguous / external-not-loaded / broken | yes |
-| L3 catalog | `catalog.py` | IR + refs | items: command, field, value, reserved, boundary, mi_tunnel, requirement | yes |
-| L5 scenarios | `scenarios.py`, `ai.py` | catalog | predicates (templates: deterministic; AI: drafts) | templates yes; AI cached |
+| L3 catalog | `catalog.py` | IR + refs | items: command, field, value, reserved, boundary, mi_tunnel, workflow, requirement | yes |
+| L5 scenarios | `scenarios.py`, `workflows.py`, `ai.py` | catalog | predicates (templates: deterministic; AI: drafts) | templates yes; AI cached |
 | decode | `cmddb.py` | SQLite dump + mapping | signatures + ordered rows | yes |
 | L6 coverage | `coverage.py` | approved scenarios + signatures | item states + evidence | yes |
 
@@ -36,6 +36,12 @@ Every layer has its own cache key and can be re-run alone.
 ## Catalog items and observability
 
 Command-level items come from opcode tables. Field tables are linked by caption (`Identify – Command Dword 10`, `... NMD0`) with section ancestry as fallback; value tables via the figure referenced in the field description. Each item is `submission` (checkable from the submitted entry), `stimulus` (only the triggering submission is visible) or `unobservable` (listed as N/A, excluded from the percentage). Reviewers can override with `PUT /api/sets/{id}/catalog/override`.
+
+## Cross-command scenarios
+
+Single-command scenarios only show that a command was submitted. Functional tests chain commands, so the catalog also holds `workflow` items (`workflows.py`): recipes such as *Set Features FID=x then Get Features FID=x (SEL=current)*, *Create I/O CQ, Create I/O SQ, Write, Read, Delete SQ, Delete CQ*, *namespace create, attach, identify, write, read, detach, delete*, *Write then Read of the same range*, *SMART log before and after I/O*, *reserved field set, then Error Information log*, and NVMe-MI / in-band parity. Recipes name commands and field abbreviations only; opcodes, bit ranges and enumerated values (every Feature Identifier, CNS, SEL, LID, DTYP) are resolved from the catalog, steps are linked with `capture` / `{"var": ...}`, each predicate is validated, and a recipe whose commands or fields are missing is skipped with a `workflow_skipped` catalog issue. Each workflow is its own coverage item (observability `stimulus`) linked only to its own scenario, so it never changes the verdict of the single-command items.
+
+For AI drafting, the catalog records which other commands a requirement names (`mentions`); the model is given those commands' fields and values and may draft a multi-step scenario across them (steps carry a `note` with their role). Statements that relate commands are treated as `stimulus` rather than `unobservable`.
 
 ## Scenario predicates
 

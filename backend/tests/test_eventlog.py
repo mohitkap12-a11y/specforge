@@ -169,10 +169,10 @@ def test_parser_catalog_import_and_coverage_log_their_steps(conn, parsed_set, de
     for e in events(conn):
         by_source.setdefault(e["source"], []).append(e["message"])
     assert any(m.startswith("Audit: 0 error(s)") for m in by_source["parser"]) and any("finished in" in m for m in by_source["parser"])
-    assert any(m.startswith("Catalog built: 195 items") for m in by_source["catalog"])
-    assert any(m.startswith("Template scenarios: 152 generated") for m in by_source["scenarios"])
+    assert any(m.startswith("Catalog built: 229 items") for m in by_source["catalog"])
+    assert any(m.startswith("Template scenarios: 186 generated") for m in by_source["scenarios"])
     assert any(m.startswith("Import done:") for m in by_source["import"])
-    assert any(m.startswith("Coverage run #1 done: 23.31% covered") for m in by_source["coverage"])
+    assert any(m.startswith("Coverage run #1 done: 19.29% covered") for m in by_source["coverage"])
 
 
 # ---------------------------------------------------------------- API

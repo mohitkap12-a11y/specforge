@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 PARSER_VERSION = "1"  # bump when parsing output changes; flags existing runs as "reparse available"
-CATALOG_VERSION = "1"
-TEMPLATE_VERSION = "1"
+CATALOG_VERSION = "2"
+TEMPLATE_VERSION = "2"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "ollama": {"base_url": "http://127.0.0.1:11434", "num_ctx": 16384, "timeout": 600},

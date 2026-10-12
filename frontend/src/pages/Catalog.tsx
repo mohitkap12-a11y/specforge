@@ -9,7 +9,7 @@ import { useDebounced } from "../hooks";
 import type { CatalogItem } from "../types";
 
 const LIMIT = 100;
-const KINDS = ["command", "field", "value", "boundary", "reserved", "mi_tunnel", "requirement"];
+const KINDS = ["command", "field", "value", "boundary", "reserved", "mi_tunnel", "workflow", "requirement"];
 const OBS = ["submission", "stimulus", "unobservable"];
 
 function Drawer({ setId, item, onClose }: { setId: number; item: CatalogItem; onClose: () => void }) {
