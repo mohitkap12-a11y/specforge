@@ -27,7 +27,7 @@ export function JobsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {   // adopt jobs that were already running (page refresh, started from the CLI/API)
-    api.jobs().then((list) => list.filter((j) => j.state === "running" || j.state === "queued").forEach((j) => track(j.id, j.type))).catch(() => {});
+    api.activeJobs().then((list) => list.forEach((j) => track(j.id, j.type))).catch(() => {});
   }, [track]);
 
   const pending = Object.entries(jobs).filter(([, v]) => !v.job || !FINAL.has(v.job.state)).map(([k]) => Number(k));

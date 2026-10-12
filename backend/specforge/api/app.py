@@ -72,7 +72,20 @@ def create_app() -> FastAPI:
         return settings()
 
     @app.put("/api/settings")
-    def put_settings(body: dict = Body(...)):
+    def put_settings(body: Any = Body(...)):
+        if not isinstance(body, dict):
+            raise HTTPException(422, "settings must be a JSON object")
+        if "logging" in body:      # validated BEFORE anything is stored: a rejected request must not leave a value that breaks startup
+            lg = body["logging"]
+            if not isinstance(lg, dict):
+                raise HTTPException(422, "logging must be an object")
+            if "min_level" in lg and not (isinstance(lg["min_level"], str) and lg["min_level"] in eventlog.LEVELS):
+                raise HTTPException(422, f"logging.min_level must be one of {sorted(eventlog.LEVELS)}")
+            if "capture_prompts" in lg and not isinstance(lg["capture_prompts"], bool):
+                raise HTTPException(422, "logging.capture_prompts must be true or false")
+            pc = lg.get("preview_chars", 4000)
+            if not (isinstance(pc, int) and not isinstance(pc, bool) and 200 <= pc <= 50_000):
+                raise HTTPException(422, "logging.preview_chars must be a whole number between 200 and 50000")
         saved = config.save_settings(conn(), body)
         eventlog.configure(saved)
         audit("Settings saved", sections=sorted(body) if isinstance(body, dict) else [])
@@ -203,6 +216,9 @@ def create_app() -> FastAPI:
     @app.put("/api/runs/{run_id}/tables/correction")
     def correct_table(run_id: int, body: dict = Body(...)):
         need(body, 'key', 'header', 'rows')
+        if (not isinstance(body["key"], str) or not isinstance(body["header"], list)
+                or not isinstance(body["rows"], list) or any(not isinstance(r, list) for r in body["rows"])):
+            raise HTTPException(422, "key must be a string, header a list and rows a list of lists")
         r = row(conn(), "SELECT d.family,d.version FROM parse_run r JOIN spec_document d ON d.id=r.document_id WHERE r.id=?", (run_id,))
         if not r:
             raise HTTPException(404)
@@ -611,7 +627,9 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ jobs
     @app.get("/api/jobs")
-    def list_jobs():
+    def list_jobs(state: str | None = None):
+        if state == "active":      # every queued/running job, however old (recent() is capped)
+            return jobs.active(conn())
         return jobs.recent(conn())
 
     @app.get("/api/jobs/{job_id}")

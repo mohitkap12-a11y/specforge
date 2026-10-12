@@ -23,6 +23,7 @@ LEVELS = {"debug": 10, "info": 20, "warn": 30, "error": 40}
 SOURCES = ("job", "parser", "catalog", "scenarios", "agent", "llm", "import", "coverage", "api", "system")
 MAX_QUEUE = 20000          # beyond this the oldest queued events are dropped rather than growing memory without bound
 KEEP_ROWS = 100_000        # retention: the newest rows kept in the table
+PRUNE_EVERY = 2000         # inserts into one database between retention passes
 MAX_DATA = 60_000         # characters of JSON detail kept per event
 FLUSH_EVERY = 0.15         # seconds between writer passes while events are queued
 
@@ -37,13 +38,14 @@ _cfg = {"min_level": "info", "capture_prompts": True, "preview_chars": 4000}
 
 def configure(settings: dict | None) -> None:
     """Apply the `logging` section of the settings (called at startup, on settings save and when a job starts)."""
-    s = (settings or {}).get("logging") or {}
+    s = settings.get("logging") if isinstance(settings, dict) else None
+    s = s if isinstance(s, dict) else {}            # never raises: a bad stored value must not stop the app from starting
     lvl = s.get("min_level", "info")
-    _cfg["min_level"] = lvl if lvl in LEVELS else "info"
+    _cfg["min_level"] = lvl if isinstance(lvl, str) and lvl in LEVELS else "info"
     _cfg["capture_prompts"] = bool(s.get("capture_prompts", True))
     try:
         _cfg["preview_chars"] = max(200, min(int(s.get("preview_chars", 4000)), 50_000))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         _cfg["preview_chars"] = 4000
 
 
@@ -113,7 +115,7 @@ def _run() -> None:
     global _done
     conns: dict[str, sqlite3.Connection] = {}
     pending: list[tuple] = []          # (db, ts, level, source, job_id, message, data_json, attempts)
-    inserted = 0
+    inserted: dict[str, int] = {}      # per database: each one is pruned on its own schedule
     while True:
         if not pending:
             try:
@@ -137,9 +139,9 @@ def _run() -> None:
                 c.executemany("INSERT INTO event_log(ts,level,source,job_id,message,data_json) VALUES(?,?,?,?,?,?)", [e[1:7] for e in evs])
                 c.commit()
                 finished += len(evs)
-                inserted += len(evs)
-                if inserted >= 2000:
-                    inserted = 0
+                inserted[db] = inserted.get(db, 0) + len(evs)
+                if inserted[db] >= PRUNE_EVERY:
+                    inserted[db] = 0
                     c.execute("DELETE FROM event_log WHERE id <= (SELECT MAX(id) FROM event_log) - ?", (KEEP_ROWS,))
                     c.commit()
             except sqlite3.OperationalError as e:

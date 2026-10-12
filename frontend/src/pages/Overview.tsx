@@ -99,6 +99,7 @@ function AiCheck() {
       </div>
       {q.data?.ok && <div className="toast ok">Connected · {q.data.models.length} model(s) available.</div>}
       {q.data && !q.data.ok && <div className="toast bad">{q.data.error}</div>}
+      <ErrorNote error={q.error} />
     </div>
   );
 }
@@ -112,6 +113,7 @@ export default function OverviewPage() {
   const stale = (specs.data ?? []).filter((d) => d.runs.some((r) => r.active && r.outdated));
 
   if (specs.isLoading || sets.isLoading) return <><PageHeader title="Overview" /><Loading q={specs} /></>;
+  if (specs.error) return <><PageHeader title="Overview" /><ErrorNote error={specs.error} /></>;     // never mistake a failed load for an empty workspace
   const docs = specs.data ?? [];
   const setList = sets.data ?? [];
   const steps = [
@@ -147,7 +149,7 @@ export default function OverviewPage() {
             </div>
           ))}
         </div>
-        <div className="grid" style={{ marginTop: 24, gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
+        <div className="grid" style={{ marginTop: 24, gridTemplateColumns: "repeat(auto-fit, minmax(min(280px, 100%), 1fr))" }}>
           <AiCheck />
           <div className="card">
             <div className="card-head"><h2 style={{ margin: 0 }}>See everything it does</h2></div>
@@ -190,7 +192,7 @@ export default function OverviewPage() {
         ) : <div className="muted small">Every step is done. Re-run coverage after approving more scenarios or importing new command data.</div>}
       </div>
 
-      <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", marginBottom: 16 }}>
+      <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", marginBottom: 16 }}>
         <div className="card stat"><div className="label">Specs parsed</div><div className="big">{docs.filter((d) => d.runs.some((r) => r.status === "done")).length}<span className="muted" style={{ fontSize: 16 }}> / {docs.length}</span></div></div>
         <div className="card stat"><div className="label">Catalog items</div><div className="big">{setList.reduce((n, s) => n + s.catalog_items, 0)}</div></div>
         <div className="card stat"><div className="label">Scenarios</div><div className="big">{setList.reduce((n, s) => n + s.scenarios, 0)}</div></div>
@@ -198,7 +200,7 @@ export default function OverviewPage() {
       </div>
 
       {setList.map((s) => <SetTile key={s.id} set={s} />)}
-      <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))" }}>
+      <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(340px, 100%), 1fr))" }}>
         <RecentActivity />
         <AiCheck />
       </div>

@@ -244,3 +244,59 @@ def test_stream_delivers_new_events(ws):
     finally:
         server.should_exit = True
         t.join(5)
+
+
+# ---------------------------------------------------------------- review fixes
+@pytest.mark.parametrize("bad", [{"min_level": []}, {"min_level": "loud"}, {"min_level": 3}, {"capture_prompts": "yes"},
+                                 {"preview_chars": 10}, {"preview_chars": "big"}, {"preview_chars": True}, None, 5])
+def test_invalid_logging_settings_are_rejected_and_not_stored(client, bad):
+    r = client.put("/api/settings", json={"logging": bad})
+    assert r.status_code == 422
+    assert client.get("/api/settings").json()["logging"] == {"min_level": "info", "capture_prompts": True, "preview_chars": 4000}
+
+
+def test_settings_must_be_an_object(client):
+    assert client.put("/api/settings", json=[1, 2]).status_code == 422
+
+
+def test_configure_never_raises_on_garbage():
+    eventlog.configure({"logging": {"min_level": [], "capture_prompts": None, "preview_chars": {}}})
+    eventlog.configure({"logging": 7})
+    eventlog.configure(None)
+    assert eventlog._cfg["min_level"] == "info" and eventlog._cfg["preview_chars"] == 4000
+
+
+@pytest.mark.parametrize("body", [{"key": "k", "header": ["a"], "rows": None}, {"key": "k", "header": ["a"], "rows": 5},
+                                  {"key": "k", "header": ["a"], "rows": ["x"]}, {"key": "k", "header": "a", "rows": []}, {"key": 1, "header": [], "rows": []}])
+def test_table_correction_validates_before_storing(client, parsed_set, body):
+    from specforge.core.db import connect
+
+    assert client.put("/api/runs/1/tables/correction", json=body).status_code == 422
+    assert connect().execute("SELECT COUNT(*) FROM correction").fetchone()[0] == 0
+
+
+def test_retention_prunes_every_database_independently(tmp_path, monkeypatch):
+    monkeypatch.setattr(eventlog, "KEEP_ROWS", 5)
+    monkeypatch.setattr(eventlog, "PRUNE_EVERY", 20)
+    dbs = [str(tmp_path / f"{n}.db") for n in "ab"]
+    for d in dbs:
+        connect(d).close()
+    for i in range(30):                      # alternate databases so neither batch alone crosses the threshold in one pass
+        for d in dbs:
+            eventlog.emit("info", "system", f"e{i}", db=d)
+            eventlog.drain(5)
+    for d in dbs:
+        c = connect(d)
+        assert c.execute("SELECT COUNT(*) FROM event_log").fetchone()[0] <= 5 + 20, d
+        c.close()
+
+
+def test_active_jobs_are_not_limited_to_the_recent_page(client):
+    from specforge.core.db import connect
+
+    c = connect()
+    c.executemany("INSERT INTO job(type,state) VALUES('demo','running')", [()] * 70)
+    c.commit()
+    c.close()
+    assert len(client.get("/api/jobs").json()) == 50                 # the capped history
+    assert len(client.get("/api/jobs", params={"state": "active"}).json()) == 70

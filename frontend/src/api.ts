@@ -91,6 +91,7 @@ export const api = {
   logs: (f: { after_id?: number; before_id?: number; limit?: number; level?: string; source?: string; job_id?: number; q?: string }) =>
     req<{ items: LogEvent[]; newest_id: number; has_older: boolean; sources: string[] }>("GET", `/api/logs${qs(f)}`),
   clearLogs: () => req<{ deleted: number }>("DELETE", "/api/logs"),
+  activeJobs: () => req<Job[]>("GET", "/api/jobs?state=active"),
   jobs: () => req<Job[]>("GET", "/api/jobs"),
   job: (id: number) => req<Job>("GET", `/api/jobs/${id}`),
   cancelJob: (id: number) => req("POST", `/api/jobs/${id}/cancel`),

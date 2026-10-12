@@ -126,6 +126,11 @@ def recent(conn, limit: int = 50) -> list[dict]:
     return [_overlay(x, conn) for x in rows(conn, "SELECT * FROM job ORDER BY id DESC LIMIT ?", (limit,))]
 
 
+def active(conn) -> list[dict]:
+    """Every queued or running job (not limited like recent())."""
+    return [_overlay(x, conn) for x in rows(conn, "SELECT * FROM job WHERE state IN ('queued','running') ORDER BY id DESC")]
+
+
 def recover_interrupted(conn) -> int:
     cur = conn.execute("UPDATE job SET state='failed', error='interrupted by restart' WHERE state IN ('queued','running')")
     conn.commit()

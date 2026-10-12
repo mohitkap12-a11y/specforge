@@ -97,6 +97,8 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
   const qRef = useRef(q);
   qRef.current = q;
   const sources = LENSES[lens].sources;
+  const view = useRef(0);                         // bumped whenever the visible list is reset; late responses for an older view are dropped
+  const [olderBusy, setOlderBusy] = useState(false);
 
   const matchesQuery = (e: LogEvent) => !qRef.current || `${e.message} ${JSON.stringify(e.data)}`.toLowerCase().includes(qRef.current.toLowerCase());
   const append = useCallback((batch: LogEvent[]) => {
@@ -112,6 +114,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
   useEffect(() => {
     let es: EventSource | null = null;
     let cancelled = false;
+    view.current += 1; setOlderBusy(false);
     setLoading(true); setError(null); setEvents([]); pendingRef.current = []; setPending(0); setOpenIds(new Set()); setConnected(false);
     api.logs({ limit: 400, level, source: sources || undefined, job_id: job, q: q || undefined }).then((r) => {
       if (cancelled) return;
@@ -139,16 +142,20 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
 
   const loadOlder = async () => {
     const first = events[0];
-    if (!first) return;
+    if (!first || olderBusy) return;                 // one request at a time: a double click must not prepend the same page twice
+    const token = view.current;
     const el = box.current;
     const before = el?.scrollHeight ?? 0;
+    setOlderBusy(true);
     try {
       const r = await api.logs({ limit: 300, before_id: first.id, level, source: sources || undefined, job_id: job, q: q || undefined });
+      if (token !== view.current) return;            // filters changed or the log was cleared meanwhile: this page belongs to another view
       setStick(false);
-      setEvents((cur) => [...r.items, ...cur]);
+      setEvents((cur) => { const have = new Set(cur.map((x) => x.id)); return [...r.items.filter((x) => !have.has(x.id)), ...cur]; });
       setHasOlder(r.has_older);
       requestAnimationFrame(() => { if (el) el.scrollTop = el.scrollHeight - before; });   // keep the viewport on the same rows
-    } catch (e) { setError(e); }
+    } catch (e) { if (token === view.current) setError(e); }
+    finally { if (token === view.current) setOlderBusy(false); }
   };
 
   const update = (patch: Record<string, string | null>) => {
@@ -167,7 +174,13 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
   };
   const clear = async () => {
     if (!confirm("Clear the whole activity log? This cannot be undone.")) return;
-    try { const r = await api.clearLogs(); setEvents([]); setHasOlder(false); toast.push({ title: `Cleared ${r.deleted} events`, tone: "ok" }); } catch (e) { setError(e); }
+    try {
+      const r = await api.clearLogs();
+      view.current += 1; setOlderBusy(false);          // discard any in-flight "older" page
+      pendingRef.current = []; setPending(0);          // events buffered while paused were deleted too: resuming must not bring them back
+      setEvents([]); setHasOlder(false); setOpenIds(new Set());
+      toast.push({ title: `Cleared ${r.deleted} events`, tone: "ok" });
+    } catch (e) { setError(e); }
   };
   const counts = useMemo(() => ({ warn: events.filter((e) => e.level === "warn").length, error: events.filter((e) => e.level === "error").length }), [events]);
 
@@ -195,7 +208,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
       <ErrorNote error={error} />
       <div className="logbox" ref={box} onScroll={onScroll} role="log" aria-live="off" aria-label="Activity log">
         {loading && <div className="row muted" style={{ padding: 16 }}><span className="spinner" /> Loading…</div>}
-        {!loading && hasOlder && <div style={{ padding: 10, textAlign: "center" }}><button className="sm" onClick={loadOlder}>Load older events</button></div>}
+        {!loading && hasOlder && <div style={{ padding: 10, textAlign: "center" }}><button className="sm" onClick={loadOlder} disabled={olderBusy}>{olderBusy && <span className="spinner" />}Load older events</button></div>}
         {!loading && events.length === 0 && <div style={{ padding: 28 }}><Empty title="No events match" icon={Layers}>Events appear here as soon as something runs: parsing a spec, building a catalog, an AI call. Try another view or a lower level.</Empty></div>}
         {events.map((e) => <Row key={e.id} e={e} open={openIds.has(e.id)} onToggle={toggle} onJob={onJob} />)}
         {!stick && events.length > 0 && (
@@ -221,7 +234,7 @@ function RunningNow({ onLogs }: { onLogs: (id: number) => void }) {
   const running = (q.data ?? []).filter((j) => j.state === "running" || j.state === "queued");
   if (!running.length) return null;
   return (
-    <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", marginBottom: 16 }}>
+    <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(320px, 100%), 1fr))", marginBottom: 16 }}>
       {running.map((j) => (
         <div key={j.id} className="runcard">
           <div className="row"><span className="spinner" /><strong className="grow">{j.type}</strong><span className="muted small">#{j.id} · {dur(Date.now() - startOf(j))}</span></div>
