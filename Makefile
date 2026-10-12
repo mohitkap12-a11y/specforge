@@ -1,4 +1,4 @@
-.PHONY: install test lint demo serve
+.PHONY: install test lint demo serve ui ui-dev
 install:
 	pip install -e "backend[dev]"
 test:
@@ -9,3 +9,7 @@ demo:
 	specforge make-demo ./demo
 serve:
 	specforge serve
+ui:
+	cd frontend && npm ci && npm run build
+ui-dev:
+	cd frontend && npm run dev

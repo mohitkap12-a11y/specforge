@@ -21,7 +21,7 @@ Scenario and command **coverage for the NVMe / NVMe-MI specifications**, fully o
 | Command DB import (SQE + MI decoding) and coverage engine (single step, sequences, variables) | implemented, tested |
 | Ollama / OpenCode providers, AI scenario generation with grounding and validation | implemented, tested against a mock Ollama server and a stub `opencode` binary |
 | REST API, CLI, Excel/HTML/CSV/JSON reports | implemented, tested |
-| **React UI** | **not in this change yet** (the API is complete and documented at `/docs` when the server runs) |
+| React UI (Specs, Explorer, Scenarios, Coverage, Reports) | implemented in `frontend/`; checked in a browser against the synthetic demo. Not yet exercised on real specs; Catalog, Command DBs and Settings pages are not built (the API covers them) |
 | Real NVMe specs | **not yet run**: they could not be downloaded in the build environment. Run them next; see "Before trusting real-spec results" |
 
 ## Install
@@ -43,7 +43,8 @@ specforge make-demo ./demo            # synthetic Base / NVM CS / MI specs (PDF 
 specforge ingest demo/nvme-base-2.4.pdf demo/nvme-nvm-cs-1.3.pdf demo/nvme-mi-2.0.pdf --set demo
 specforge catalog 1                   # catalog + template scenarios for spec set #1
 specforge coverage 1 demo/demo-commands.db --out ./reports --format xlsx
-specforge serve                       # API on http://127.0.0.1:8000  (docs at /docs)
+make ui                               # build the web UI once (needs Node 18+); FastAPI serves frontend/dist
+specforge serve                       # UI + API on http://127.0.0.1:8000  (API docs at /docs)
 ```
 
 The demo files imitate the *layout* of the NVMe specs; they are **not** the real specifications.
@@ -119,3 +120,13 @@ docs/            ARCHITECTURE.md, IMPLEMENTATION_PLAN.md
 * DOCX cross-references use text patterns; native `REF` fields are not resolved yet.
 * Cross-version section drift (a MI 2.0 reference to Base section numbers from another revision) is handled by user choice, not by title matching.
 * Scenario coverage for prose requirements needs approved AI or manual scenarios; until then they show as `no_scenario`.
+
+## Web UI development
+
+```bash
+specforge serve            # API on :8000
+make ui-dev                # Vite dev server on :5173, proxies /api to :8000
+cd frontend && npm test    # unit tests; npm run build also type-checks
+```
+
+Pages: **Specs** (upload, parse, reparse/activate/diff, spec sets, build catalog), **Explorer** (section tree, text, normative statements, tables, references, parse issues, jump to PDF page), **Scenarios** (filter, bulk approve/reject, detail drawer with live predicate validation, AI generation job), **Coverage** (register a command DB, run, summaries by kind/command, item list with evidence drill-down, run comparison), **Reports** (xlsx / html / json / csv downloads).
