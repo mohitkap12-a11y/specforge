@@ -59,6 +59,10 @@ export default function CatalogPage() {
     queryFn: () => api.catalog(sel.setId!, { kind, observability: obs, command, q: dq, offset, limit: LIMIT }),
   });
   const cmds = useQuery({ queryKey: ["catalog-cmds", sel.setId], enabled: sel.setId !== null, queryFn: () => api.catalog(sel.setId!, { kind: "command", limit: 500 }) });
+  const total = list.data?.total;
+  useEffect(() => {   // saving an override can shrink a filtered list below the current page; return to the last valid page
+    if (total !== undefined && offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor((total - 1) / LIMIT) * LIMIT));
+  }, [total, offset]);
   // keep the open drawer in sync after an override is saved; it closes if the item no longer matches the filters
   const live = open ? (list.data ? list.data.items.find((i) => i.key === open.key) ?? null : open) : null;
   return (

@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { rememberSet } from "../hooks";
 import { Badge, Empty, ErrorNote, Legend, Loading, Pct, StateBar } from "../components/ui";
 import type { CovRun, SpecSet } from "../types";
 
@@ -30,7 +31,7 @@ function SetTile({ set }: { set: SetSpec }) {
       <div className="row"><h2 className="grow">{set.name}</h2><span className="muted small">{set.catalog_items} catalog items · {set.scenarios} scenarios</span></div>
       <Loading q={runs} />
       {latest && <ErrorNote error={summary.error ?? gaps.error} />}
-      {runs.data && !latest && <div className="muted">No coverage run yet. <Link to="/coverage">Run coverage</Link></div>}
+      {runs.data && !latest && <div className="muted">No coverage run yet. <Link to="/coverage" onClick={() => rememberSet(set.id)}>Run coverage</Link></div>}
       {o && latest && (
         <>
           <div className="row"><div className="big"><Pct v={o.pct_covered} /></div><span className="muted small">covered · <Pct v={o.pct_incl_stimulus} /> incl. stimulus · run #{latest.id}</span><span className="grow" /><Trend runs={runs.data ?? []} /></div>
@@ -39,7 +40,7 @@ function SetTile({ set }: { set: SetSpec }) {
             <>
               <h3>Uncovered commands</h3>
               <div className="small">{gaps.data.items.map((i) => <div key={i.key}>{i.label}</div>)}</div>
-              {gaps.data.total > gaps.data.items.length && <Link className="small" to="/coverage">{gaps.data.total - gaps.data.items.length} more…</Link>}
+              {gaps.data.total > gaps.data.items.length && <Link className="small" to="/coverage" onClick={() => rememberSet(set.id)}>{gaps.data.total - gaps.data.items.length} more…</Link>}
             </>
           )}
         </>
@@ -57,7 +58,7 @@ export default function DashboardPage() {
   return (
     <>
       <h1>Dashboard</h1>
-      <ErrorNote error={sets.error ?? jobs.error} />
+      <ErrorNote error={sets.error ?? jobs.error ?? specs.error} />
       {stale.length > 0 && <div className="toast bad">Parser updated: reparse available for {stale.map((d) => `${d.family} ${d.version}`).join(", ")}. See the <Link to="/specs">Specs</Link> page.</div>}
       <Loading q={sets} />
       {sets.data?.length === 0 && <Empty>Nothing here yet. Start on the <Link to="/specs">Specs</Link> page: upload and parse specs, then create a set.</Empty>}
