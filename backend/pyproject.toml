@@ -30,6 +30,10 @@ specforge = "specforge.cli:main"
 [tool.setuptools.packages.find]
 include = ["specforge*"]
 
+# the built web UI is copied to specforge/web by `make package`
+[tool.setuptools.package-data]
+specforge = ["web/*", "web/assets/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

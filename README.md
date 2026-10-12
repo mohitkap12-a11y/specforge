@@ -36,6 +36,39 @@ pip install -e "backend[dev]"
 
 Offline machines: build wheels on a connected machine with `pip download -d wheels -e backend` (or `pip wheel`) and install with `pip install --no-index --find-links wheels ...`.
 
+## Run it: backend, UI, and everything together
+
+Prerequisites: Python 3.11+, and Node 18+ only if you build or develop the UI.
+
+| Goal | Commands | Result |
+|---|---|---|
+| **Use it (backend + built UI, one process)** | `make ui` once, then `specforge serve` | UI and API on http://127.0.0.1:8000 (API docs at `/docs`) |
+| **Backend only (API / CLI)** | `specforge serve [--host 0.0.0.0 --port 9000]` or just use the CLI commands | API on the given host/port |
+| **Develop the UI (hot reload)** | terminal 1: `specforge serve`; terminal 2: `make ui-dev` | UI on http://localhost:5173, proxying `/api` to :8000 |
+| **Develop the backend** | `make test` and `make lint` | tests + ruff |
+
+`make ui` runs `npm ci && npm run build` and writes `frontend/dist`, which the server finds automatically. Without a built UI, `specforge serve` still serves the API. Data lives in `~/.specforge` (override with `SPECFORGE_HOME`).
+
+### Package it (one installable file)
+
+```bash
+make package          # builds the UI, bundles it into the Python package, writes backend/dist/specforge-<version>-py3-none-any.whl
+```
+
+On the target machine (Python 3.11+ only, no Node needed):
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install specforge-0.1.0-py3-none-any.whl     # add --no-index --find-links wheels/ on an offline machine
+specforge serve
+```
+
+For a fully offline install, collect dependency wheels on a connected machine with `pip download -d wheels specforge-0.1.0-py3-none-any.whl` and copy `wheels/` along with the wheel.
+
+### About page (for presentations)
+
+The **About** button in the top bar opens `/about.html`, a self-contained animated page that explains the tool for non-technical audiences (arrow keys / Space to step through sections, `F` for full screen). Its source is `frontend/public/about.html`; it has no external dependencies and works offline.
+
 ## Try it with synthetic data (no real specs needed)
 
 ```bash
