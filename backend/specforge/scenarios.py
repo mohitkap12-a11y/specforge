@@ -1,0 +1,185 @@
+"""Scenario predicate DSL, validator, and deterministic template generators.
+
+Predicate (JSON):
+  {"scope": "global|test|script", "order": "strict|any", "within": null | N,
+   "steps": [{"command": "cmd:admin:06",            # catalog key (traceability)
+              "interface": "pcie|mi", "queue": "admin|io|mi", "cs": "nvm"|null, "opcode": 6,
+              "fields": [{"dw": 10, "hi": 7, "lo": 0, "op": "eq", "value": 1}],
+              "capture": {"fid": {"dw": 10, "hi": 7, "lo": 0}}}]}
+Operators: eq, ne, in, range{lo,hi}, mask{mask,value}, absent.  A field value may be {"var": "fid"}.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+from typing import Any
+
+from .core.config import TEMPLATE_VERSION
+from .core.db import jloads, rows
+
+OPS = {"eq", "ne", "in", "range", "mask", "absent"}
+INTERFACES = {"pcie", "mi"}
+QUEUES = {"admin", "io", "mi"}
+SCOPES = {"global", "test", "script"}
+
+
+class PredicateError(ValueError):
+    pass
+
+
+def _dw_ok(dw: Any) -> bool:
+    return (isinstance(dw, int) and 0 <= dw <= 15) or dw in ("nmd0", "nmd1")
+
+
+def validate_predicate(pred: dict, commands: dict[str, dict] | None = None, fields: dict[str, list[dict]] | None = None) -> list[str]:
+    """Return a list of problems (empty == valid).
+
+    commands: catalog command attrs by key; fields: described fields (attrs) by command key.  When given, the
+    step's opcode/queue must match the catalog command and each field must lie inside a described bit range.
+    """
+    errs: list[str] = []
+    if not isinstance(pred, dict):
+        return ["predicate must be an object"]
+    steps = pred.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return ["'steps' must be a non-empty list"]
+    if pred.get("scope", "global") not in SCOPES:
+        errs.append(f"scope must be one of {sorted(SCOPES)}")
+    if pred.get("order", "strict") not in ("strict", "any"):
+        errs.append("order must be 'strict' or 'any'")
+    w = pred.get("within")
+    if w is not None and not (isinstance(w, int) and w > 0):
+        errs.append("'within' must be a positive integer")
+    caps: set[str] = set()
+    for i, st in enumerate(steps):
+        p = f"steps[{i}]"
+        if st.get("interface") not in INTERFACES:
+            errs.append(f"{p}.interface must be one of {sorted(INTERFACES)}")
+        if st.get("queue") not in QUEUES:
+            errs.append(f"{p}.queue must be one of {sorted(QUEUES)}")
+        if not isinstance(st.get("opcode"), int) or not 0 <= st["opcode"] <= 0xFF:
+            errs.append(f"{p}.opcode must be an integer 0..255")
+        cmd = None
+        if commands is not None and st.get("command"):
+            cmd = commands.get(st["command"])
+            if cmd is None:
+                errs.append(f"{p}.command '{st['command']}' is not in the catalog")
+            else:
+                if cmd.get("opcode") != st.get("opcode"):
+                    errs.append(f"{p}.opcode {st.get('opcode')} does not match catalog opcode {cmd.get('opcode')} for {st['command']}")
+        for j, f in enumerate(st.get("fields", [])):
+            q = f"{p}.fields[{j}]"
+            if not _dw_ok(f.get("dw")):
+                errs.append(f"{q}.dw must be 0..15 or 'nmd0'/'nmd1'")
+            hi, lo = f.get("hi"), f.get("lo")
+            if not (isinstance(hi, int) and isinstance(lo, int) and 0 <= lo <= hi <= 31):
+                errs.append(f"{q}: need integers 0 <= lo <= hi <= 31")
+                continue
+            op = f.get("op", "eq")
+            if op not in OPS:
+                errs.append(f"{q}.op '{op}' not in {sorted(OPS)}")
+                continue
+            width = hi - lo + 1
+            val = f.get("value")
+            if isinstance(val, dict) and "var" in val:
+                if val["var"] not in caps:
+                    errs.append(f"{q}: variable '{val['var']}' is not captured by an earlier step")
+            elif op in ("eq", "ne"):
+                if not isinstance(val, int) or not 0 <= val < (1 << width):
+                    errs.append(f"{q}.value {val!r} does not fit {width} bits")
+            elif op == "in":
+                if not isinstance(val, list) or not val or any(not isinstance(v, int) or not 0 <= v < (1 << width) for v in val):
+                    errs.append(f"{q}.value must be a list of integers fitting {width} bits")
+            elif op == "range":
+                if not (isinstance(val, dict) and isinstance(val.get("lo"), int) and isinstance(val.get("hi"), int)
+                        and 0 <= val["lo"] <= val["hi"] < (1 << width)):
+                    errs.append(f"{q}.value must be {{lo,hi}} within {width} bits")
+            elif op == "mask":
+                if not (isinstance(val, dict) and isinstance(val.get("mask"), int) and isinstance(val.get("value"), int)):
+                    errs.append(f"{q}.value must be {{mask,value}}")
+            if fields is not None and cmd is not None and not errs:
+                ok = any(a["dw"] == f["dw"] and a["lo"] <= lo and hi <= a["hi"] for a in fields.get(st["command"], []))
+                if not ok:
+                    errs.append(f"{q}: {f['dw']}[{hi}:{lo}] is not inside any field described for {st['command']}")
+        for name, c in (st.get("capture") or {}).items():
+            if not _dw_ok(c.get("dw")) or not isinstance(c.get("hi"), int) or not isinstance(c.get("lo"), int):
+                errs.append(f"{p}.capture.{name} needs dw/hi/lo")
+            caps.add(name)
+    return errs
+
+
+# ----------------------------------------------------------------------------- templates
+
+def _step(cmd: dict, fields: list[dict] | None = None) -> dict:
+    a = cmd
+    return {"command": a["key"], "interface": a["interface"], "queue": a["queue"],
+            "cs": a["cs"] if a["queue"] == "io" else None, "opcode": a["opcode"], "fields": fields or []}
+
+
+def _fmt_cmd(a: dict) -> str:
+    where = {"admin": "Admin", "io": "I/O", "mi": "MI"}.get(a["queue"], a["queue"])
+    return f"{a['name']} ({where} {a['opcode']:02X}h)"
+
+
+def generate_templates(conn: sqlite3.Connection, set_id: int) -> dict[str, int]:
+    items = rows(conn, "SELECT * FROM catalog_item WHERE set_id=?", (set_id,))
+    for i in items:
+        i["attrs"] = jloads(i.pop("attrs_json"), {})
+    cmds = {i["key"]: {**i["attrs"], "key": i["key"]} for i in items if i["kind"] == "command"}
+    conn.execute("DELETE FROM scenario WHERE set_id=? AND origin='template'", (set_id,))
+    out: list[tuple] = []
+    links: list[tuple[str, str]] = []
+
+    def put(sid: str, kind: str, title: str, obs: str, pred: dict, item_key: str, desc: str = "") -> None:
+        out.append((set_id, sid, "template", kind, title, desc, obs, json.dumps(pred), "approved",
+                    json.dumps({"template_version": TEMPLATE_VERSION, "item": item_key})))
+        links.append((sid, item_key))
+
+    for i in items:
+        a, k = i["attrs"], i["kind"]
+        if k == "command":
+            put(f"T:{i['key']}", "command", f"Issue {_fmt_cmd(a)}", i["observability"], {"scope": "global", "order": "strict", "steps": [_step(cmds[i["key"]])]}, i["key"],
+                f"At least one {a['name']} command is submitted.")
+        elif k in ("value", "boundary", "reserved"):
+            cmd = cmds.get(a["command"])
+            if cmd is None:
+                continue
+            if k == "reserved":
+                cond = {"dw": a["dw"], "hi": a["hi"], "lo": a["lo"], "op": "ne", "value": 0}
+                title = f"{_fmt_cmd(cmd)}: reserved {a['dw']}[{a['hi']}:{a['lo']}] set to a non-zero value"
+            else:
+                if a["vlo"] == a["vhi"]:
+                    cond = {"dw": a["dw"], "hi": a["hi"], "lo": a["lo"], "op": "eq", "value": a["vlo"]}
+                else:
+                    cond = {"dw": a["dw"], "hi": a["hi"], "lo": a["lo"], "op": "range", "value": {"lo": a["vlo"], "hi": a["vhi"]}}
+                title = f"{_fmt_cmd(cmd)}: {i['label']}"
+            put(f"T:{i['key']}", k, title, i["observability"], {"scope": "global", "order": "strict", "steps": [_step(cmd, [cond])]}, i["key"])
+        elif k == "mi_tunnel":
+            cmd = cmds.get(a["command"])
+            if cmd is None:
+                continue
+            step = {"command": cmd["key"], "interface": "mi", "queue": "admin", "cs": None, "opcode": cmd["opcode"], "fields": []}
+            put(f"T:{i['key']}", "mi_tunnel", f"{cmd['name']} carried in an NVMe-MI Admin message", "submission",
+                {"scope": "global", "order": "strict", "steps": [step]}, i["key"])
+    conn.executemany("INSERT INTO scenario(set_id,sid,origin,kind,title,description,observability,predicate_json,state,provenance_json)"
+                     " VALUES(?,?,?,?,?,?,?,?,?,?)", out)
+    ids = {r["sid"]: r["id"] for r in rows(conn, "SELECT id,sid FROM scenario WHERE set_id=?", (set_id,))}
+    conn.executemany("INSERT OR IGNORE INTO scenario_item(scenario_id,item_key) VALUES(?,?)", [(ids[s], k) for s, k in links if s in ids])
+    conn.commit()
+    kinds: dict[str, int] = {}
+    for o in out:
+        kinds[o[3]] = kinds.get(o[3], 0) + 1
+    return {"generated": len(out), **kinds}
+
+
+def catalog_context(conn: sqlite3.Connection, set_id: int) -> tuple[dict[str, dict], dict[str, list[dict]]]:
+    """Command attrs and described-field attrs, used by validate_predicate."""
+    cmds: dict[str, dict] = {}
+    fields: dict[str, list[dict]] = {}
+    for r in rows(conn, "SELECT key,kind,attrs_json FROM catalog_item WHERE set_id=? AND kind IN ('command','field','reserved')", (set_id,)):
+        a = json.loads(r["attrs_json"])
+        if r["kind"] == "command":
+            cmds[r["key"]] = {**a, "key": r["key"]}
+        else:
+            fields.setdefault(a["command"], []).append(a)
+    return cmds, fields

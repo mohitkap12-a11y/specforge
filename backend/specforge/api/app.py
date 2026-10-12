@@ -1,0 +1,500 @@
+"""FastAPI application: REST + SSE for the React UI. Binds to localhost by default (see cli.serve)."""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Any
+
+from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from .. import __version__, catalog, cmddb, coverage, jobs, refs, reports, scenarios
+from ..ai import generate_ai_scenarios
+from ..core import config
+from ..core.db import get_conn, jloads, row, rows
+from ..ingest import store
+from ..llm.base import LLMError
+from ..llm.service import LLMService, make_provider
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="SpecForge", version=__version__)
+    DB = str(config.db_path())
+
+    def conn():
+        return get_conn()
+
+    def settings() -> dict:
+        return config.load_settings(conn())
+
+    @app.on_event("startup")
+    def _startup():
+        jobs.recover_interrupted(conn())
+
+    # ------------------------------------------------------------------ misc / settings
+    @app.get("/api/health")
+    def health():
+        return {"ok": True, "version": __version__, "workspace": str(config.workspace_dir()),
+                "parser_version": config.PARSER_VERSION, "reparse_available": store.reparse_available(conn())}
+
+    @app.get("/api/settings")
+    def get_settings():
+        return settings()
+
+    @app.put("/api/settings")
+    def put_settings(body: dict = Body(...)):
+        return config.save_settings(conn(), body)
+
+    @app.get("/api/providers/{name}/models")
+    def provider_models(name: str):
+        try:
+            prov = make_provider(name, settings())
+            return {"ok": True, "models": [m.__dict__ for m in prov.list_models()], "health": prov.health()}
+        except LLMError as e:
+            return {"ok": False, "error": str(e), "models": []}
+
+    # ------------------------------------------------------------------ specs
+    @app.post("/api/specs/upload")
+    async def upload(files: list[UploadFile] = File(...)):
+        out = []
+        for f in files:
+            suffix = Path(f.filename or "").suffix.lower()
+            if suffix not in (".pdf", ".docx", ".dotx"):
+                raise HTTPException(400, f"Unsupported file type: {f.filename}")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=config.workspace_dir() / "uploads") as tmp:
+                shutil.copyfileobj(f.file, tmp)
+            try:
+                d = store.register_document(conn(), tmp.name, filename=os.path.basename(f.filename or tmp.name))
+            finally:
+                os.unlink(tmp.name)
+            out.append(d)
+        return out
+
+    @app.get("/api/specs")
+    def list_specs():
+        docs = rows(conn(), "SELECT * FROM spec_document ORDER BY family, version, id")
+        for d in docs:
+            runs = rows(conn(), "SELECT id,parser_version,status,active,stats_json,audit_json,error,created FROM parse_run WHERE document_id=? ORDER BY id DESC", (d["id"],))
+            for r in runs:
+                r["stats"], r["audit"] = jloads(r.pop("stats_json"), {}), jloads(r.pop("audit_json"), {})
+                r["outdated"] = r["parser_version"] != config.PARSER_VERSION
+            d["runs"] = runs
+        return docs
+
+    @app.patch("/api/specs/{doc_id}")
+    def patch_doc(doc_id: int, body: dict = Body(...)):
+        fam, ver = body.get("family"), body.get("version")
+        if not fam and not ver:
+            raise HTTPException(400, "family or version required")
+        conn().execute("UPDATE spec_document SET family=COALESCE(?,family), version=COALESCE(?,version) WHERE id=?", (fam, ver, doc_id))
+        conn().commit()
+        return row(conn(), "SELECT * FROM spec_document WHERE id=?", (doc_id,))
+
+    @app.delete("/api/specs/{doc_id}")
+    def delete_doc(doc_id: int):
+        conn().execute("DELETE FROM spec_document WHERE id=?", (doc_id,))
+        conn().commit()
+        return {"ok": True}
+
+    @app.post("/api/specs/{doc_id}/parse")
+    def parse(doc_id: int, activate: bool = Query(False)):
+        if not row(conn(), "SELECT 1 AS x FROM spec_document WHERE id=?", (doc_id,)):
+            raise HTTPException(404, "document not found")
+        st = settings()
+
+        def work(c, prog):
+            rid = store.run_parse(c, doc_id, st, progress=lambda s, a, b: prog(f"{s} {a}/{b}", a, b), activate=True if activate else None)
+            return {"run_id": rid}
+        return {"job": jobs.submit(conn(), "parse", work, {"document_id": doc_id}, DB)}
+
+    @app.post("/api/runs/{run_id}/activate")
+    def activate(run_id: int):
+        store.activate_run(conn(), run_id)
+        return {"ok": True}
+
+    @app.get("/api/runs/{run_id}")
+    def get_run(run_id: int):
+        r = row(conn(), "SELECT r.*, d.family, d.version, d.filename FROM parse_run r JOIN spec_document d ON d.id=r.document_id WHERE r.id=?", (run_id,))
+        if not r:
+            raise HTTPException(404)
+        r["stats"], r["audit"] = jloads(r.pop("stats_json"), {}), jloads(r.pop("audit_json"), {})
+        return r
+
+    @app.get("/api/runs/{run_id}/tree")
+    def tree(run_id: int):
+        return rows(conn(), "SELECT key,number,title,parent_key,page_from,page_to,attrs_json FROM ir_node WHERE run_id=? AND kind='section' ORDER BY ord", (run_id,))
+
+    @app.get("/api/runs/{run_id}/section")
+    def section(run_id: int, key: str):
+        s = row(conn(), "SELECT * FROM ir_node WHERE run_id=? AND key=? AND kind='section'", (run_id, key))
+        if not s:
+            raise HTTPException(404)
+        tables = rows(conn(), "SELECT key,number,title,page_from,page_to,attrs_json FROM ir_node WHERE run_id=? AND kind='table' AND parent_key=? ORDER BY ord", (run_id, key))
+        for t in tables:
+            t.update(jloads(t.pop("attrs_json"), {}))
+        reqs = rows(conn(), "SELECT key,text,page_from,attrs_json FROM ir_node WHERE run_id=? AND kind='requirement' AND parent_key=? ORDER BY ord", (run_id, key))
+        for r in reqs:
+            r.update(jloads(r.pop("attrs_json"), {}))
+        refs_ = rows(conn(), "SELECT raw,kind,target_family,target_label FROM ir_ref WHERE run_id=? AND src_key=?", (run_id, key))
+        s["attrs"] = jloads(s.pop("attrs_json"), {})
+        return {"section": s, "tables": tables, "requirements": reqs, "references": refs_}
+
+    @app.get("/api/runs/{run_id}/issues")
+    def issues(run_id: int, severity: str | None = None):
+        q, a = "SELECT * FROM parse_issue WHERE run_id=?", [run_id]
+        if severity:
+            q += " AND severity=?"
+            a.append(severity)
+        return rows(conn(), q + " ORDER BY CASE severity WHEN 'error' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, id", a)
+
+    @app.patch("/api/issues/{issue_id}")
+    def patch_issue(issue_id: int, body: dict = Body(...)):
+        conn().execute("UPDATE parse_issue SET state=?, note=? WHERE id=?", (body.get("state", "open"), body.get("note"), issue_id))
+        conn().commit()
+        return {"ok": True}
+
+    @app.put("/api/runs/{run_id}/tables/correction")
+    def correct_table(run_id: int, body: dict = Body(...)):
+        r = row(conn(), "SELECT d.family,d.version FROM parse_run r JOIN spec_document d ON d.id=r.document_id WHERE r.id=?", (run_id,))
+        if not r:
+            raise HTTPException(404)
+        store.set_correction(conn(), r["family"], r["version"], body["key"], "table_replace", {"header": body["header"], "rows": body["rows"]})
+        return {"ok": True, "note": "Stored. Reparse to apply; corrections survive every reparse."}
+
+    @app.get("/api/runs/{a}/diff/{b}")
+    def diff(a: int, b: int):
+        return store.diff_runs(conn(), a, b)
+
+    @app.get("/api/documents/{doc_id}/file")
+    def doc_file(doc_id: int):
+        d = row(conn(), "SELECT * FROM spec_document WHERE id=?", (doc_id,))
+        if not d:
+            raise HTTPException(404)
+        return FileResponse(d["path"], media_type="application/pdf" if d["format"] == "pdf" else "application/octet-stream", filename=d["filename"])
+
+    # ------------------------------------------------------------------ spec sets
+    @app.get("/api/sets")
+    def list_sets():
+        out = rows(conn(), "SELECT * FROM spec_set ORDER BY id")
+        for s in out:
+            s["members"] = refs.set_members(conn(), s["id"])
+            s["catalog_items"] = conn().execute("SELECT COUNT(*) FROM catalog_item WHERE set_id=?", (s["id"],)).fetchone()[0]
+            s["scenarios"] = conn().execute("SELECT COUNT(*) FROM scenario WHERE set_id=?", (s["id"],)).fetchone()[0]
+        return out
+
+    @app.post("/api/sets")
+    def create_set(body: dict = Body(...)):
+        cur = conn().execute("INSERT INTO spec_set(name) VALUES(?)", (body["name"],))
+        for d in body.get("document_ids", []):
+            conn().execute("INSERT OR IGNORE INTO spec_set_member(set_id,document_id) VALUES(?,?)", (cur.lastrowid, d))
+        conn().commit()
+        return {"id": cur.lastrowid}
+
+    @app.put("/api/sets/{set_id}/members")
+    def set_members(set_id: int, body: dict = Body(...)):
+        conn().execute("DELETE FROM spec_set_member WHERE set_id=?", (set_id,))
+        for d in body["document_ids"]:
+            conn().execute("INSERT OR IGNORE INTO spec_set_member(set_id,document_id) VALUES(?,?)", (set_id, d))
+        conn().commit()
+        return {"ok": True}
+
+    @app.delete("/api/sets/{set_id}")
+    def delete_set(set_id: int):
+        conn().execute("DELETE FROM spec_set WHERE id=?", (set_id,))
+        conn().commit()
+        return {"ok": True}
+
+    @app.get("/api/sets/{set_id}/references")
+    def references(set_id: int, state: str | None = None):
+        try:
+            rs = refs.resolve_references(conn(), set_id)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        out = [r for r in rs if not state or r["state"] == state]
+        return {"summary": refs.summarize(rs), "references": out[:3000]}
+
+    @app.post("/api/sets/{set_id}/references/choose")
+    def choose_ref(set_id: int, body: dict = Body(...)):
+        refs.choose_reference(conn(), set_id, body["src_key"], body["raw"], body["chosen_key"])
+        return {"ok": True}
+
+    # ------------------------------------------------------------------ catalog + scenarios
+    @app.post("/api/sets/{set_id}/catalog/build")
+    def build_cat(set_id: int):
+        def work(c, prog):
+            prog("building catalog", 0, 2)
+            res = catalog.build_catalog(c, set_id)
+            prog("generating template scenarios", 1, 2)
+            res["templates"] = scenarios.generate_templates(c, set_id)
+            return {**res, "issues": res["issues"][:500]}
+        return {"job": jobs.submit(conn(), "catalog", work, {"set_id": set_id}, DB)}
+
+    @app.get("/api/sets/{set_id}/catalog")
+    def get_catalog(set_id: int, kind: str | None = None, command: str | None = None, q: str | None = None,
+                    observability: str | None = None, limit: int = 500, offset: int = 0):
+        sql, args = "SELECT * FROM catalog_item WHERE set_id=?", [set_id]
+        for col, val in (("kind", kind), ("observability", observability)):
+            if val:
+                sql += f" AND {col}=?"
+                args.append(val)
+        if command:
+            sql += " AND (key=? OR key LIKE ? OR parent_key=?)"
+            args += [command, command + "/%", command]
+        if q:
+            sql += " AND (label LIKE ? OR key LIKE ?)"
+            args += [f"%{q}%", f"%{q}%"]
+        total = conn().execute(sql.replace("SELECT *", "SELECT COUNT(*)"), args).fetchone()[0]
+        out = rows(conn(), sql + " ORDER BY id LIMIT ? OFFSET ?", [*args, min(limit, 2000), offset])
+        for i in out:
+            i["attrs"] = jloads(i.pop("attrs_json"), {})
+        return {"total": total, "items": out}
+
+    @app.put("/api/sets/{set_id}/catalog/override")
+    def override(set_id: int, body: dict = Body(...)):
+        catalog.set_override(conn(), set_id, body["key"], body.get("observability"), body.get("na_reason"))
+        return {"ok": True}
+
+    @app.get("/api/sets/{set_id}/scenarios")
+    def list_scenarios(set_id: int, origin: str | None = None, state: str | None = None, q: str | None = None,
+                       item: str | None = None, limit: int = 500, offset: int = 0):
+        sql, args = "SELECT s.* FROM scenario s WHERE s.set_id=?", [set_id]
+        if origin:
+            sql += " AND s.origin=?"; args.append(origin)
+        if state:
+            sql += " AND s.state=?"; args.append(state)
+        if q:
+            sql += " AND (s.title LIKE ? OR s.sid LIKE ?)"; args += [f"%{q}%"] * 2
+        if item:
+            sql += " AND s.id IN (SELECT scenario_id FROM scenario_item WHERE item_key=?)"; args.append(item)
+        total = conn().execute(sql.replace("SELECT s.*", "SELECT COUNT(*)"), args).fetchone()[0]
+        out = rows(conn(), sql + " ORDER BY s.id LIMIT ? OFFSET ?", [*args, min(limit, 2000), offset])
+        for s in out:
+            s["predicate"] = jloads(s.pop("predicate_json"))
+            s["provenance"] = jloads(s.pop("provenance_json"), {})
+            s["items"] = [r[0] for r in conn().execute("SELECT item_key FROM scenario_item WHERE scenario_id=?", (s["id"],))]
+        return {"total": total, "scenarios": out}
+
+    @app.patch("/api/scenarios/{sid}")
+    def patch_scenario(sid: int, body: dict = Body(...)):
+        s = row(conn(), "SELECT * FROM scenario WHERE id=?", (sid,))
+        if not s:
+            raise HTTPException(404)
+        if "predicate" in body:
+            cmds, fields = scenarios.catalog_context(conn(), s["set_id"])
+            errs = scenarios.validate_predicate(body["predicate"], cmds, fields)
+            if errs:
+                raise HTTPException(422, {"errors": errs})
+            conn().execute("UPDATE scenario SET predicate_json=? WHERE id=?", (json.dumps(body["predicate"]), sid))
+        if body.get("state") == "approved":
+            cmds, fields = scenarios.catalog_context(conn(), s["set_id"])
+            errs = scenarios.validate_predicate(jloads(row(conn(), "SELECT predicate_json FROM scenario WHERE id=?", (sid,))["predicate_json"]), cmds, fields)
+            if errs:
+                raise HTTPException(422, {"errors": errs, "message": "Only valid predicates can be approved"})
+        for col in ("state", "title", "description", "observability"):
+            if col in body:
+                conn().execute(f"UPDATE scenario SET {col}=? WHERE id=?", (body[col], sid))
+        conn().commit()
+        return {"ok": True}
+
+    @app.post("/api/scenarios/bulk")
+    def bulk(body: dict = Body(...)):
+        ids = body["ids"]
+        q = ",".join("?" * len(ids))
+        conn().execute(f"UPDATE scenario SET state=? WHERE id IN ({q}) AND origin<>'template'", [body["state"], *ids])
+        conn().commit()
+        return {"ok": True}
+
+    @app.post("/api/scenarios/validate")
+    def validate(body: dict = Body(...)):
+        cmds, fields = scenarios.catalog_context(conn(), body["set_id"])
+        return {"errors": scenarios.validate_predicate(body["predicate"], cmds, fields)}
+
+    @app.post("/api/sets/{set_id}/scenarios/ai")
+    def ai_generate(set_id: int, body: dict = Body(default={})):
+        st = settings()
+
+        def work(c, prog):
+            svc = LLMService(c, st)
+            return generate_ai_scenarios(c, set_id, svc, body.get("item_keys"), body.get("limit"), progress=lambda a, b: prog("AI scenarios", a, b))
+        return {"job": jobs.submit(conn(), "ai-scenarios", work, {"set_id": set_id}, DB)}
+
+    # ------------------------------------------------------------------ command DBs
+    @app.get("/api/cmddb/suggest")
+    def suggest(path: str):
+        try:
+            return cmddb.suggest_mapping(path)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, str(e))
+
+    @app.post("/api/cmddb")
+    def add_source(body: dict = Body(...)):
+        try:
+            sid = cmddb.register_source(conn(), body["path"], body.get("mapping"), body.get("name"))
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, str(e))
+        return {"id": sid}
+
+    @app.get("/api/cmddb")
+    def list_sources():
+        out = rows(conn(), "SELECT id,name,path,sha256,row_count,decoded_count,imported_at,status,mapping_json,unknown_json FROM cmd_source ORDER BY id DESC")
+        for s in out:
+            s["mapping"], s["unknown"] = jloads(s.pop("mapping_json")), jloads(s.pop("unknown_json"), {})
+        return out
+
+    @app.put("/api/cmddb/{sid}/mapping")
+    def put_mapping(sid: int, body: dict = Body(...)):
+        conn().execute("UPDATE cmd_source SET mapping_json=?, status='new' WHERE id=?", (json.dumps(body), sid))
+        conn().commit()
+        return {"ok": True}
+
+    @app.post("/api/cmddb/{sid}/import")
+    def import_db(sid: int):
+        st = settings()
+
+        def work(c, prog):
+            return cmddb.import_source(c, sid, st.get("mi_layout"), progress=lambda n: prog(f"decoded {n} rows", n, 0))
+        return {"job": jobs.submit(conn(), "import-cmddb", work, {"source_id": sid}, DB)}
+
+    @app.get("/api/cmddb/{sid}/commands")
+    def browse(sid: int, opcode: int | None = None, queue: str | None = None, interface: str | None = None, test: str | None = None,
+               limit: int = 200, offset: int = 0):
+        sql, args = "SELECT d.id,d.src_row_id,d.test_id,d.seq,d.interface,d.queue,d.cs,d.opcode,d.nsid,g.dwords_json FROM decoded_command d JOIN cmd_signature g ON g.source_id=d.source_id AND g.signature=d.signature WHERE d.source_id=?", [sid]
+        for col, val in (("d.opcode", opcode), ("d.queue", queue), ("d.interface", interface), ("d.test_id", test)):
+            if val is not None:
+                sql += f" AND {col}=?"
+                args.append(val)
+        out = rows(conn(), sql + " ORDER BY d.id LIMIT ? OFFSET ?", [*args, min(limit, 1000), offset])
+        for r in out:
+            r["dwords"] = jloads(r.pop("dwords_json"))
+        return out
+
+    # ------------------------------------------------------------------ coverage + reports
+    @app.post("/api/coverage/run")
+    def run_cov(body: dict = Body(...)):
+        def work(c, prog):
+            rid = coverage.run_coverage(c, body["set_id"], body["source_id"], progress=lambda a, b: prog("matching scenarios", a, b))
+            return {"run_id": rid}
+        return {"job": jobs.submit(conn(), "coverage", work, body, DB)}
+
+    @app.get("/api/coverage/runs")
+    def cov_runs(set_id: int | None = None):
+        sql, args = "SELECT id,set_id,source_id,created,summary_json FROM coverage_run", []
+        if set_id:
+            sql += " WHERE set_id=?"; args.append(set_id)
+        out = rows(conn(), sql + " ORDER BY id DESC LIMIT 100", args)
+        for r in out:
+            s = jloads(r.pop("summary_json"), {})
+            r["overall"] = s.get("overall")
+        return out
+
+    @app.get("/api/coverage/{run_id}")
+    def cov_summary(run_id: int):
+        r = row(conn(), "SELECT * FROM coverage_run WHERE id=?", (run_id,))
+        if not r:
+            raise HTTPException(404)
+        return {"run": {k: r[k] for k in ("id", "set_id", "source_id", "created")}, "meta": jloads(r["meta_json"], {}), "summary": jloads(r["summary_json"], {})}
+
+    @app.get("/api/coverage/{run_id}/items")
+    def cov_items(run_id: int, state: str | None = None, kind: str | None = None, command: str | None = None, q: str | None = None,
+                  limit: int = 500, offset: int = 0):
+        sql = ("FROM item_result i JOIN coverage_run r ON r.id=i.run_id JOIN catalog_item c ON c.set_id=r.set_id AND c.key=i.item_key WHERE i.run_id=?")
+        args: list[Any] = [run_id]
+        if state:
+            sql += " AND i.state=?"; args.append(state)
+        if kind:
+            sql += " AND c.kind=?"; args.append(kind)
+        if command:
+            sql += " AND (c.key=? OR c.key LIKE ? OR c.parent_key=?)"; args += [command, command + "/%", command]
+        if q:
+            sql += " AND (c.label LIKE ? OR c.key LIKE ?)"; args += [f"%{q}%"] * 2
+        total = conn().execute("SELECT COUNT(*) " + sql, args).fetchone()[0]
+        out = rows(conn(), "SELECT c.key,c.kind,c.parent_key,c.label,c.observability,c.na_reason,c.attrs_json,i.state,i.covered,i.total,i.detail_json " + sql + " ORDER BY c.id LIMIT ? OFFSET ?",
+                   [*args, min(limit, 2000), offset])
+        for i in out:
+            a = jloads(i.pop("attrs_json"), {})
+            i["detail"] = jloads(i.pop("detail_json"), {})
+            i["attrs"] = {k: a[k] for k in ("command", "dw", "hi", "lo", "vlo", "vhi", "family", "text", "strength") if k in a}
+        return {"total": total, "items": out}
+
+    @app.get("/api/coverage/{run_id}/evidence")
+    def cov_evidence(run_id: int, item: str):
+        out = rows(conn(), """SELECT s.id,s.sid,s.title,s.state,s.observability,r.state AS result,r.match_count,r.evidence_json
+                              FROM scenario_item si JOIN scenario s ON s.id=si.scenario_id
+                              LEFT JOIN coverage_result r ON r.scenario_id=s.id AND r.run_id=? WHERE si.item_key=?""", (run_id, item))
+        for s in out:
+            s["evidence"] = jloads(s.pop("evidence_json"), [])
+        return out
+
+    @app.get("/api/coverage/{a}/diff/{b}")
+    def cov_diff(a: int, b: int):
+        return coverage.diff_runs(conn(), a, b)
+
+    @app.get("/api/coverage/{run_id}/export")
+    def cov_export(run_id: int, format: str = "xlsx", which: str = "gaps"):
+        try:
+            if format == "csv":
+                data, mime, name = reports.to_csv(reports.build_dataset(conn(), run_id), which), "text/csv", f"specforge-{which}-run{run_id}.csv"
+            else:
+                data, mime, name = reports.export(conn(), run_id, format)
+        except (KeyError, ValueError) as e:
+            raise HTTPException(404, str(e))
+        return Response(data, media_type=mime, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    # ------------------------------------------------------------------ jobs
+    @app.get("/api/jobs")
+    def list_jobs():
+        return jobs.recent(conn())
+
+    @app.get("/api/jobs/{job_id}")
+    def get_job(job_id: int):
+        j = jobs.get(conn(), job_id)
+        if not j:
+            raise HTTPException(404)
+        j["result"] = jloads(j.pop("result_json"), None)
+        return j
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: int):
+        jobs.cancel(job_id)
+        return {"ok": True}
+
+    @app.get("/api/jobs/{job_id}/events")
+    async def job_events(job_id: int):
+        async def gen():
+            last = None
+            while True:
+                j = await asyncio.to_thread(lambda: jobs.get(get_conn(), job_id))
+                if j is None:
+                    yield "event: error\ndata: {}\n\n"
+                    return
+                snap = (j["state"], j["progress"], j["total"], j["message"])
+                if snap != last:
+                    last = snap
+                    j["result"] = jloads(j.pop("result_json"), None)
+                    yield f"data: {json.dumps(j, default=str)}\n\n"
+                if j["state"] in ("done", "failed", "cancelled"):
+                    return
+                await asyncio.sleep(0.4)
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    # ------------------------------------------------------------------ static UI
+    for cand in (Path(__file__).resolve().parents[1] / "web", Path(__file__).resolve().parents[3] / "frontend" / "dist"):
+        if (cand / "index.html").exists():
+            app.mount("/assets", StaticFiles(directory=cand / "assets"), name="assets") if (cand / "assets").exists() else None
+
+            @app.get("/{path:path}", include_in_schema=False)
+            def spa(path: str, _root=cand):
+                f = (_root / path).resolve()
+                if path and str(f).startswith(str(_root.resolve())) and f.is_file():
+                    return FileResponse(f)
+                return FileResponse(_root / "index.html")
+            break
+    return app
+
+
+app = create_app()
