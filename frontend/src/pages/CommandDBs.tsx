@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
-import { Badge, Empty, ErrorNote, Loading } from "../components/ui";
+import { Database } from "lucide-react";
+import { Badge, Empty, ErrorNote, Loading, PageHeader } from "../components/ui";
 import { useJobs } from "../components/jobs";
 import { useStoredState } from "../hooks";
 import { parseOpcode } from "../util";
@@ -130,10 +131,10 @@ export default function CommandDBsPage() {
   const src = list.find((s) => s.id === id) ?? list[0];
   return (
     <>
-      <h1>Command databases</h1>
+      <PageHeader title="Command DBs" description="SQLite dumps of the commands your tests submitted. Review the column mapping, import, and browse what was decoded." />
       <Add />
       <Loading q={sources} />
-      {sources.data && list.length === 0 && <Empty>No command databases registered yet.</Empty>}
+      {sources.data && list.length === 0 && <Empty icon={Database} title="No command databases yet">Add the path to a SQLite file above.</Empty>}
       {src && (
         <div className="card">
           <div className="row" style={{ marginBottom: 8 }}>

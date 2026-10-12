@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api, fileUrl } from "../api";
-import { Badge, Empty, ErrorNote, Loading } from "../components/ui";
+import { BookOpen } from "lucide-react";
+import { Badge, Empty, ErrorNote, Loading, PageHeader } from "../components/ui";
 import type { Issue, SectionData, TreeNode } from "../types";
 
 /** Section key containing a node key (`x/sec:5.2/req:ab` -> `x/sec:5.2`); null for figure-level keys, which have no section in their key. */
@@ -185,9 +186,9 @@ export default function ExplorerPage() {
   const section = useQuery({ queryKey: ["section", run, sel], queryFn: () => api.section(run!, sel!), enabled: run !== null && !!sel });
   return (
     <>
-      <h1>Spec Explorer</h1>
+      <PageHeader title="Explorer" description="Browse what the parser found: section text, normative statements, tables (editable) and cross-references." />
       <Loading q={specs} />
-      {specs.data && !parsed.length && <Empty>Nothing parsed yet. Upload and parse a spec on the Specs page.</Empty>}
+      {specs.data && !parsed.length && <Empty icon={BookOpen} title="Nothing parsed yet" action={<Link to="/specs"><button className="primary">Go to Specs</button></Link>}>Upload and parse a specification to explore its contents here.</Empty>}
       {cur && (
         <>
           <div className="row" style={{ marginBottom: 12 }}>

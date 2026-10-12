@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { Badge, Empty, ErrorNote, Legend, Loading, Pager, Pct, STATE_ORDER, StateBar, stateLabel } from "../components/ui";
+import { Database, Gauge } from "lucide-react";
+import { Badge, Empty, ErrorNote, Legend, Loading, Pager, PageHeader, Pct, STATE_ORDER, StateBar, stateLabel } from "../components/ui";
 import { SetPicker, useSelectedSet } from "../components/SetPicker";
 import { useJobs } from "../components/jobs";
 import { useDebounced, useStoredState } from "../hooks";
@@ -153,7 +154,7 @@ export default function CoveragePage() {
   });
   return (
     <>
-      <h1>Coverage</h1>
+      <PageHeader title="Coverage" description="Match approved scenarios against submitted commands. Every verdict links to its evidence." />
       <div className="card row">
         <SetPicker sel={sel} />
         <label>Command DB{" "}
@@ -172,9 +173,9 @@ export default function CoveragePage() {
       </div>
       <ErrorNote error={sel.error ?? sources.error ?? runs.error ?? run.error} />
       {sources.data && !imported.length && (
-        <Empty>No imported command DB yet. Add one on the <Link to="/cmddb">Command DBs</Link> page.</Empty>
+        <Empty icon={Database} title="No command database imported" action={<Link to="/cmddb"><button className="primary">Add a command DB</button></Link>}>Coverage compares scenarios with the commands your tests actually sent.</Empty>
       )}
-      {sel.setId !== null && runs.data && list.length === 0 && imported.length > 0 && <Empty>No coverage runs for this set yet. Click “Run coverage”.</Empty>}
+      {sel.setId !== null && runs.data && list.length === 0 && imported.length > 0 && <Empty icon={Gauge} title="No coverage runs for this set yet">Choose a command database and click “Run coverage”.</Empty>}
       {runId !== null && <RunView runId={runId} prevId={prevId} />}
     </>
   );

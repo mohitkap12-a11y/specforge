@@ -129,4 +129,18 @@ make ui-dev                # Vite dev server on :5173, proxies /api to :8000
 cd frontend && npm test    # unit tests; npm run build also type-checks
 ```
 
-Pages: **Dashboard** (coverage per set, trend, top uncovered commands, recent jobs), **Specs** (upload, parse, reparse/activate/diff), **Explorer** (section tree, text, normative statements, tables with a correction editor, references, parse issues, jump to PDF page), **Sets** (membership, reference resolution with an ambiguity picker, build catalog), **Catalog** (filter, override observability / N/A reason), **Scenarios** (filter, bulk approve/reject, detail drawer with live predicate validation, AI generation), **Command DBs** (add, edit column mapping, import, decoded command browser, undecoded rows), **Coverage** (run, summaries by kind/command, item list with evidence drill-down, run comparison), **Reports** (xlsx / html / json / csv), **Jobs** (state, results, cancel) and **Settings** (providers with connection test, per-task models, parser options, NVMe-MI layout overrides).
+The sidebar collapses to an icon rail (chevron on its edge, or `Ctrl/⌘ B`; the choice is remembered) and `Ctrl/⌘ K` opens a launcher to jump anywhere. Light and dark themes follow the OS or can be set in Settings.
+
+Pages: **Overview** (a welcome screen with a guided checklist on first run; afterwards coverage per set, trend, top uncovered commands, recent activity), **Specs** (upload, parse, reparse/activate/diff), **Explorer** (section tree, text, normative statements, tables with a correction editor, references, parse issues, jump to PDF page), **Sets** (membership, reference resolution with an ambiguity picker, build catalog), **Catalog** (filter, override observability / N/A reason), **Scenarios** (filter, bulk approve/reject, detail drawer with live predicate validation, AI generation), **Command DBs** (add, edit column mapping, import, decoded command browser, undecoded rows), **Coverage** (run, summaries, item list with evidence drill-down, run comparison), **Reports** (xlsx / html / json / csv), **Activity** (live log and jobs) and **Settings** (AI providers with connection test, per-task models, parser, logging, NVMe-MI layout overrides, theme).
+
+### Activity log: what the system and the AI agents are doing
+
+Every job, parser stage, catalog build, command-DB import and coverage run writes structured events, and so does every AI call and every decision of the scenario agent: which requirement it read, what the model was asked and answered (exact prompt and reply, retries, timing), which drafts were rejected and why. Open **Activity** to watch it live (views: All / Processing / AI agents / App, minimum level, text filter, per-job filter, pause, export as NDJSON), or use the API:
+
+```
+GET    /api/logs?level=warn&source=agent,llm&job_id=12&q=text&after_id=&before_id=&limit=
+GET    /api/logs/stream?after_id=...      # server-sent events, same filters
+DELETE /api/logs
+```
+
+Settings → Logging sets the minimum level (debug adds cache hits and progress heartbeats) and whether prompts and replies are kept (they can contain spec text and stay in the local workspace database). Logging never blocks work: events are queued and written by a separate thread, and the newest 100,000 are kept.

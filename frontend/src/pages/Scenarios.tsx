@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
-import { Badge, Empty, ErrorNote, Loading, Pager } from "../components/ui";
+import { FlaskConical } from "lucide-react";
+import { Badge, Empty, ErrorNote, Loading, Pager, PageHeader } from "../components/ui";
 import { SetPicker, useSelectedSet } from "../components/SetPicker";
 import { useJobs } from "../components/jobs";
 import { useDebounced } from "../hooks";
@@ -98,7 +99,7 @@ export default function ScenariosPage() {
 
   return (
     <>
-      <h1>Scenarios</h1>
+      <PageHeader title="Scenarios" description="Template scenarios come from the catalog. AI-drafted scenarios stay drafts until you approve them; only approved scenarios count toward coverage." />
       <div className="row" style={{ marginBottom: 12 }}>
         <SetPicker sel={sel} />
         <select value={origin} onChange={(e) => setOrigin(e.target.value)} aria-label="Origin">
@@ -129,7 +130,7 @@ export default function ScenariosPage() {
         </div>
       )}
       {sel.setId !== null && <Loading q={list} />}
-      {list.data && rows.length === 0 && <Empty>No scenarios match. Build the catalog for this set on the Specs page to create template scenarios.</Empty>}
+      {list.data && rows.length === 0 && <Empty icon={FlaskConical} title="No scenarios match">Build the catalog for this set on the Sets page to create template scenarios, or change the filters.</Empty>}
       {rows.length > 0 && (
         <div className="card">
           <div className="scroll">

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import { Empty, ErrorNote, Loading, Pct } from "../components/ui";
+import { FileBarChart } from "lucide-react";
+import { Empty, ErrorNote, Loading, PageHeader, Pct } from "../components/ui";
 import { SetPicker, useSelectedSet } from "../components/SetPicker";
 
 const FORMATS = [
@@ -21,7 +22,7 @@ export default function ReportsPage() {
   const run = list.find((r) => r.id === runId);
   return (
     <>
-      <h1>Reports</h1>
+      <PageHeader title="Reports" description="Export a coverage run as Excel, HTML, JSON or CSV. Every report records the spec versions, command DB checksum and tool version so numbers can be reproduced." />
       <div className="card row">
         <SetPicker sel={sel} />
         {list.length > 0 && (
@@ -35,7 +36,7 @@ export default function ReportsPage() {
       </div>
       <ErrorNote error={sel.error ?? runs.error} />
       {sel.setId !== null && <Loading q={runs} />}
-      {runs.data && list.length === 0 && <Empty>No coverage runs for this set yet. Run coverage first.</Empty>}
+      {runs.data && list.length === 0 && <Empty icon={FileBarChart} title="No coverage runs yet">Run coverage first, then export it here.</Empty>}
       {runId !== null && (
         <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
           {FORMATS.map((f) => (

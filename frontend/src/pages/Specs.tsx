@@ -2,7 +2,8 @@ import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { Badge, Empty, ErrorNote, Loading } from "../components/ui";
+import { FileUp, UploadCloud } from "lucide-react";
+import { Badge, Empty, ErrorNote, Loading, PageHeader } from "../components/ui";
 import { useJobs } from "../components/jobs";
 import type { ParseRun, SpecDoc } from "../types";
 
@@ -77,6 +78,7 @@ export default function SpecsPage() {
   const qc = useQueryClient();
   const specs = useQuery({ queryKey: ["specs"], queryFn: api.specs });
   const input = useRef<HTMLInputElement>(null);
+  const [over, setOver] = useState(false);
   const upload = useMutation({
     mutationFn: (files: File[]) => api.upload(files),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["specs"] }),
@@ -84,18 +86,21 @@ export default function SpecsPage() {
   const onFiles = (list: FileList | null) => { if (list?.length) upload.mutate(Array.from(list)); if (input.current) input.current.value = ""; };
   return (
     <>
-      <h1>Specs</h1>
-      <div className="card"
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={(e) => { e.preventDefault(); onFiles(e.dataTransfer.files); }}>
-        <div className="row">
-          <input ref={input} type="file" multiple accept=".pdf,.docx" onChange={(e) => onFiles(e.target.files)} aria-label="Spec files" />
-          <span className="muted">{upload.isPending ? "Uploading…" : "Drop or choose PDF / DOCX files. Family and version are detected from the title page and can be edited."}</span>
+      <PageHeader title="Specs" description="Upload specification documents and parse them into sections, tables, bit fields and normative statements, with an audit of what was found." />
+      <div className={`dropzone ${over ? "over" : ""}`}
+        onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
+        onDrop={(e) => { e.preventDefault(); setOver(false); onFiles(e.dataTransfer.files); }}>
+        <div className="ico">{upload.isPending ? <span className="spinner" /> : <UploadCloud size={20} />}</div>
+        <div className="grow">
+          <strong>{upload.isPending ? "Uploading…" : "Drop PDF or DOCX files here"}</strong>
+          <div className="muted small">Family and version are detected from the title page and can be edited afterwards.</div>
         </div>
-        <ErrorNote error={upload.error} />
+        <input ref={input} type="file" multiple accept=".pdf,.docx" className="sr-only" onChange={(e) => onFiles(e.target.files)} aria-label="Spec files" tabIndex={-1} />
+        <button className="primary" disabled={upload.isPending} onClick={() => input.current?.click()}>Choose files</button>
       </div>
+      <ErrorNote error={upload.error} />
       <Loading q={specs} />
-      {specs.data?.length === 0 && <Empty>No specs yet. Upload the Base and NVM Command Set specs to begin.</Empty>}
+      {specs.data?.length === 0 && <Empty icon={FileUp} title="No specs yet">Upload the NVMe Base and NVM Command Set specifications to begin. PDF and DOCX are supported.</Empty>}
       {specs.data?.map((d) => <DocCard key={d.id} doc={d} />)}
       {specs.data && specs.data.length > 0 && <p className="muted">Next: group specs into a set on the <Link to="/sets">Sets</Link> page.</p>}
     </>

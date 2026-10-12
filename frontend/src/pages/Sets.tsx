@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
-import { Badge, Empty, ErrorNote, Loading } from "../components/ui";
+import { Layers } from "lucide-react";
+import { Badge, Empty, ErrorNote, Loading, PageHeader } from "../components/ui";
 import { useJobs } from "../components/jobs";
 import { useSelectedSet } from "../components/SetPicker";
 import type { RefResult, SpecDoc, SpecSet } from "../types";
@@ -102,10 +103,9 @@ export default function SetsPage() {
   const docs = specs.data ?? [];
   return (
     <>
-      <h1>Spec sets</h1>
-      <p className="muted">A set groups spec versions that reference each other (for example Base 2.4 and NVM Command Set 1.3). Its catalog is the coverage denominator.</p>
+      <PageHeader title="Sets" description="A set groups spec versions that reference each other (for example Base 2.4 and NVM Command Set 1.3). Its catalog is the coverage denominator." />
       <ErrorNote error={sel.error} />
-      {!sel.loading && sel.sets.length === 0 && <Empty>No sets yet. Create one below.</Empty>}
+      {!sel.loading && sel.sets.length === 0 && <Empty icon={Layers} title="No sets yet">Create one below from your parsed specs.</Empty>}
       {sel.sets.map((s) => (
         <div key={s.id} className="card">
           <div className="row">
