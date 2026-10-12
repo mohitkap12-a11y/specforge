@@ -82,6 +82,10 @@ export default function ScenariosPage() {
     enabled: sel.setId !== null,
     queryFn: () => api.scenarios(sel.setId!, { origin, state, q: dq, offset, limit: LIMIT }),
   });
+  const total = list.data?.total;
+  useEffect(() => {   // a review action can shrink a filtered list below the current page; return to the last valid page
+    if (total !== undefined && offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor((total - 1) / LIMIT) * LIMIT));
+  }, [total, offset]);
   const bulk = useMutation({
     mutationFn: (st: string) => api.bulkScenarios([...checked], st),
     onSuccess: () => { setChecked(new Set()); qc.invalidateQueries({ queryKey: ["scenarios"] }); },
