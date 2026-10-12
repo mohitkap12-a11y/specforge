@@ -1,4 +1,4 @@
-import type { CmdSource, CovItem, CovRun, CovSummary, Evidence, Issue, Job, Scenario, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { CatalogItem, CmdSource, DecodedCommand, RefResult, CovItem, CovRun, CovSummary, Evidence, Issue, Job, Scenario, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -50,6 +50,22 @@ export const api = {
 
   sets: () => req<SpecSet[]>("GET", "/api/sets"),
   createSet: (name: string, document_ids: number[]) => req<{ id: number }>("POST", "/api/sets", { name, document_ids }),
+  setMembers: (id: number, document_ids: number[]) => req("PUT", `/api/sets/${id}/members`, { document_ids }),
+  deleteSet: (id: number) => req("DELETE", `/api/sets/${id}`),
+  references: (id: number, state?: string) => req<{ summary: Record<string, number>; references: RefResult[] }>("GET", `/api/sets/${id}/references${qs({ state })}`),
+  chooseRef: (id: number, src_key: string, raw: string, chosen_key: string) => req("POST", `/api/sets/${id}/references/choose`, { src_key, raw, chosen_key }),
+  catalog: (id: number, f: { kind?: string; command?: string; observability?: string; q?: string; offset?: number; limit?: number }) =>
+    req<{ total: number; items: CatalogItem[] }>("GET", `/api/sets/${id}/catalog${qs(f)}`),
+  override: (id: number, key: string, observability: string | null, na_reason: string | null) =>
+    req("PUT", `/api/sets/${id}/catalog/override`, { key, observability, na_reason }),
+  correctTable: (run: number, key: string, header: string[], rows: string[][]) => req<{ note: string }>("PUT", `/api/runs/${run}/tables/correction`, { key, header, rows }),
+  settings: () => req<Record<string, any>>("GET", "/api/settings"),
+  saveSettings: (b: Record<string, any>) => req<Record<string, any>>("PUT", "/api/settings", b),
+  providerModels: (name: string) => req<{ ok: boolean; error?: string; models: { id: string; provider?: string }[]; health?: unknown }>("GET", `/api/providers/${name}/models`),
+  health: () => req<{ ok: boolean; version: string; workspace: string; parser_version: string; reparse_available: unknown[] }>("GET", "/api/health"),
+  putMapping: (id: number, mapping: unknown) => req("PUT", `/api/cmddb/${id}/mapping`, mapping),
+  cmdCommands: (id: number, f: { opcode?: number; queue?: string; interface?: string; test?: string; offset?: number; limit?: number }) =>
+    req<DecodedCommand[]>("GET", `/api/cmddb/${id}/commands${qs(f)}`),
   buildCatalog: (id: number) => req<{ job: number }>("POST", `/api/sets/${id}/catalog/build`),
 
   scenarios: (set: number, f: { origin?: string; state?: string; q?: string; offset?: number; limit?: number }) =>

@@ -44,4 +44,18 @@ export interface CovItem {
   state: string; covered: number; total: number; detail: Record<string, any>; attrs: Record<string, any>;
 }
 export interface Evidence { id: number; sid: string; title: string; state: string; observability: string; result: string; match_count: number; evidence: any[] }
-export interface CmdSource { id: number; name: string; path: string; row_count: number; decoded_count: number; status: string; imported_at: string | null }
+export interface CmdSource {
+  id: number; name: string; path: string; row_count: number; decoded_count: number; status: string; imported_at: string | null;
+  mapping: Record<string, any>; unknown: { undecodable_rows?: number; errors?: { row: unknown; error: string }[] };
+}
+export interface CatalogItem {
+  id: number; key: string; kind: string; parent_key: string | null; label: string; observability: string; na_reason: string | null; attrs: Record<string, any>;
+}
+export interface RefResult {
+  src_key: string; raw: string; kind: string; target_family: string | null; target_label: string | null; from_family: string; from_version: string;
+  state: "resolved" | "ambiguous" | "broken" | "external-not-loaded"; target_key: string | null; candidates: string[]; chosen?: boolean;
+}
+export interface DecodedCommand {
+  id: number; src_row_id: number | null; test_id: string | null; seq: number | null; interface: string; queue: string; cs: string | null;
+  opcode: number; nsid: number | null; dwords: Record<string, number>;
+}

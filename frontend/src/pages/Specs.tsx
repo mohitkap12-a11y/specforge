@@ -73,50 +73,6 @@ function DocCard({ doc }: { doc: SpecDoc }) {
   );
 }
 
-function Sets({ docs }: { docs: SpecDoc[] }) {
-  const { track } = useJobs();
-  const qc = useQueryClient();
-  const sets = useQuery({ queryKey: ["sets"], queryFn: api.sets });
-  const [name, setName] = useState("");
-  const [picked, setPicked] = useState<number[]>([]);
-  const create = useMutation({
-    mutationFn: () => api.createSet(name.trim(), picked),
-    onSuccess: () => { setName(""); setPicked([]); qc.invalidateQueries({ queryKey: ["sets"] }); },
-  });
-  const build = useMutation({ mutationFn: (id: number) => api.buildCatalog(id), onSuccess: (r, id) => track(r.job, `Catalog for set #${id}`) });
-  return (
-    <div className="card">
-      <h2>Spec sets</h2>
-      <p className="muted small">A set groups spec versions that reference each other (e.g. Base 2.4 + NVM Command Set 1.3). Build its catalog to create the coverage denominator and template scenarios.</p>
-      <Loading q={sets} />
-      {sets.data && sets.data.length > 0 && (
-        <table className="t">
-          <thead><tr><th>Name</th><th>Members</th><th>Catalog items</th><th>Scenarios</th><th /></tr></thead>
-          <tbody>{sets.data.map((s) => (
-            <tr key={s.id}>
-              <td>{s.name}</td>
-              <td className="small">{s.members.map((m: any) => `${m.family ?? ""} ${m.version ?? ""}`.trim() || `doc ${m.document_id ?? m.id}`).join(", ")}</td>
-              <td>{s.catalog_items}</td><td>{s.scenarios}</td>
-              <td><button disabled={build.isPending} onClick={() => build.mutate(s.id)}>{s.catalog_items ? "Rebuild catalog" : "Build catalog"}</button></td>
-            </tr>
-          ))}</tbody>
-        </table>
-      )}
-      <ErrorNote error={build.error} />
-      <h3>New set</h3>
-      <div className="row">
-        <input placeholder="Set name" value={name} onChange={(e) => setName(e.target.value)} />
-        {docs.map((d) => (
-          <label key={d.id}><input type="checkbox" checked={picked.includes(d.id)}
-            onChange={(e) => setPicked(e.target.checked ? [...picked, d.id] : picked.filter((x) => x !== d.id))} /> {d.family} {d.version}</label>
-        ))}
-        <button className="primary" disabled={!name.trim() || !picked.length || create.isPending} onClick={() => create.mutate()}>Create</button>
-      </div>
-      <ErrorNote error={create.error} />
-    </div>
-  );
-}
-
 export default function SpecsPage() {
   const qc = useQueryClient();
   const specs = useQuery({ queryKey: ["specs"], queryFn: api.specs });
@@ -141,7 +97,7 @@ export default function SpecsPage() {
       <Loading q={specs} />
       {specs.data?.length === 0 && <Empty>No specs yet. Upload the Base and NVM Command Set specs to begin.</Empty>}
       {specs.data?.map((d) => <DocCard key={d.id} doc={d} />)}
-      {specs.data && specs.data.length > 0 && <Sets docs={specs.data} />}
+      {specs.data && specs.data.length > 0 && <p className="muted">Next: group specs into a set on the <Link to="/sets">Sets</Link> page.</p>}
     </>
   );
 }

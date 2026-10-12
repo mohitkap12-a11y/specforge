@@ -21,7 +21,7 @@ Scenario and command **coverage for the NVMe / NVMe-MI specifications**, fully o
 | Command DB import (SQE + MI decoding) and coverage engine (single step, sequences, variables) | implemented, tested |
 | Ollama / OpenCode providers, AI scenario generation with grounding and validation | implemented, tested against a mock Ollama server and a stub `opencode` binary |
 | REST API, CLI, Excel/HTML/CSV/JSON reports | implemented, tested |
-| React UI (Specs, Explorer, Scenarios, Coverage, Reports) | implemented in `frontend/`; checked in a browser against the synthetic demo. Not yet exercised on real specs; Catalog, Command DBs and Settings pages are not built (the API covers them) |
+| React UI (all pages: Dashboard, Specs, Explorer, Sets, Catalog, Scenarios, Command DBs, Coverage, Reports, Jobs, Settings) | implemented in `frontend/`; checked in a browser against the synthetic demo. Not yet exercised on real specs |
 | Real NVMe specs | **not yet run**: they could not be downloaded in the build environment. Run them next; see "Before trusting real-spec results" |
 
 ## Install
@@ -129,4 +129,4 @@ make ui-dev                # Vite dev server on :5173, proxies /api to :8000
 cd frontend && npm test    # unit tests; npm run build also type-checks
 ```
 
-Pages: **Specs** (upload, parse, reparse/activate/diff, spec sets, build catalog), **Explorer** (section tree, text, normative statements, tables, references, parse issues, jump to PDF page), **Scenarios** (filter, bulk approve/reject, detail drawer with live predicate validation, AI generation job), **Coverage** (register a command DB, run, summaries by kind/command, item list with evidence drill-down, run comparison), **Reports** (xlsx / html / json / csv downloads).
+Pages: **Dashboard** (coverage per set, trend, top uncovered commands, recent jobs), **Specs** (upload, parse, reparse/activate/diff), **Explorer** (section tree, text, normative statements, tables with a correction editor, references, parse issues, jump to PDF page), **Sets** (membership, reference resolution with an ambiguity picker, build catalog), **Catalog** (filter, override observability / N/A reason), **Scenarios** (filter, bulk approve/reject, detail drawer with live predicate validation, AI generation), **Command DBs** (add, edit column mapping, import, decoded command browser, undecoded rows), **Coverage** (run, summaries by kind/command, item list with evidence drill-down, run comparison), **Reports** (xlsx / html / json / csv), **Jobs** (state, results, cancel) and **Settings** (providers with connection test, per-task models, parser options, NVMe-MI layout overrides).
