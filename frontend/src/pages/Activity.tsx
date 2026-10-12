@@ -133,6 +133,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [level, sources, job, q]);
 
+  useEffect(() => { if (events.length >= MAX_ROWS) setHasOlder(true); }, [events.length]);   // rows trimmed from the top still exist in the database
   useEffect(() => {   // resuming flushes what arrived while paused
     if (live && pendingRef.current.length) { append(pendingRef.current); pendingRef.current = []; setPending(0); }
   }, [live, append]);
@@ -146,6 +147,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
     const token = view.current;
     const el = box.current;
     const before = el?.scrollHeight ?? 0;
+    const top = el?.scrollTop ?? 0;
     setOlderBusy(true);
     try {
       const r = await api.logs({ limit: 300, before_id: first.id, level, source: sources || undefined, job_id: job, q: q || undefined });
@@ -153,7 +155,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
       setStick(false);
       setEvents((cur) => { const have = new Set(cur.map((x) => x.id)); return [...r.items.filter((x) => !have.has(x.id)), ...cur]; });
       setHasOlder(r.has_older);
-      requestAnimationFrame(() => { if (el) el.scrollTop = el.scrollHeight - before; });   // keep the viewport on the same rows
+      requestAnimationFrame(() => { if (el) el.scrollTop = top + el.scrollHeight - before; });   // keep the viewport on the same rows
     } catch (e) { if (token === view.current) setError(e); }
     finally { if (token === view.current) setOlderBusy(false); }
   };

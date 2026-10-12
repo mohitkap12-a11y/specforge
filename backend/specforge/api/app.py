@@ -672,10 +672,13 @@ def create_app() -> FastAPI:
     def get_logs(after_id: int | None = None, before_id: int | None = None, limit: int = 300, level: str | None = None,
                  source: str | None = None, job_id: int | None = None, q: str | None = None):
         eventlog.drain(1.0)       # include events queued a moment ago
-        items = eventlog.query(conn(), after_id=after_id, before_id=before_id, limit=limit, level=level, sources=_split(source), job_id=job_id, q=q)
+        srcs = _split(source)
+        # the watermark is read BEFORE the history: an event committed in between is then delivered by the live stream instead of being skipped
         newest = conn().execute("SELECT COALESCE(MAX(id),0) FROM event_log").fetchone()[0]
-        oldest_here = items[0]["id"] if items else None
-        has_older = bool(oldest_here and conn().execute("SELECT 1 FROM event_log WHERE id<? LIMIT 1", (oldest_here,)).fetchone()) if after_id is None else False
+        items = eventlog.query(conn(), after_id=after_id, before_id=before_id, limit=limit, level=level, sources=srcs, job_id=job_id, q=q)
+        has_older = False
+        if after_id is None and items:       # older events that match the SAME filters, not merely any older row
+            has_older = bool(eventlog.query(conn(), before_id=items[0]["id"], limit=1, level=level, sources=srcs, job_id=job_id, q=q))
         return {"items": items, "newest_id": newest, "has_older": has_older, "sources": list(eventlog.SOURCES)}
 
     @app.get("/api/logs/stream")

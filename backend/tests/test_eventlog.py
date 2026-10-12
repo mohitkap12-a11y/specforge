@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import threading
 import time
 
@@ -300,3 +301,62 @@ def test_active_jobs_are_not_limited_to_the_recent_page(client):
     c.close()
     assert len(client.get("/api/jobs").json()) == 50                 # the capped history
     assert len(client.get("/api/jobs", params={"state": "active"}).json()) == 70
+
+
+def test_has_older_only_counts_events_matching_the_filters(client):
+    eventlog.emit("error", "job", "an error")
+    eventlog.emit("info", "job", "later info")
+    eventlog.drain(5)
+    # the startup event and "later info" do not match level=error, so there is nothing older to load
+    r = client.get("/api/logs", params={"level": "error", "limit": 1}).json()
+    assert [e["message"] for e in r["items"]] == ["an error"] and r["has_older"] is False
+    # but an unfiltered page starting at "an error" does have older history (the startup event)
+    r = client.get("/api/logs", params={"limit": 2}).json()
+    assert r["has_older"] is True
+
+
+def test_newest_id_is_a_watermark_taken_before_the_history(client, monkeypatch):
+    """An event committed while the page is being built must be delivered by the stream, never skipped."""
+    seen = {}
+    real = eventlog.query
+
+    def query(conn, **kw):
+        out = real(conn, **kw)
+        eventlog.emit("info", "system", "arrived mid-request")      # lands after the history was read
+        eventlog.drain(5)
+        seen["hit"] = True
+        return out
+
+    monkeypatch.setattr(eventlog, "query", query)
+    r = client.get("/api/logs").json()
+    monkeypatch.setattr(eventlog, "query", real)
+    assert seen["hit"] and "arrived mid-request" not in [e["message"] for e in r["items"]]
+    after = client.get("/api/logs", params={"after_id": r["newest_id"]}).json()["items"]
+    assert "arrived mid-request" in [e["message"] for e in after]
+
+
+def test_prune_failure_does_not_requeue_or_recount_committed_events(tmp_path):
+    class Flaky:
+        """Real connection whose retention DELETE hits a lock timeout."""
+        def __init__(self, c): self.c = c
+        def executemany(self, *a): return self.c.executemany(*a)
+        def commit(self): return self.c.commit()
+        def rollback(self): return self.c.rollback()
+        def execute(self, sql, *a):
+            if sql.lstrip().startswith("DELETE"):
+                raise sqlite3.OperationalError("database is locked")
+            return self.c.execute(sql, *a)
+
+    db = str(tmp_path / "x.db")
+    real = connect(db)
+    batch = [(db, "2026-01-01T00:00:00.000Z", "info", "system", None, f"e{i}", None, 0) for i in range(12)]
+    inserted: dict[str, int] = {}
+    old = eventlog.PRUNE_EVERY
+    eventlog.PRUNE_EVERY = 5
+    try:
+        retry, finished = eventlog._write(batch, {db: Flaky(real)}, inserted)
+    finally:
+        eventlog.PRUNE_EVERY = old
+    assert retry == [] and finished == 12                      # committed once: not re-queued, counted exactly once
+    assert real.execute("SELECT COUNT(*) FROM event_log").fetchone()[0] == 12
+    assert inserted[db] == 12                                  # the prune is attempted again after the next batch

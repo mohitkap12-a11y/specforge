@@ -116,6 +116,8 @@ export default function OverviewPage() {
   if (specs.error) return <><PageHeader title="Overview" /><ErrorNote error={specs.error} /></>;     // never mistake a failed load for an empty workspace
   const docs = specs.data ?? [];
   const setList = sets.data ?? [];
+  const nRuns = (covRuns.data ?? []).length;
+  const runCount = nRuns >= 100 ? "100+" : String(nRuns);       // the API returns at most the latest 100 runs
   const steps = [
     { icon: FileUp, title: "Upload specifications", body: "Add the NVMe Base and NVM Command Set (and optionally NVMe-MI) PDFs or DOCX files.", done: docs.length > 0, to: "/specs", cta: "Upload specs", detail: `${docs.length} uploaded` },
     { icon: Sparkles, title: "Parse them", body: "Extract sections, tables, bit fields and normative statements, with an audit of what was found.", done: docs.some((d) => d.runs.some((r) => r.status === "done")), to: "/specs", cta: "Parse", detail: `${docs.filter((d) => d.runs.some((r) => r.status === "done")).length} of ${docs.length} parsed` },
@@ -123,7 +125,7 @@ export default function OverviewPage() {
     { icon: Check, title: "Build the catalog", body: "List every command, field, value and reserved bit. This is the coverage denominator.", done: setList.some((s) => s.catalog_items > 0), to: "/sets", cta: "Build catalog", detail: `${setList.reduce((n, s) => n + s.catalog_items, 0)} items` },
     { icon: Bot, title: "Review scenarios", body: "Template scenarios are generated for you. Optionally draft more with a local model, then approve.", done: setList.some((s) => s.scenarios > 0), to: "/scenarios", cta: "Open scenarios", detail: `${setList.reduce((n, s) => n + s.scenarios, 0)} scenarios` },
     { icon: FileUp, title: "Import a command database", body: "Point at the SQLite dump of submitted commands and check the column mapping.", done: (sources.data ?? []).some((s) => s.status === "imported"), to: "/cmddb", cta: "Add database", detail: `${(sources.data ?? []).length} source(s)` },
-    { icon: ShieldCheck, title: "Run coverage", body: "Match approved scenarios against the commands and see what is covered, partial or missing.", done: (covRuns.data ?? []).length > 0, to: "/coverage", cta: "Run coverage", detail: `${(covRuns.data ?? []).length} run(s)` },
+    { icon: ShieldCheck, title: "Run coverage", body: "Match approved scenarios against the commands and see what is covered, partial or missing.", done: (covRuns.data ?? []).length > 0, to: "/coverage", cta: "Run coverage", detail: `${runCount} run(s)` },
   ];
   const firstOpen = steps.findIndex((s) => !s.done);
   const doneCount = steps.filter((s) => s.done).length;
@@ -196,7 +198,7 @@ export default function OverviewPage() {
         <div className="card stat"><div className="label">Specs parsed</div><div className="big">{docs.filter((d) => d.runs.some((r) => r.status === "done")).length}<span className="muted" style={{ fontSize: 16 }}> / {docs.length}</span></div></div>
         <div className="card stat"><div className="label">Catalog items</div><div className="big">{setList.reduce((n, s) => n + s.catalog_items, 0)}</div></div>
         <div className="card stat"><div className="label">Scenarios</div><div className="big">{setList.reduce((n, s) => n + s.scenarios, 0)}</div></div>
-        <div className="card stat"><div className="label">Coverage runs</div><div className="big">{(covRuns.data ?? []).length}</div></div>
+        <div className="card stat"><div className="label">Coverage runs</div><div className="big">{runCount}</div></div>
       </div>
 
       {setList.map((s) => <SetTile key={s.id} set={s} />)}

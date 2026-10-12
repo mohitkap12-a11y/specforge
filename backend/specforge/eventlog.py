@@ -111,6 +111,39 @@ def _ensure_writer() -> None:
             _writer.start()
 
 
+def _write(pending: list[tuple], conns: dict[str, sqlite3.Connection], inserted: dict[str, int]) -> tuple[list[tuple], int]:
+    """Write one batch. Returns (events to retry, events finished: written or given up on). Pure of threads, so it can be tested directly."""
+    by_db: dict[str, list[tuple]] = {}
+    for ev in pending:
+        by_db.setdefault(ev[0], []).append(ev)
+    retry: list[tuple] = []
+    finished = 0
+    for db, evs in by_db.items():
+        try:
+            c = conns.get(db) or conns.setdefault(db, connect(db))
+            c.executemany("INSERT INTO event_log(ts,level,source,job_id,message,data_json) VALUES(?,?,?,?,?,?)", [e[1:7] for e in evs])
+            c.commit()
+            finished += len(evs)                       # committed: from here on these events are never retried or recounted
+            inserted[db] = inserted.get(db, 0) + len(evs)
+            if inserted[db] >= PRUNE_EVERY:
+                try:                                    # retention is best effort and separate from the inserts above
+                    c.execute("DELETE FROM event_log WHERE id <= (SELECT MAX(id) FROM event_log) - ?", (KEEP_ROWS,))
+                    c.commit()
+                    inserted[db] = 0
+                except sqlite3.Error:
+                    c.rollback()                        # try again after the next batch
+        except sqlite3.OperationalError as e:
+            conns.pop(db, None)
+            busy = "locked" in str(e) or "busy" in str(e)
+            keep = [(*e_[:7], e_[7] + 1) for e_ in evs if busy and e_[7] < 100]     # a busy database is retried; a missing one is not
+            retry += keep
+            finished += len(evs) - len(keep)
+        except Exception:  # noqa: BLE001
+            conns.pop(db, None)
+            finished += len(evs)
+    return retry, finished
+
+
 def _run() -> None:
     global _done
     conns: dict[str, sqlite3.Connection] = {}
@@ -128,31 +161,7 @@ def _run() -> None:
                 pending.append((*_q.get_nowait(), 0))
             except queue.Empty:
                 break
-        by_db: dict[str, list[tuple]] = {}
-        for ev in pending:
-            by_db.setdefault(ev[0], []).append(ev)
-        retry: list[tuple] = []
-        finished = 0
-        for db, evs in by_db.items():
-            try:
-                c = conns.get(db) or conns.setdefault(db, connect(db))
-                c.executemany("INSERT INTO event_log(ts,level,source,job_id,message,data_json) VALUES(?,?,?,?,?,?)", [e[1:7] for e in evs])
-                c.commit()
-                finished += len(evs)
-                inserted[db] = inserted.get(db, 0) + len(evs)
-                if inserted[db] >= PRUNE_EVERY:
-                    inserted[db] = 0
-                    c.execute("DELETE FROM event_log WHERE id <= (SELECT MAX(id) FROM event_log) - ?", (KEEP_ROWS,))
-                    c.commit()
-            except sqlite3.OperationalError as e:
-                conns.pop(db, None)
-                busy = "locked" in str(e) or "busy" in str(e)
-                keep = [(*e_[:7], e_[7] + 1) for e_ in evs if busy and e_[7] < 100]     # a busy database is retried; a missing one is not
-                retry += keep
-                finished += len(evs) - len(keep)
-            except Exception:  # noqa: BLE001
-                conns.pop(db, None)
-                finished += len(evs)
+        retry, finished = _write(pending, conns, inserted)
         with _lock:
             _done += finished
         pending = retry[-MAX_QUEUE:]
