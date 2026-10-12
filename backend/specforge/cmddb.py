@@ -290,6 +290,8 @@ def import_source(conn: sqlite3.Connection, source_id: int, mi_layout: dict | No
         raise KeyError(source_id)
     mapping = json.loads(src["mapping_json"])
     layout = merged_layout(mi_layout)
+    # the file may have changed since it was registered: record the hash of the bytes actually imported
+    conn.execute("UPDATE cmd_source SET sha256=? WHERE id=?", (sha256_file(src["path"]), source_id))
     conn.execute("DELETE FROM decoded_command WHERE source_id=?", (source_id,))
     conn.execute("DELETE FROM cmd_signature WHERE source_id=?", (source_id,))
     sigs: dict[str, dict] = {}

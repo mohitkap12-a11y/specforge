@@ -242,7 +242,11 @@ def create_app() -> FastAPI:
 
     @app.delete("/api/sets/{set_id}")
     def delete_set(set_id: int):
-        conn().execute("DELETE FROM coverage_run WHERE set_id=?", (set_id,))      # explicit deletes also cover databases created before the FKs existed
+        # explicit deletes (children first) also cover databases created before the cascading foreign keys existed
+        runs = "(SELECT id FROM coverage_run WHERE set_id=?)"
+        conn().execute(f"DELETE FROM coverage_result WHERE run_id IN {runs}", (set_id,))
+        conn().execute(f"DELETE FROM item_result WHERE run_id IN {runs}", (set_id,))
+        conn().execute("DELETE FROM coverage_run WHERE set_id=?", (set_id,))
         conn().execute("DELETE FROM ref_choice WHERE set_id=?", (set_id,))
         conn().execute("DELETE FROM item_override WHERE set_id=?", (set_id,))
         conn().execute("DELETE FROM spec_set WHERE id=?", (set_id,))

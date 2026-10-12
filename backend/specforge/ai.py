@@ -150,6 +150,8 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
     existing = {r["predicate_json"] for r in rows(conn, "SELECT predicate_json FROM scenario WHERE set_id=?", (set_id,))}
     stats = {"requirements": len(reqs), "created": 0, "not_testable": 0, "rejected": 0, "failed": 0, "duplicates": 0}
     for n, req in enumerate(reqs):
+        if progress:       # first thing in the loop: every iteration (including failed and not-testable ones) checks cancellation
+            progress(n, len(reqs))
         req["attrs"] = jloads(req.pop("attrs_json"), {})
         ctx = build_context(conn, set_id, req)
         # validate against what the model was shown: the requirement's own command, not the whole set
@@ -206,8 +208,6 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
         _record(conn, set_id, req["key"], "generate", svc, "ok" if created else "needs_review", out.model_dump(),
                 "; ".join(problems) or None, meta)
         conn.commit()
-        if progress:
-            progress(n + 1, len(reqs))
     return stats
 
 
