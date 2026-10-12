@@ -17,6 +17,11 @@ def clean(s: str | None) -> str:
     return _WS.sub(" ", s.translate(_QUOTES)).strip()
 
 
+def norm_text(s: str) -> str:
+    """Whitespace / quote / dash normalisation WITHOUT case folding (used for verbatim-quote checks)."""
+    return _WS.sub(" ", s.translate(_DASHES).translate(_QUOTES)).strip()
+
+
 def norm_title(s: str) -> str:
     return _WS.sub(" ", s.translate(_DASHES).translate(_QUOTES)).strip().lower()
 

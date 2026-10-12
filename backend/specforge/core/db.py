@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS coverage_result(
 CREATE TABLE IF NOT EXISTS item_result(
   run_id INTEGER NOT NULL REFERENCES coverage_run(id) ON DELETE CASCADE, item_key TEXT NOT NULL,
   state TEXT NOT NULL, covered INTEGER DEFAULT 0, total INTEGER DEFAULT 0, detail_json TEXT,
+  kind TEXT, parent_key TEXT, label TEXT, observability TEXT, na_reason TEXT, attrs_json TEXT,   -- run-time snapshot of the catalog item
   PRIMARY KEY(run_id, item_key)
 );
 

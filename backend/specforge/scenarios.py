@@ -27,15 +27,32 @@ class PredicateError(ValueError):
     pass
 
 
+def _is_int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
 def _dw_ok(dw: Any) -> bool:
-    return (isinstance(dw, int) and 0 <= dw <= 15) or dw in ("nmd0", "nmd1")
+    return (_is_int(dw) and 0 <= dw <= 15) or (isinstance(dw, str) and dw in ("nmd0", "nmd1"))
+
+
+def _in(v: Any, allowed: set) -> bool:
+    return isinstance(v, str) and v in allowed          # scalar check first: lists / dicts are unhashable
+
+
+def _routes(cmd: dict) -> set[tuple[str, str]]:
+    """(interface, queue) pairs under which a catalog command can legitimately appear in the log."""
+    if cmd.get("interface") == "mi":
+        return {("mi", "mi")}
+    if cmd.get("queue") == "admin":
+        return {("pcie", "admin"), ("mi", "admin")}       # an Admin command may also be tunnelled in an NVMe-MI message
+    return {("pcie", cmd.get("queue", "io"))}
 
 
 def validate_predicate(pred: dict, commands: dict[str, dict] | None = None, fields: dict[str, list[dict]] | None = None) -> list[str]:
-    """Return a list of problems (empty == valid).
+    """Return a list of problems (empty == valid). Never raises on malformed input.
 
     commands: catalog command attrs by key; fields: described fields (attrs) by command key.  When given, the
-    step's opcode/queue must match the catalog command and each field must lie inside a described bit range.
+    step's opcode / queue / command set must match the catalog command and each field must lie inside a described bit range.
     """
     errs: list[str] = []
     if not isinstance(pred, dict):
@@ -43,68 +60,97 @@ def validate_predicate(pred: dict, commands: dict[str, dict] | None = None, fiel
     steps = pred.get("steps")
     if not isinstance(steps, list) or not steps:
         return ["'steps' must be a non-empty list"]
-    if pred.get("scope", "global") not in SCOPES:
+    if not _in(pred.get("scope", "global"), SCOPES):
         errs.append(f"scope must be one of {sorted(SCOPES)}")
-    if pred.get("order", "strict") not in ("strict", "any"):
+    if not _in(pred.get("order", "strict"), {"strict", "any"}):
         errs.append("order must be 'strict' or 'any'")
     w = pred.get("within")
-    if w is not None and not (isinstance(w, int) and w > 0):
+    if w is not None and not (_is_int(w) and w > 0):
         errs.append("'within' must be a positive integer")
+
+    def bitrange(q: str, o: dict) -> bool:
+        hi, lo = o.get("hi"), o.get("lo")
+        if not (_is_int(hi) and _is_int(lo) and 0 <= lo <= hi <= 31):
+            errs.append(f"{q}: need integers 0 <= lo <= hi <= 31")
+            return False
+        return True
+
     caps: set[str] = set()
     for i, st in enumerate(steps):
         p = f"steps[{i}]"
-        if st.get("interface") not in INTERFACES:
+        if not isinstance(st, dict):
+            errs.append(f"{p} must be an object")
+            continue
+        if not _in(st.get("interface"), INTERFACES):
             errs.append(f"{p}.interface must be one of {sorted(INTERFACES)}")
-        if st.get("queue") not in QUEUES:
+        if not _in(st.get("queue"), QUEUES):
             errs.append(f"{p}.queue must be one of {sorted(QUEUES)}")
-        if not isinstance(st.get("opcode"), int) or not 0 <= st["opcode"] <= 0xFF:
+        if not _is_int(st.get("opcode")) or not 0 <= st["opcode"] <= 0xFF:
             errs.append(f"{p}.opcode must be an integer 0..255")
         cmd = None
-        if commands is not None and st.get("command"):
+        if commands is not None and isinstance(st.get("command"), str):
             cmd = commands.get(st["command"])
             if cmd is None:
                 errs.append(f"{p}.command '{st['command']}' is not in the catalog")
             else:
                 if cmd.get("opcode") != st.get("opcode"):
                     errs.append(f"{p}.opcode {st.get('opcode')} does not match catalog opcode {cmd.get('opcode')} for {st['command']}")
-        for j, f in enumerate(st.get("fields", [])):
+                if (st.get("interface"), st.get("queue")) not in _routes(cmd):
+                    errs.append(f"{p}: interface/queue {st.get('interface')}/{st.get('queue')} is not a valid route for {st['command']}")
+                if cmd.get("queue") == "io" and st.get("cs") != cmd.get("cs"):
+                    errs.append(f"{p}.cs must be '{cmd.get('cs')}' for {st['command']}")
+        flist = st.get("fields", [])
+        if not isinstance(flist, list):
+            errs.append(f"{p}.fields must be a list")
+            flist = []
+        for j, f in enumerate(flist):
             q = f"{p}.fields[{j}]"
+            if not isinstance(f, dict):
+                errs.append(f"{q} must be an object")
+                continue
             if not _dw_ok(f.get("dw")):
                 errs.append(f"{q}.dw must be 0..15 or 'nmd0'/'nmd1'")
-            hi, lo = f.get("hi"), f.get("lo")
-            if not (isinstance(hi, int) and isinstance(lo, int) and 0 <= lo <= hi <= 31):
-                errs.append(f"{q}: need integers 0 <= lo <= hi <= 31")
+            if not bitrange(q, f):
                 continue
+            hi, lo = f["hi"], f["lo"]
             op = f.get("op", "eq")
-            if op not in OPS:
-                errs.append(f"{q}.op '{op}' not in {sorted(OPS)}")
+            if not _in(op, OPS):
+                errs.append(f"{q}.op {op!r} not in {sorted(OPS)}")
                 continue
             width = hi - lo + 1
             val = f.get("value")
             if isinstance(val, dict) and "var" in val:
-                if val["var"] not in caps:
-                    errs.append(f"{q}: variable '{val['var']}' is not captured by an earlier step")
+                if op not in ("eq", "ne"):
+                    errs.append(f"{q}: a captured variable can only be used with 'eq' or 'ne' (captures are single integers)")
+                elif not isinstance(val["var"], str) or val["var"] not in caps:
+                    errs.append(f"{q}: variable {val['var']!r} is not captured by an earlier step")
             elif op in ("eq", "ne"):
-                if not isinstance(val, int) or not 0 <= val < (1 << width):
+                if not _is_int(val) or not 0 <= val < (1 << width):
                     errs.append(f"{q}.value {val!r} does not fit {width} bits")
             elif op == "in":
-                if not isinstance(val, list) or not val or any(not isinstance(v, int) or not 0 <= v < (1 << width) for v in val):
+                if not isinstance(val, list) or not val or any(not _is_int(v) or not 0 <= v < (1 << width) for v in val):
                     errs.append(f"{q}.value must be a list of integers fitting {width} bits")
             elif op == "range":
-                if not (isinstance(val, dict) and isinstance(val.get("lo"), int) and isinstance(val.get("hi"), int)
-                        and 0 <= val["lo"] <= val["hi"] < (1 << width)):
+                if not (isinstance(val, dict) and _is_int(val.get("lo")) and _is_int(val.get("hi")) and 0 <= val["lo"] <= val["hi"] < (1 << width)):
                     errs.append(f"{q}.value must be {{lo,hi}} within {width} bits")
             elif op == "mask":
-                if not (isinstance(val, dict) and isinstance(val.get("mask"), int) and isinstance(val.get("value"), int)):
+                if not (isinstance(val, dict) and _is_int(val.get("mask")) and _is_int(val.get("value"))):
                     errs.append(f"{q}.value must be {{mask,value}}")
             if fields is not None and cmd is not None and not errs:
                 ok = any(a["dw"] == f["dw"] and a["lo"] <= lo and hi <= a["hi"] for a in fields.get(st["command"], []))
                 if not ok:
                     errs.append(f"{q}: {f['dw']}[{hi}:{lo}] is not inside any field described for {st['command']}")
-        for name, c in (st.get("capture") or {}).items():
-            if not _dw_ok(c.get("dw")) or not isinstance(c.get("hi"), int) or not isinstance(c.get("lo"), int):
-                errs.append(f"{p}.capture.{name} needs dw/hi/lo")
-            caps.add(name)
+        capture = st.get("capture") or {}
+        if not isinstance(capture, dict):
+            errs.append(f"{p}.capture must be an object")
+            capture = {}
+        for name, c in capture.items():
+            q = f"{p}.capture.{name}"
+            if not isinstance(c, dict) or not _dw_ok(c.get("dw")):
+                errs.append(f"{q} needs dw/hi/lo")
+                continue
+            bitrange(q, c)
+            caps.add(str(name))
     return errs
 
 

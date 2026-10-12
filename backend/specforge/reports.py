@@ -27,10 +27,8 @@ def build_dataset(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     for s in specs:
         a = jloads(s.pop("audit_json"), {})
         s["audit_score"], s["errors"], s["warnings"] = a.get("score"), a.get("errors"), a.get("warnings")
-    items = rows(conn, """SELECT c.key,c.kind,c.parent_key,c.label,c.observability,c.na_reason,c.attrs_json,
-                                 i.state,i.covered,i.total
-                          FROM catalog_item c LEFT JOIN item_result i ON i.item_key=c.key AND i.run_id=?
-                          WHERE c.set_id=? ORDER BY c.id""", (run_id, run["set_id"]))
+    items = rows(conn, """SELECT item_key AS key,kind,parent_key,label,observability,na_reason,attrs_json,state,covered,total
+                          FROM item_result WHERE run_id=? ORDER BY rowid""", (run_id,))     # the run's own snapshot
     for i in items:
         a = jloads(i.pop("attrs_json"), {})
         i["command"] = a.get("command") or (i["key"] if i["kind"] == "command" else "")

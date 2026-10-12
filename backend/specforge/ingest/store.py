@@ -227,6 +227,7 @@ def load_ir(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
             ir["section_order"].append(n["number"])
         elif n["kind"] == "table":
             ir["tables"][n["number"]] = {"key": n["key"], "label": n["number"], "caption": n["title"] or "", "page_from": n["page_from"],
+                                         "parent_key": n["parent_key"],
                                          "page_to": n["page_to"], **a}
         else:
             ir["requirements"].append({"key": n["key"], "text": n["text"], "page": n["page_from"], **a})
@@ -237,10 +238,11 @@ def load_ir(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
 def diff_runs(conn: sqlite3.Connection, a: int, b: int) -> dict[str, Any]:
     def snap(run_id: int) -> dict[str, str]:
         out = {}
-        for n in rows(conn, "SELECT key,kind,title,text,attrs_json FROM ir_node WHERE run_id=?", (run_id,)):
+        for n in rows(conn, "SELECT key,kind,title,text,parent_key,attrs_json FROM ir_node WHERE run_id=?", (run_id,)):
             a_ = jloads(n["attrs_json"], {})
             body = a_.get("rows") if n["kind"] == "table" else n["text"]
-            out[n["key"]] = sha256_text(json.dumps([n["title"], body, a_.get("header")], default=str))
+            structure = {k: a_.get(k) for k in ("section", "parent_cell", "captioned", "level", "strength", "table")}
+            out[n["key"]] = sha256_text(json.dumps([n["title"], body, a_.get("header"), n["parent_key"], structure], default=str))
         return out
 
     sa, sb = snap(a), snap(b)

@@ -32,6 +32,7 @@ from .normalize import (
 from .semantics import build_semantics
 
 QUALITY_FALLBACK_THRESHOLD = 0.72
+MIN_RULING_SEGMENTS = 8   # drawn lines / rectangles on a page before we suspect a ruled table PyMuPDF missed
 _NUM_HEADING = re.compile(r"^((?:\d+(?:\.\d+)*)|(?:Annex\s+[A-Z](?:\.\d+)*)|(?:[A-Z](?:\.\d+)+))\s+(\S.*)$")
 _TOC_LEADER = re.compile(r"(\.{4,}|…{2,}|(?:\.\s){4,})\s*\d*\s*$")
 _PAGENUM = re.compile(r"^\s*(?:page\s+)?\d{1,4}(?:\s*(?:of|/)\s*\d{1,4})?\s*$", re.I)
@@ -79,7 +80,12 @@ def _extract_chunk(args: tuple[str, list[int], bool]) -> list[dict[str, Any]]:
                                        "quality": _table_quality(rows)})
             except Exception:  # pragma: no cover - defensive
                 pass
-            if allow_fallback and any(t["quality"] < QUALITY_FALLBACK_THRESHOLD for t in tables):
+            weak = any(t["quality"] < QUALITY_FALLBACK_THRESHOLD for t in tables)
+            # a page with no PyMuPDF table that still names one in a caption, or is full of ruling lines (the middle page of a
+            # multi-page table has no caption), is worth a second look with pdfplumber
+            missed = not tables and (any(parse_caption(ln) for ln in page.get_text("text").splitlines())
+                                     or len(page.get_drawings()) >= MIN_RULING_SEGMENTS)
+            if allow_fallback and (weak or missed):
                 try:
                     if plumber is None:
                         import pdfplumber
@@ -89,8 +95,13 @@ def _extract_chunk(args: tuple[str, list[int], bool]) -> list[dict[str, Any]]:
                         rows = _cells(pt.extract())
                         q = _table_quality(rows)
                         bb = [float(v) for v in pt.bbox]
-                        for t in list(tables):
-                            if _overlap(t["bbox"], bb) > 0.6 and q > t["quality"]:
+                        overlapping = [t for t in tables if _overlap(t["bbox"], bb) > 0.6]
+                        if not overlapping:
+                            if rows and q >= QUALITY_FALLBACK_THRESHOLD:     # a table PyMuPDF missed entirely
+                                tables.append({"bbox": bb, "rows": rows, "extractor": "pdfplumber", "quality": q})
+                            continue
+                        for t in overlapping:
+                            if q > t["quality"]:
                                 tables.remove(t)
                                 tables.append({"bbox": bb, "rows": rows, "extractor": "pdfplumber", "quality": q})
                 except Exception:  # pragma: no cover
@@ -365,13 +376,13 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
                     wrap = None
                 # heading match
                 matched = None
-                if pending_entries:
-                    e = pending_entries[0]
-                    nt, nl = norm_title(e.title), norm_title(text)
+                nl = norm_title(text)
+                for k_, e in enumerate(pending_entries):      # any pending bookmark of this page may match, not just the first
+                    nt = norm_title(e.title)
                     if nl == nt or (len(nl) >= 3 and nt.startswith(nl) and (l["bold"] or _NUM_HEADING.match(text))):
-                        matched = e
+                        matched = pending_entries.pop(k_)
+                        break
                 if matched is not None:
-                    pending_entries.pop(0)
                     matched.consumed = True
                     flush_caption(pending_caption)
                     pending_caption = None

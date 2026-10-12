@@ -13,6 +13,11 @@ from typing import Any
 from .core.db import jloads, row, rows
 
 EVIDENCE_LIMIT = 50
+MAX_SEARCH_STEPS = 300_000   # per scenario; exceeding it is reported as an error, never silently as "not matched"
+
+
+class SearchBudgetExceeded(RuntimeError):
+    pass
 STATES = ("covered", "stimulus_covered", "partial", "not_covered", "no_scenario", "needs_review", "na")
 
 
@@ -118,15 +123,24 @@ def eval_sequence(conn: sqlite3.Connection, source_id: int, pred: dict, sigs_by:
     for _, seq_rows in rows_by_scope.items():
         seq_rows.sort(key=lambda r: (r["test_id"], r["seq"]))
 
+        budget = [MAX_SEARCH_STEPS]
+        failed: set = set()    # strict order: (step, start, captured values) states already proven dead within one search
+
         def attempt(step_i: int, start: int, env: dict, chosen: list[tuple[int, dict]], used: set) -> list[tuple[int, dict]] | None:
             if step_i == len(steps):
                 return chosen
+            memo = (step_i, start, tuple(sorted(env.items())))
+            if order == "strict" and memo in failed:
+                return None
             st = steps[step_i]
             rng = range(start, len(seq_rows)) if order == "strict" else range(len(seq_rows))
             for idx in rng:
                 r = seq_rows[idx]
                 if idx in used or r["signature"] not in cand_sigs[step_i]:
                     continue
+                budget[0] -= 1
+                if budget[0] < 0:
+                    raise SearchBudgetExceeded(f"sequence search exceeded {MAX_SEARCH_STEPS} steps")
                 if within is not None and chosen and abs(r["seq"] - chosen[-1][1]["seq"]) > within:
                     continue
                 sig = cand_sigs[step_i][r["signature"]]
@@ -140,15 +154,18 @@ def eval_sequence(conn: sqlite3.Connection, source_id: int, pred: dict, sigs_by:
                 res = attempt(step_i + 1, idx + 1, env2, chosen + [(idx, r)], used | {idx})
                 if res is not None:
                     return res
+            if order == "strict":
+                failed.add(memo)
             return None
 
-        # count disjoint occurrences: rows of an earlier match are never reused
+        # count disjoint occurrences: rows of an earlier match are never reused, and every search restarts from the
+        # first row so a later start can still pair rows that an earlier greedy match skipped over
         consumed: set[int] = set()
-        pos = 0
         while True:
+            failed.clear()
             found = None
             if order == "strict":
-                for first in range(pos, len(seq_rows)):
+                for first in range(len(seq_rows)):
                     if first in consumed or seq_rows[first]["signature"] not in cand_sigs[0]:
                         continue
                     found = attempt(0, first, {}, [], consumed)
@@ -162,7 +179,6 @@ def eval_sequence(conn: sqlite3.Connection, source_id: int, pred: dict, sigs_by:
             if len(evidence) < EVIDENCE_LIMIT:
                 evidence.extend(r for _, r in found)
             consumed |= {i for i, _ in found}
-            pos = max(i for i, _ in found) + 1
     return matches, evidence[:EVIDENCE_LIMIT]
 
 
@@ -187,7 +203,9 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
             count, ev = (eval_single if len(pred["steps"]) == 1 else eval_sequence)(conn, source_id, pred, sigs_by)
         except Exception as e:  # noqa: BLE001
             count, ev = 0, [{"error": str(e)}]
-        st = "matched" if count > 0 else "not_matched"
+            st = "error"
+        else:
+            st = "matched" if count > 0 else "not_matched"
         results[s["id"]] = {"state": st, "count": count}
         batch.append((run_id, s["id"], st, count, json.dumps(ev)))
         if progress and n % 200 == 0:
@@ -210,8 +228,13 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
     for it in items:
         if it["kind"] == "field":
             item_res[it["key"]] = _aggregate([item_res[c["key"]] for c in children.get(it["key"], [])])
-    conn.executemany("INSERT INTO item_result(run_id,item_key,state,covered,total,detail_json) VALUES(?,?,?,?,?,?)",
-                     [(run_id, k, v["state"], v.get("covered", 0), v.get("total", 0), json.dumps(v.get("detail", {}))) for k, v in item_res.items()])
+    by_key = {i["key"]: i for i in items}
+    # the catalog is mutable (rebuilds, overrides); a coverage run keeps its own snapshot of every item it judged
+    conn.executemany("INSERT INTO item_result(run_id,item_key,state,covered,total,detail_json,kind,parent_key,label,observability,na_reason,attrs_json)"
+                     " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                     [(run_id, k, v["state"], v.get("covered", 0), v.get("total", 0), json.dumps(v.get("detail", {})),
+                       by_key[k]["kind"], by_key[k]["parent_key"], by_key[k]["label"], by_key[k]["observability"], by_key[k]["na_reason"],
+                       by_key[k]["attrs_json"]) for k, v in item_res.items()])
     summary = summarize_run(conn, run_id, set_id, source_id, items, item_res, sigs_by)
     conn.execute("UPDATE coverage_run SET summary_json=? WHERE id=?", (json.dumps(summary), run_id))
     conn.commit()
@@ -301,7 +324,8 @@ def summarize_run(conn, run_id, set_id, source_id, items, item_res, sigs_by) -> 
             "by_command": {k: _counts(v) for k, v in by_cmd.items()},
             "by_family": {k: _counts(v) for k, v in by_family.items()},
             "unknown_commands": sorted(unknown, key=lambda u: -u["commands"]),
-            "scenarios": rows(conn, "SELECT state, COUNT(*) AS n FROM scenario WHERE set_id=? GROUP BY state", (set_id,))}
+            "scenarios": rows(conn, "SELECT state, COUNT(*) AS n FROM scenario WHERE set_id=? GROUP BY state", (set_id,)),
+            "scenario_errors": conn.execute("SELECT COUNT(*) FROM coverage_result WHERE run_id=? AND state='error'", (run_id,)).fetchone()[0]}
 
 
 def diff_runs(conn: sqlite3.Connection, a: int, b: int) -> dict[str, Any]:

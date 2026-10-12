@@ -121,6 +121,11 @@ KNOWN = {
 }
 
 
+def _q(name: str) -> str:
+    """Quote an SQL identifier (embedded double quotes are doubled)."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
 def _open_ro(path: str) -> sqlite3.Connection:
     """Open read-only through a properly escaped file URI (paths may contain '?', '#', '%')."""
     return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
@@ -131,7 +136,7 @@ def list_tables(path: str) -> dict[str, list[str]]:
     try:
         out = {}
         for (name,) in con.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%'"):
-            out[name] = [r[1] for r in con.execute(f'PRAGMA table_info("{name}")')]
+            out[name] = [r[1] for r in con.execute(f"PRAGMA table_info({_q(name)})")]
         return out
     finally:
         con.close()
@@ -222,7 +227,7 @@ def iter_source_rows(path: str, mapping: dict) -> Iterator[sqlite3.Row]:
     con.row_factory = sqlite3.Row
     try:
         order = mapping.get("seq") or mapping.get("id")
-        sql = f'SELECT * FROM "{mapping["table"]}"' + (f' ORDER BY "{mapping["test"]}", "{order}"' if mapping.get("test") and order and isinstance(order, str) else "")
+        sql = f'SELECT * FROM {_q(mapping["table"])}' + (f' ORDER BY {_q(mapping["test"])}, {_q(order)}' if mapping.get("test") and order and isinstance(order, str) else "")
         cur = con.execute(sql)
         while True:
             chunk = cur.fetchmany(20000)

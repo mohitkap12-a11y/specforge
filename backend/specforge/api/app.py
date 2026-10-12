@@ -438,19 +438,20 @@ def create_app() -> FastAPI:
     @app.get("/api/coverage/{run_id}/items")
     def cov_items(run_id: int, state: str | None = None, kind: str | None = None, command: str | None = None, q: str | None = None,
                   limit: int = 500, offset: int = 0):
-        sql = ("FROM item_result i JOIN coverage_run r ON r.id=i.run_id JOIN catalog_item c ON c.set_id=r.set_id AND c.key=i.item_key WHERE i.run_id=?")
+        # reads the run's own snapshot (item_result), so historical runs are unaffected by later catalog rebuilds
+        sql = "FROM item_result i WHERE i.run_id=?"
         args: list[Any] = [run_id]
         if state:
             sql += " AND i.state=?"; args.append(state)
         if kind:
-            sql += " AND c.kind=?"; args.append(kind)
+            sql += " AND i.kind=?"; args.append(kind)
         if command:
-            sql += " AND (c.key=? OR c.key LIKE ? OR c.parent_key=?)"; args += [command, command + "/%", command]
+            sql += " AND (i.item_key=? OR i.item_key LIKE ? OR i.parent_key=?)"; args += [command, command + "/%", command]
         if q:
-            sql += " AND (c.label LIKE ? OR c.key LIKE ?)"; args += [f"%{q}%"] * 2
+            sql += " AND (i.label LIKE ? OR i.item_key LIKE ?)"; args += [f"%{q}%"] * 2
         total = conn().execute("SELECT COUNT(*) " + sql, args).fetchone()[0]
-        out = rows(conn(), "SELECT c.key,c.kind,c.parent_key,c.label,c.observability,c.na_reason,c.attrs_json,i.state,i.covered,i.total,i.detail_json " + sql + " ORDER BY c.id LIMIT ? OFFSET ?",
-                   [*args, min(limit, 2000), offset])
+        out = rows(conn(), "SELECT i.item_key AS key,i.kind,i.parent_key,i.label,i.observability,i.na_reason,i.attrs_json,i.state,i.covered,i.total,i.detail_json "
+                           + sql + " ORDER BY i.rowid LIMIT ? OFFSET ?", [*args, min(limit, 2000), offset])
         for i in out:
             a = jloads(i.pop("attrs_json"), {})
             i["detail"] = jloads(i.pop("detail_json"), {})

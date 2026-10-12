@@ -17,7 +17,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from .core.db import jloads, rows
-from .ingest.normalize import norm_title
+from .ingest.normalize import norm_text
 from .llm.base import LLMError
 from .llm.service import LLMService
 from .scenarios import catalog_context, validate_predicate
@@ -115,8 +115,8 @@ def _section_text(conn: sqlite3.Connection, set_id: int, req_key: str) -> str:
 
 
 def _grounded(quote: str, corpus: str) -> bool:
-    q = norm_title(quote)
-    return len(q) >= 8 and q in norm_title(corpus)
+    q = norm_text(quote)     # case-sensitive: "the controller shall" must not match "The Controller SHALL"
+    return len(q) >= 8 and q in norm_text(corpus)
 
 
 def to_predicate(sc: AIScenario, cmds: dict[str, dict]) -> dict:
