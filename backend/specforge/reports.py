@@ -163,7 +163,7 @@ def to_html(ds) -> bytes:
     cmd_rows = "".join(
         f"<tr><td>{e(k)}</td><td>{e(names.get(k, ''))}</td><td>{v['covered']}/{v['denominator']}</td><td>{_pct(v['pct_covered'])}</td>"
         f"<td style='width:30%'>{bar(v)}</td></tr>" for k, v in sorted(ds["summary"].get("by_command", {}).items()))
-    gap_rows = "".join(f"<tr><td>{e(i['command'])}</td><td>{e(i['kind'])}</td><td>{e(i['label'])}</td><td>{e(i['state'])}</td></tr>" for i in _gap_rows(ds)[:5000])
+    gap_rows = "".join(f"<tr><td>{e(i['command'])}</td><td>{e(i['kind'])}</td><td>{e(i['label'])}</td><td>{e(i['state'])}</td></tr>" for i in _gap_rows(ds))
     hdr = "".join(f"<tr><th>{e(k)}</th><td>{e(', '.join(v) if isinstance(v, list) else str(v))}</td></tr>" for k, v in ds["header"].items())
     legend = "".join(f'<span style="margin-right:12px"><i style="display:inline-block;width:10px;height:10px;background:{c}"></i> {k}</span>' for k, c in colors.items())
     doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SpecForge coverage report</title>

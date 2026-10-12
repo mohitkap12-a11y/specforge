@@ -513,7 +513,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: int):
-        jobs.cancel(job_id)
+        jobs.cancel(job_id, DB)
         return {"ok": True}
 
     @app.get("/api/jobs/{job_id}/events")

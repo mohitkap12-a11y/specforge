@@ -226,7 +226,7 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
         if it["parent_key"]:
             children[it["parent_key"]].append(it)
     for it in items:
-        if it["kind"] == "field":
+        if it["kind"] == "field" and it["observability"] != "unobservable":     # an explicit N/A decision (and its reason) is never rolled up away
             item_res[it["key"]] = _aggregate([item_res[c["key"]] for c in children.get(it["key"], [])])
     by_key = {i["key"]: i for i in items}
     # the catalog is mutable (rebuilds, overrides); a coverage run keeps its own snapshot of every item it judged

@@ -185,6 +185,13 @@ def _inside(line: dict, bbox: list[float], pad: float = 1.5) -> bool:
     return bbox[0] - pad <= cx <= bbox[2] + pad and bbox[1] - pad <= cy <= bbox[3] + pad
 
 
+def _group_by_page(entries: list) -> dict[int, list]:
+    out: dict[int, list] = defaultdict(list)
+    for e in entries:
+        out[e.page].append(e)
+    return out
+
+
 def _split_heading(title: str) -> tuple[str, str]:
     m = _NUM_HEADING.match(clean(title))
     if m:
@@ -192,13 +199,25 @@ def _split_heading(title: str) -> tuple[str, str]:
     return "", clean(title)
 
 
-def _detect_headers_footers(pages: list[dict]) -> set[tuple[int, int]]:
-    """Return (page, line_index) of header/footer/page-number lines."""
+def _detect_headers_footers(pages: list[dict], heading_titles: dict[int, list[str]] | None = None) -> set[tuple[int, int]]:
+    """Return (page, line_index) of header/footer/page-number lines.
+
+    heading_titles: normalised bookmark titles per page. A line that IS a heading is never a running header, even when its
+    digit-normalised text repeats on other pages ("5.1 Command Dword 10" / "5.2 Command Dword 11").
+    """
     n = len(pages)
+    titles = heading_titles or {}
+
+    def is_heading(pg: int, text: str) -> bool:
+        nl = norm_title(text)
+        return any(nl == t or (len(nl) >= 3 and t.startswith(nl)) for t in titles.get(pg, []))
+
     sig_pages: dict[str, set[int]] = defaultdict(set)
     for p in pages:
         H = p["height"]
         for i, l in enumerate(p["lines"]):
+            if is_heading(p["page"], l["text"]):
+                continue
             if l["y1"] < 0.09 * H or l["y0"] > 0.91 * H:
                 sig = re.sub(r"\d+", "#", norm_title(l["text"]))
                 sig_pages[sig].add(p["page"])
@@ -208,7 +227,7 @@ def _detect_headers_footers(pages: list[dict]) -> set[tuple[int, int]]:
     for p in pages:
         H = p["height"]
         for i, l in enumerate(p["lines"]):
-            if not (l["y1"] < 0.09 * H or l["y0"] > 0.91 * H):
+            if not (l["y1"] < 0.09 * H or l["y0"] > 0.91 * H) or is_heading(p["page"], l["text"]):
                 continue
             sig = re.sub(r"\d+", "#", norm_title(l["text"]))
             if sig in repeated or _PAGENUM.match(l["text"]):
@@ -244,7 +263,7 @@ def _build_entries(doc_toc: list, pages: list[dict]) -> list[_Entry]:
 def assemble(path: str, pages: list[dict], family: str, version: str, title: str, fmt: str = "pdf",
              toc: list | None = None) -> ParsedSpec:
     entries = _build_entries(toc or [], pages)
-    hf = _detect_headers_footers(pages)
+    hf = _detect_headers_footers(pages, {pg_: [norm_title(e.title) for e in es] for pg_, es in _group_by_page(entries).items()})
 
     # --- section skeleton from entries
     sections: list[Section] = []
@@ -289,6 +308,7 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
     last_table: Table | None = None
     last_table_page = 0
     carry_caption: dict | None = None  # caption left at a page bottom whose table starts on the next page
+    last_table_end = (0.0, 1.0)         # (y1 of the last table segment, page height): continued tables run to the page bottom
     table_count_on_page: Counter = Counter()
     labels_used: Counter = Counter()
 
@@ -433,13 +453,18 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
                     same_cols = len(rows[0]) == len(last_table.header) if rows and last_table.header else False
                     if cap is not None and cap["cont"] and cap["label"] == last_table.label.split("#")[0]:
                         is_cont = True
-                    elif cap is None and last_table_page == pg - 1 and not seen_body_on_page and same_cols:
+                    elif cap is None and last_table_page == pg - 1 and not seen_body_on_page and same_cols and \
+                            ([norm_title(c) for c in rows[0]] == [norm_title(c) for c in last_table.header]
+                             or last_table_end[0] >= 0.75 * last_table_end[1]):
+                        # evidence required: the header repeats, or the previous table ran to the bottom of its page.
+                        # An independent table that merely has the same number of columns is NOT merged.
                         is_cont = True
                         hdr_repeat = [norm_title(c) for c in rows[0]] == [norm_title(c) for c in last_table.header]
                         notes.append({"severity": "info" if hdr_repeat else "warning", "kind": "continuation_inferred", "node_key": f"fig:{last_table.label}",
                                       "page": pg, "message": "Table without caption at page top treated as continuation "
                                                               f"of Figure {last_table.label}"})
                 if is_cont:
+                    last_table_end = (t["bbox"][3], p["height"])
                     _merge_continuation(last_table, rows, pg)
                     last_table.quality = min(last_table.quality, t["quality"])
                     tinfo[k]["label"] = last_table.label
@@ -470,6 +495,7 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
                 tinfo[k]["label"] = lbl
                 if nested_parent is None:
                     last_table, last_table_page = tb, pg
+                    last_table_end = (t["bbox"][3], p["height"])
                 seen_body_on_page = True
         if pending_caption is not None:
             if pg < len(pages):

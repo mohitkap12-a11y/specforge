@@ -218,9 +218,10 @@ SPEC_ALIASES: dict[str, str] = {
 _ALIAS_RE = re.compile(
     "|".join(re.escape(a) for a in sorted(SPEC_ALIASES, key=len, reverse=True)), re.I
 )
-_SEC_REF = re.compile(r"\b(?:sections?|clauses?|subclauses?)\s+(\d+(?:\.\d+)*)(?:\s*(?:and|,|or)\s+(\d+(?:\.\d+)*))*", re.I)
+_LIST_SEP = r"(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"      # "1, 2", "1 and 2", "1, 2, and 3", "1, 2, or 3"
+_SEC_REF = re.compile(rf"\b(?:sections?|clauses?|subclauses?)\s+(\d+(?:\.\d+)*)(?:{_LIST_SEP}(\d+(?:\.\d+)*))*", re.I)
 _SEC_NUM = re.compile(r"\d+(?:\.\d+)*")
-_FIG_REF = re.compile(r"\b(?:Figure|Table)s?\s+(\d+[A-Za-z]?)(?:\s*(?:and|,|or)\s+(\d+[A-Za-z]?))*", re.I)
+_FIG_REF = re.compile(rf"\b(?:Figure|Table)s?\s+(\d+[A-Za-z]?)(?:{_LIST_SEP}(\d+[A-Za-z]?))*", re.I)
 
 
 @dataclass

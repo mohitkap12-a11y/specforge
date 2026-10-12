@@ -205,9 +205,12 @@ def write_pdf(path: str | Path, blocks: list[Block], header: str = "NVM Express 
             story.append(p)
         elif b[0] == "p":
             story.append(Paragraph(b[1], body))
+        elif b[0] == "pagebreak":
+            story.append(PageBreak())
         elif b[0] == "table":
             _, caption, header_row, rows, widths = b
-            story.append(Paragraph(caption, cap))
+            if caption:
+                story.append(Paragraph(caption, cap))
             data = [[Paragraph(c, cellb) for c in header_row]] + [[Paragraph(c, cell) for c in r] for r in rows]
             ncol = len(header_row)
             if widths is None:
