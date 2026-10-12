@@ -22,6 +22,10 @@ from ..llm.base import LLMError
 from ..llm.service import LLMService, make_provider
 
 
+SCENARIO_STATES = {"draft", "approved", "rejected"}
+OBSERVABILITY = {"submission", "stimulus", "unobservable"}
+
+
 def need(body: Any, *keys: str) -> None:
     """422 (not a 500) when a JSON body is not an object or lacks required fields."""
     if not isinstance(body, dict) or any(k not in body for k in keys):
@@ -330,6 +334,15 @@ def create_app() -> FastAPI:
         s = row(conn(), "SELECT * FROM scenario WHERE id=?", (sid,))
         if not s:
             raise HTTPException(404)
+        # ---- validate everything first; nothing is written until the whole request is known to be good
+        for col in ("title", "description"):
+            if col in body and not isinstance(body[col], str):
+                raise HTTPException(422, f"{col} must be a string")
+        if "state" in body and not (isinstance(body["state"], str) and body["state"] in SCENARIO_STATES):
+            raise HTTPException(422, f"state must be one of {sorted(SCENARIO_STATES)}")
+        if "observability" in body and not (isinstance(body["observability"], str) and body["observability"] in OBSERVABILITY):
+            raise HTTPException(422, f"observability must be one of {sorted(OBSERVABILITY)}")
+        pred = jloads(s["predicate_json"])
         if "predicate" in body:
             if s["origin"] == "template":
                 raise HTTPException(409, "template scenarios are generated from the catalog and cannot be edited; create a manual scenario instead")
@@ -346,24 +359,37 @@ def create_app() -> FastAPI:
                 if linked and linked not in new_cmds:
                     raise HTTPException(422, {"errors": [f"the predicate no longer refers to {linked}, which {item_key} is linked to; "
                                                          "create a new scenario for a different command"]})
-            conn().execute("UPDATE scenario SET predicate_json=? WHERE id=?", (json.dumps(body["predicate"]), sid))
-            if s["state"] == "approved" and "state" not in body:
-                conn().execute("UPDATE scenario SET state='draft' WHERE id=?", (sid,))      # an edit invalidates the earlier approval
+            pred = body["predicate"]
+        new_state = body.get("state", "draft" if ("predicate" in body and s["state"] == "approved") else s["state"])   # an edit invalidates approval
         if body.get("state") == "approved":
             cmds, fields = scenarios.catalog_context(conn(), s["set_id"])
-            errs = scenarios.validate_predicate(jloads(row(conn(), "SELECT predicate_json FROM scenario WHERE id=?", (sid,))["predicate_json"]), cmds, fields)
+            errs = scenarios.validate_predicate(pred, cmds, fields)
             if errs:
                 raise HTTPException(422, {"errors": errs, "message": "Only valid predicates can be approved"})
-        for col in ("state", "title", "description", "observability"):
+        # ---- one atomic write
+        upd: dict[str, Any] = {"state": new_state}
+        if "predicate" in body:
+            upd["predicate_json"] = json.dumps(pred)
+        for col in ("title", "description", "observability"):
             if col in body:
-                conn().execute(f"UPDATE scenario SET {col}=? WHERE id=?", (body[col], sid))
-        conn().commit()
-        return {"ok": True}
+                upd[col] = body[col]
+        c = conn()
+        try:
+            c.execute(f"UPDATE scenario SET {', '.join(k + '=?' for k in upd)} WHERE id=?", [*upd.values(), sid])
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        return {"ok": True, "state": new_state}
 
     @app.post("/api/scenarios/bulk")
     def bulk(body: dict = Body(...)):
         need(body, 'ids', 'state')
         ids, new_state = body["ids"], body["state"]
+        if not isinstance(ids, list) or any(not isinstance(i, int) or isinstance(i, bool) for i in ids):
+            raise HTTPException(422, "ids must be a list of integers")
+        if not (isinstance(new_state, str) and new_state in SCENARIO_STATES):
+            raise HTTPException(422, f"state must be one of {sorted(SCENARIO_STATES)}")
         updated, refused = [], []
         ctx: dict[int, tuple] = {}
         for sid in ids:
@@ -378,9 +404,14 @@ def create_app() -> FastAPI:
                 if errs:
                     refused.append({"id": sid, "errors": errs})
                     continue
-            conn().execute("UPDATE scenario SET state=? WHERE id=?", (new_state, sid))
             updated.append(sid)
-        conn().commit()
+        c = conn()
+        try:   # all accepted updates are applied together or not at all
+            c.executemany("UPDATE scenario SET state=? WHERE id=?", [(new_state, i) for i in updated])
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
         return {"ok": not refused, "updated": updated, "refused": refused}
 
     @app.post("/api/scenarios/validate")

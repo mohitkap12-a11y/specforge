@@ -121,7 +121,7 @@ def eval_sequence(conn: sqlite3.Connection, source_id: int, pred: dict, sigs_by:
     matches = 0
     evidence: list[dict] = []
     for _, seq_rows in rows_by_scope.items():
-        seq_rows.sort(key=lambda r: (r["test_id"], r["seq"]))
+        seq_rows.sort(key=lambda r: (r["test_id"], r["seq"], r["id"]))     # id breaks ties: rows arrive in several signature chunks
 
         budget = [MAX_SEARCH_STEPS]
         failed: set = set()    # strict order: (step, start, captured values) states already proven dead within one search
