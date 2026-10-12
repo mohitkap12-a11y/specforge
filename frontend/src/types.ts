@@ -20,7 +20,7 @@ export interface SectionData {
   references: { raw: string; kind: string; target_family: string | null; target_label: string | null }[];
 }
 export interface Issue { id: number; severity: string; kind: string; node_key: string | null; page: number | null; message: string; state: string; note: string | null }
-export interface SpecSet { id: number; name: string; members: any[]; catalog_items: number; scenarios: number }
+export interface SpecSet { id: number; name: string; members: any[]; catalog_items: number; scenarios: number; scenarios_approved: number; scenarios_draft: number }
 export interface Scenario {
   id: number; sid: string; origin: string; state: "draft" | "approved" | "rejected"; title: string; description: string | null;
   observability: string; predicate: any; provenance: Record<string, any>; items: string[];

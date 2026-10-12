@@ -74,7 +74,14 @@ def _now() -> str:
 
 
 def emit(level: str, source: str, message: str, *, job_id: int | None = None, db: str | None = None, **data: Any) -> None:
-    """Record an event. Cheap and non-blocking; safe to call from any thread."""
+    """Record an event. Cheap and non-blocking; safe to call from any thread. Never raises: logging must not abort the work it describes."""
+    try:
+        _emit(level, source, message, job_id, db, data)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _emit(level: str, source: str, message: str, job_id: int | None, db: str | None, data: dict) -> None:
     if LEVELS.get(level, 20) < LEVELS[_cfg["min_level"]]:
         return
     ctx = _job.get()
@@ -85,7 +92,10 @@ def emit(level: str, source: str, message: str, *, job_id: int | None = None, db
         db = db or str(db_path())
     except Exception:  # noqa: BLE001  logging must never break the work it describes
         return
-    blob = json.dumps(data, default=str) if data else None
+    try:
+        blob = json.dumps(data, default=str) if data else None
+    except Exception:  # noqa: BLE001  unserialisable details (tuple keys, cycles...): keep the event, describe the details as text
+        blob = json.dumps({"_unserializable": repr(data)[:MAX_DATA]})
     if blob is not None and len(blob) > MAX_DATA:       # e.g. a job result carrying hundreds of issues
         blob = json.dumps({"_truncated": blob[:MAX_DATA]})
     ev = (db, _now(), level if level in LEVELS else "info", source, job_id, str(message)[:2000], blob)

@@ -99,6 +99,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
   const sources = LENSES[lens].sources;
   const view = useRef(0);                         // bumped whenever the visible list is reset; late responses for an older view are dropped
   const [olderBusy, setOlderBusy] = useState(false);
+  const [reload, setReload] = useState(0);          // bumped to restart the initial load when its response was made stale (e.g. by clearing the log)
 
   const matchesQuery = (e: LogEvent) => !qRef.current || `${e.message} ${JSON.stringify(e.data)}`.toLowerCase().includes(qRef.current.toLowerCase());
   const append = useCallback((batch: LogEvent[]) => {
@@ -116,8 +117,10 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
     let cancelled = false;
     view.current += 1; setOlderBusy(false);
     setLoading(true); setError(null); setEvents([]); pendingRef.current = []; setPending(0); setOpenIds(new Set()); setConnected(false);
+    const token = view.current;                    // clearing the log bumps this: a response that started before it must not repopulate the list
     api.logs({ limit: 400, level, source: sources || undefined, job_id: job, q: q || undefined }).then((r) => {
       if (cancelled) return;
+      if (token !== view.current) { setReload((n) => n + 1); return; }    // stale: reload instead of leaving the view empty and without a live stream
       setEvents(r.items); setHasOlder(r.has_older); setLoading(false); setStick(true);
       es = new EventSource(logStreamUrl({ after_id: r.newest_id, level, source: sources || undefined, job_id: job }));
       es.onopen = () => setConnected(true);
@@ -131,7 +134,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
     }).catch((e) => { if (!cancelled) { setError(e); setLoading(false); } });
     return () => { cancelled = true; es?.close(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [level, sources, job, q]);
+  }, [level, sources, job, q, reload]);
 
   useEffect(() => { if (events.length >= MAX_ROWS) setHasOlder(true); }, [events.length]);   // rows trimmed from the top still exist in the database
   useEffect(() => {   // resuming flushes what arrived while paused

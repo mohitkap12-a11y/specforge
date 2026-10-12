@@ -245,6 +245,8 @@ def create_app() -> FastAPI:
             s["members"] = refs.set_members(conn(), s["id"])
             s["catalog_items"] = conn().execute("SELECT COUNT(*) FROM catalog_item WHERE set_id=?", (s["id"],)).fetchone()[0]
             s["scenarios"] = conn().execute("SELECT COUNT(*) FROM scenario WHERE set_id=?", (s["id"],)).fetchone()[0]
+            s["scenarios_approved"] = conn().execute("SELECT COUNT(*) FROM scenario WHERE set_id=? AND state='approved'", (s["id"],)).fetchone()[0]
+            s["scenarios_draft"] = conn().execute("SELECT COUNT(*) FROM scenario WHERE set_id=? AND state='draft'", (s["id"],)).fetchone()[0]
         return out
 
     @app.post("/api/sets")

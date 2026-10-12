@@ -360,3 +360,29 @@ def test_prune_failure_does_not_requeue_or_recount_committed_events(tmp_path):
     assert retry == [] and finished == 12                      # committed once: not re-queued, counted exactly once
     assert real.execute("SELECT COUNT(*) FROM event_log").fetchone()[0] == 12
     assert inserted[db] == 12                                  # the prune is attempted again after the next batch
+
+
+def test_emit_never_raises_on_unserialisable_details(conn):
+    cyc: dict = {}
+    cyc["self"] = cyc
+    eventlog.emit("info", "system", "tuple keys", bad={(1, 2): "x"})
+    eventlog.emit("info", "system", "cycle", bad=cyc)
+    eventlog.emit("info", "system", "object", bad=object())
+    ev = {e["message"]: e for e in events(conn)}
+    assert set(ev) == {"tuple keys", "cycle", "object"}               # all three were recorded
+    assert "_unserializable" in ev["tuple keys"]["data"] and "_unserializable" in ev["cycle"]["data"]
+    assert "object object" in json.dumps(ev["object"]["data"])        # default=str handles plain objects
+
+
+def test_sets_report_approved_and_draft_scenario_counts(client):
+    from specforge.core.db import connect
+
+    sid = client.post("/api/sets", json={"name": "s", "document_ids": []}).json()["id"]
+    c = connect()
+    for i, st in enumerate(["approved", "approved", "draft", "rejected"]):
+        c.execute("INSERT INTO scenario(set_id,sid,origin,kind,title,observability,predicate_json,state) VALUES(?,?,?,?,?,?,?,?)",
+                  (sid, f"S{i}", "ai", "requirement", "t", "submission", "{}", st))
+    c.commit()
+    c.close()
+    s = next(x for x in client.get("/api/sets").json() if x["id"] == sid)
+    assert (s["scenarios"], s["scenarios_approved"], s["scenarios_draft"]) == (4, 2, 1)
