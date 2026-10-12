@@ -187,11 +187,11 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
             if pj in existing:
                 stats["duplicates"] += 1
                 dup = conn.execute("SELECT id,state FROM scenario WHERE set_id=? AND predicate_json=? ORDER BY id LIMIT 1", (set_id, pj)).fetchone()
-                if dup and dup["state"] != "approved":   # an unreviewed draft: this requirement joins it and is reviewed with it
+                if dup and dup["state"] == "draft":   # an unreviewed draft: this requirement joins it and is reviewed with it
                     conn.execute("INSERT OR IGNORE INTO scenario_item(scenario_id,item_key) VALUES(?,?)", (dup[0], req["key"]))
                     continue
-                # an APPROVED scenario has the same predicate: the requirement -> scenario mapping is still an AI interpretation,
-                # so it gets its own draft and keeps the review gate instead of being linked to the approved scenario
+                # the same predicate exists as an APPROVED or REJECTED scenario: the requirement -> scenario mapping is still an
+                # AI interpretation, so it gets its own draft (review gate kept, nothing linked to a rejected scenario)
                 stats["duplicates"] -= 1
             existing.add(pj)
             sid = f"AI:{req['key']}#{created + 1}"

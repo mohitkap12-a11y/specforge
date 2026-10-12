@@ -39,6 +39,11 @@ def _in(v: Any, allowed: set) -> bool:
     return isinstance(v, str) and v in allowed          # scalar check first: lists / dicts are unhashable
 
 
+def _not_preserved(step: dict, dw: Any, hi: int) -> bool:
+    """PCIe commands are de-duplicated on a signature that ignores CID (dw0[31:16]), MPTR and data pointers (dw4-9)."""
+    return step.get("interface") == "pcie" and (dw in range(4, 10) or (dw == 0 and hi >= 16))
+
+
 def _routes(cmd: dict) -> set[tuple[str, str]]:
     """(interface, queue) pairs under which a catalog command can legitimately appear in the log."""
     if cmd.get("interface") == "mi":
@@ -113,7 +118,7 @@ def validate_predicate(pred: dict, commands: dict[str, dict] | None = None, fiel
             if not bitrange(q, f):
                 continue
             hi, lo = f["hi"], f["lo"]
-            if st.get("interface") == "pcie" and (f.get("dw") in range(4, 10) or (f.get("dw") == 0 and hi >= 16)):
+            if _not_preserved(st, f.get("dw"), hi):
                 errs.append(f"{q}: {f.get('dw')}[{hi}:{lo}] (CID, MPTR, data pointers) is not preserved when commands are de-duplicated and cannot be matched")
                 continue
             op = f.get("op", "eq")
@@ -152,7 +157,11 @@ def validate_predicate(pred: dict, commands: dict[str, dict] | None = None, fiel
             if not isinstance(c, dict) or not _dw_ok(c.get("dw")):
                 errs.append(f"{q} needs dw/hi/lo")
                 continue
-            bitrange(q, c)
+            if not bitrange(q, c):
+                continue
+            if _not_preserved(st, c.get("dw"), c["hi"]):
+                errs.append(f"{q}: {c.get('dw')}[{c['hi']}:{c['lo']}] (CID, MPTR, data pointers) is not preserved when commands are de-duplicated and cannot be captured")
+                continue
             caps.add(str(name))
     return errs
 

@@ -34,14 +34,17 @@ _SIG_MASK = {"0": 0x0000FFFF}
 _SIG_SKIP = {"4", "5", "6", "7", "8", "9"}
 
 
-def merged_layout(overrides: dict | None) -> dict:
-    out = json.loads(json.dumps(MI_DEFAULT_LAYOUT))
-    for k, v in (overrides or {}).items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k].update(v)
+def _deep_update(dst: dict, src: dict) -> dict:
+    for k, v in src.items():
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            _deep_update(dst[k], v)       # a partial override (e.g. one entry of admin.dwords) keeps the other defaults
         else:
-            out[k] = v
-    return out
+            dst[k] = v
+    return dst
+
+
+def merged_layout(overrides: dict | None) -> dict:
+    return _deep_update(json.loads(json.dumps(MI_DEFAULT_LAYOUT)), overrides or {})
 
 
 # ----------------------------------------------------------------------------- decoders
@@ -256,7 +259,11 @@ def decode_row(r: sqlite3.Row, mapping: dict, layout: dict) -> dict[str, Any]:
         if sqe_col and r[sqe_col] is not None:
             d = decode_sqe(r[sqe_col])
         elif cdw:
-            d = _from_dwords({k: int(r[c] or 0) & 0xFFFFFFFF for k, c in cdw.items()})
+            # SQL NULL means "not recorded": it is omitted (never turned into 0, which would satisfy zero-valued scenarios)
+            dw = {k: int(r[c]) & 0xFFFFFFFF for k, c in cdw.items() if r[c] is not None}
+            if "0" not in dw:
+                raise ValueError("cdw0 (opcode) is NULL")
+            d = _from_dwords(dw)
         else:
             raise ValueError("no SQE blob or CDW columns mapped")
         d["queue"] = _norm_queue(_value(r, _col(mapping, "queue"), "admin"))

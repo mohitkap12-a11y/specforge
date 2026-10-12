@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS item_override(
 );
 
 CREATE TABLE IF NOT EXISTS scenario(
-  id INTEGER PRIMARY KEY, set_id INTEGER NOT NULL REFERENCES spec_set(id) ON DELETE CASCADE,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, set_id INTEGER NOT NULL REFERENCES spec_set(id) ON DELETE CASCADE,
   sid TEXT NOT NULL, origin TEXT NOT NULL, kind TEXT, title TEXT, description TEXT,
   observability TEXT NOT NULL, predicate_json TEXT NOT NULL, state TEXT NOT NULL,
   provenance_json TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(set_id, sid)
