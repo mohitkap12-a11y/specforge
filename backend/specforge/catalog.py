@@ -101,7 +101,9 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
                 name = clean(r[ni])
                 if not rg or not name or _is_reserved(name):
                     continue
-                for opc in range(rg[0], rg[1] + 1) if rg[1] - rg[0] < 4 else [rg[0]]:
+                if re.match(r"^(reserved|vendor)", norm_title(name)):
+                    continue            # reserved / vendor-specific ranges are not catalogued commands (unknown opcodes are reported)
+                for opc in range(rg[0], min(rg[1], rg[0] + 255) + 1):
                     if iface == "mi":
                         key = f"cmd:mi:{opc:02X}"
                     elif queue == "admin":
@@ -184,12 +186,19 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
             cmd["fields"].append({"table": t, "dw": dw, "ir": ir})
 
     # ---- helpers for value tables
-    def find_table(ir: dict, label: str, family: str | None) -> dict | None:
+    choices = {(r["src_key"], r["raw"]): r["chosen_key"] for r in rows(conn, "SELECT * FROM ref_choice WHERE set_id=?", (set_id,))}
+
+    def find_table(ir: dict, label: str, family: str | None, src_key: str = "", raw: str = "") -> dict | None:
         if family and family != ir["family"]:
-            for o in irs:
-                if o["family"] == family and label in o["tables"]:
-                    return o["tables"][label]
-            return None
+            cands = [o["tables"][label] for o in irs if o["family"] == family and label in o["tables"]]
+            if len(cands) > 1:     # several revisions of the family: only the user's choice may decide, never "first wins"
+                picked = [t for t in cands if t["key"] == choices.get((src_key, raw))]
+                if not picked:
+                    issues.append({"severity": "warning", "kind": "ambiguous_value_table", "key": src_key,
+                                   "message": f"'{raw}' matches {len(cands)} revisions of {family}; resolve the reference to use its value table"})
+                    return None
+                return picked[0]
+            return cands[0] if cands else None
         return ir["tables"].get(label)
 
     def value_rows(t: dict) -> list[tuple[tuple[int, int], dict]]:
@@ -236,8 +245,8 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
                 vt = None
                 for ref in extract_references(r[1], ir["family"]):
                     if ref.kind == "figure":
-                        cand = find_table(ir, ref.label, ref.family)
-                        if cand and value_rows(cand):
+                        cand = find_table(ir, ref.label, ref.family, t["key"], ref.raw)
+                        if cand and classify_table(cand["header"], cand["caption"]) == "values" and value_rows(cand):
                             vt = cand
                             break
                 if vt is None and abbr:
@@ -333,6 +342,11 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
 
 
 def set_override(conn: sqlite3.Connection, set_id: int, key: str, observability: str | None, na_reason: str | None) -> None:
+    if observability is None and na_reason is None:      # clearing an override: regenerate so the generated value comes back
+        conn.execute("DELETE FROM item_override WHERE set_id=? AND key=?", (set_id, key))
+        conn.commit()
+        build_catalog(conn, set_id)
+        return
     conn.execute("INSERT INTO item_override(set_id,key,observability,na_reason) VALUES(?,?,?,?) "
                  "ON CONFLICT(set_id,key) DO UPDATE SET observability=excluded.observability, na_reason=excluded.na_reason",
                  (set_id, key, observability, na_reason))

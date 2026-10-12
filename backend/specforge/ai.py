@@ -130,7 +130,7 @@ def to_predicate(sc: AIScenario, cmds: dict[str, dict]) -> dict:
                       "fields": [f.model_dump() for f in st.fields],
                       **({"capture": {k: v.model_dump() for k, v in st.capture.items()}} if st.capture else {})})
     pred: dict[str, Any] = {"scope": sc.scope, "order": sc.order, "steps": steps}
-    if sc.within:
+    if sc.within is not None:   # 0 must reach validation (it is invalid), not silently mean 'unlimited'
         pred["within"] = sc.within
     return pred
 
@@ -183,6 +183,9 @@ def generate_ai_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService
             pj = json.dumps(pred)
             if pj in existing:
                 stats["duplicates"] += 1
+                dup = conn.execute("SELECT id FROM scenario WHERE set_id=? AND predicate_json=? ORDER BY id LIMIT 1", (set_id, pj)).fetchone()
+                if dup:   # the scenario already exists: this requirement must still be linked to it to count as covered by it
+                    conn.execute("INSERT OR IGNORE INTO scenario_item(scenario_id,item_key) VALUES(?,?)", (dup[0], req["key"]))
                 continue
             existing.add(pj)
             sid = f"AI:{req['key']}#{created + 1}"

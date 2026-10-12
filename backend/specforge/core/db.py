@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS spec_set_member(
 );
 -- User choices for ambiguous cross-spec references
 CREATE TABLE IF NOT EXISTS ref_choice(
-  set_id INTEGER NOT NULL, src_key TEXT NOT NULL, raw TEXT NOT NULL, chosen_key TEXT NOT NULL,
+  set_id INTEGER NOT NULL REFERENCES spec_set(id) ON DELETE CASCADE, src_key TEXT NOT NULL, raw TEXT NOT NULL, chosen_key TEXT NOT NULL,
   PRIMARY KEY(set_id, src_key, raw)
 );
 
@@ -76,7 +76,7 @@ CREATE INDEX IF NOT EXISTS ix_cat_set_kind ON catalog_item(set_id, kind);
 
 -- Reviewer decisions on catalog items; survive catalog rebuilds
 CREATE TABLE IF NOT EXISTS item_override(
-  set_id INTEGER NOT NULL, key TEXT NOT NULL, observability TEXT, na_reason TEXT,
+  set_id INTEGER NOT NULL REFERENCES spec_set(id) ON DELETE CASCADE, key TEXT NOT NULL, observability TEXT, na_reason TEXT,
   PRIMARY KEY(set_id, key)
 );
 

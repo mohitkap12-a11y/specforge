@@ -163,7 +163,7 @@ def suggest_mapping(path: str) -> dict[str, Any]:
     if "sqe" not in m and "cdw" not in m and "mi_msg" not in m:
         warnings.append("No SQE blob, CDW columns or MI message column recognised; set the mapping manually.")
     if "interface" not in m:
-        m["interface"] = {"const": "pcie"}
+        m["interface"] = {"const": "mi" if "mi_msg" in m and "sqe" not in m and "cdw" not in m else "pcie"}
     if "queue" not in m:
         m["queue"] = {"const": "admin"}
         warnings.append("No queue column; every command is treated as an Admin command. Map a queue column or set a constant.")
@@ -287,6 +287,7 @@ def import_source(conn: sqlite3.Connection, source_id: int, mi_layout: dict | No
         total += 1
         try:
             d = decode_row(r, mapping, layout)
+            seq = int(r[seq_col]) if seq_col and seq_col in r.keys() and r[seq_col] is not None else total
         except Exception as e:  # noqa: BLE001
             bad += 1
             if len(errors) < 25:
@@ -299,7 +300,7 @@ def import_source(conn: sqlite3.Connection, source_id: int, mi_layout: dict | No
         s["count"] += 1
         batch.append((source_id, r[id_col] if id_col and id_col in r.keys() else total,
                       str(r[test_col]) if test_col and test_col in r.keys() else "", str(r[script_col]) if script_col and script_col in r.keys() else "",
-                      int(r[seq_col]) if seq_col and seq_col in r.keys() and r[seq_col] is not None else total,
+                      seq,
                       d["interface"], d["queue"], d["cs"], d["opcode"], d["nsid"], d["signature"]))
         if len(batch) >= 20000:
             _flush(conn, batch)

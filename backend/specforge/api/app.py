@@ -22,6 +22,13 @@ from ..llm.base import LLMError
 from ..llm.service import LLMService, make_provider
 
 
+def safe_join(root: Path, rel: str) -> Path | None:
+    """Resolve rel under root; None unless the result is an existing file INSIDE root (is_relative_to, not a string prefix test)."""
+    root = root.resolve()
+    f = (root / rel).resolve()
+    return f if rel and f.is_relative_to(root) and f.is_file() else None
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="SpecForge", version=__version__)
     DB = str(config.db_path())
@@ -202,14 +209,24 @@ def create_app() -> FastAPI:
 
     @app.put("/api/sets/{set_id}/members")
     def set_members(set_id: int, body: dict = Body(...)):
-        conn().execute("DELETE FROM spec_set_member WHERE set_id=?", (set_id,))
-        for d in body["document_ids"]:
-            conn().execute("INSERT OR IGNORE INTO spec_set_member(set_id,document_id) VALUES(?,?)", (set_id, d))
-        conn().commit()
+        ids = body.get("document_ids")
+        if not isinstance(ids, list):
+            raise HTTPException(422, "document_ids must be a list")
+        c = conn()
+        try:   # replace atomically: a failure must never leave the set empty or half replaced
+            c.execute("DELETE FROM spec_set_member WHERE set_id=?", (set_id,))
+            for d in ids:
+                c.execute("INSERT INTO spec_set_member(set_id,document_id) VALUES(?,?) ON CONFLICT DO NOTHING", (set_id, d))
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise HTTPException(409, "could not update the set members (unknown document id?)")
         return {"ok": True}
 
     @app.delete("/api/sets/{set_id}")
     def delete_set(set_id: int):
+        conn().execute("DELETE FROM ref_choice WHERE set_id=?", (set_id,))        # also covers databases created before the FKs existed
+        conn().execute("DELETE FROM item_override WHERE set_id=?", (set_id,))
         conn().execute("DELETE FROM spec_set WHERE id=?", (set_id,))
         conn().commit()
         return {"ok": True}
@@ -444,7 +461,8 @@ def create_app() -> FastAPI:
     def cov_evidence(run_id: int, item: str):
         out = rows(conn(), """SELECT s.id,s.sid,s.title,s.state,s.observability,r.state AS result,r.match_count,r.evidence_json
                               FROM scenario_item si JOIN scenario s ON s.id=si.scenario_id
-                              LEFT JOIN coverage_result r ON r.scenario_id=s.id AND r.run_id=? WHERE si.item_key=?""", (run_id, item))
+                              JOIN coverage_run cr ON cr.id=? AND cr.set_id=s.set_id
+                              LEFT JOIN coverage_result r ON r.scenario_id=s.id AND r.run_id=? WHERE si.item_key=?""", (run_id, run_id, item))
         for s in out:
             s["evidence"] = jloads(s.pop("evidence_json"), [])
         return out
@@ -508,8 +526,8 @@ def create_app() -> FastAPI:
 
             @app.get("/{path:path}", include_in_schema=False)
             def spa(path: str, _root=cand):
-                f = (_root / path).resolve()
-                if path and str(f).startswith(str(_root.resolve())) and f.is_file():
+                f = safe_join(_root, path)
+                if f is not None:
                     return FileResponse(f)
                 return FileResponse(_root / "index.html")
             break
