@@ -61,6 +61,9 @@ function References({ setId }: { setId: number }) {
           <button key={s} className={state === s ? "primary" : ""} onClick={() => setState(state === s ? "" : s)}>{s} {sum[s] ?? 0}</button>
         ))}
       </div>
+      {list.length < (state ? sum[state] ?? 0 : sum.total) && (
+        <div className="toast bad">Showing the first {list.length} of {state ? sum[state] : sum.total} references (the API returns at most 3,000). Pick a state filter to narrow the list; resolved references need no action.</div>
+      )}
       {sum.ambiguous > 0 && !state && <div className="toast bad">{sum.ambiguous} ambiguous reference(s): the same label exists in more than one member. Pick the intended target.</div>}
       <div className="scroll" style={{ maxHeight: 360 }}>
         <table className="t">

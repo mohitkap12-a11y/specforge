@@ -39,7 +39,10 @@ export default function SettingsPage() {
   const set = (path: string[], v: unknown) => setS((cur) => setIn(cur ?? {}, path, v));
   const num = (path: string[]) => (v: string) => set(path, v === "" ? "" : Number(v));
   const dirty = JSON.stringify({ ...s, mi_layout: layoutObj }) !== JSON.stringify(q.data);
-  const invalidNum = [s.ollama?.num_ctx, s.ollama?.timeout, s.opencode?.timeout, s.parser?.workers, s.llm?.max_concurrency, s.llm?.max_retries].some((v) => typeof v !== "number" || Number.isNaN(v));
+  const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+  const isInt = (v: unknown, min: number) => isNum(v) && Number.isInteger(v) && v >= min;
+  const invalidNum = !(isNum(s.ollama?.timeout) && s.ollama.timeout > 0 && isNum(s.opencode?.timeout) && s.opencode.timeout > 0
+    && isInt(s.ollama?.num_ctx, 1) && isInt(s.parser?.workers, 0) && isInt(s.llm?.max_concurrency, 1) && isInt(s.llm?.max_retries, 0));
   return (
     <>
       <h1>Settings</h1>
@@ -92,7 +95,7 @@ export default function SettingsPage() {
       </div>
       <ErrorNote error={save.error} />
       {save.isSuccess && !dirty && <div className="toast ok">Saved.</div>}
-      {invalidNum && <div className="toast bad">Numeric fields must not be empty.</div>}
+      {invalidNum && <div className="toast bad">Check the numbers: timeouts must be positive; context and concurrency whole numbers ≥ 1; retries and workers whole numbers ≥ 0.</div>}
       <button className="primary" disabled={!dirty || !!layoutErr || invalidNum || save.isPending} onClick={() => save.mutate({ ...s, mi_layout: layoutObj })}>Save settings</button>
     </>
   );

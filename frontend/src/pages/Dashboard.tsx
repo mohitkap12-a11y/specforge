@@ -29,6 +29,7 @@ function SetTile({ set }: { set: SetSpec }) {
     <div className="card">
       <div className="row"><h2 className="grow">{set.name}</h2><span className="muted small">{set.catalog_items} catalog items · {set.scenarios} scenarios</span></div>
       <Loading q={runs} />
+      {latest && <ErrorNote error={summary.error ?? gaps.error} />}
       {runs.data && !latest && <div className="muted">No coverage run yet. <Link to="/coverage">Run coverage</Link></div>}
       {o && latest && (
         <>

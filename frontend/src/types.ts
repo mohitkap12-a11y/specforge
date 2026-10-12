@@ -46,7 +46,7 @@ export interface CovItem {
 export interface Evidence { id: number; sid: string; title: string; state: string; observability: string; result: string; match_count: number; evidence: any[] }
 export interface CmdSource {
   id: number; name: string; path: string; row_count: number; decoded_count: number; status: string; imported_at: string | null;
-  mapping: Record<string, any>; unknown: { undecodable_rows?: number; errors?: string[] };
+  mapping: Record<string, any>; unknown: { undecodable_rows?: number; errors?: { row: unknown; error: string }[] };
 }
 export interface CatalogItem {
   id: number; key: string; kind: string; parent_key: string | null; label: string; observability: string; na_reason: string | null; attrs: Record<string, any>;

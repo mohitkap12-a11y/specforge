@@ -59,8 +59,8 @@ export default function CatalogPage() {
     queryFn: () => api.catalog(sel.setId!, { kind, observability: obs, command, q: dq, offset, limit: LIMIT }),
   });
   const cmds = useQuery({ queryKey: ["catalog-cmds", sel.setId], enabled: sel.setId !== null, queryFn: () => api.catalog(sel.setId!, { kind: "command", limit: 500 }) });
-  // keep the open drawer in sync after an override is saved
-  const live = open ? list.data?.items.find((i) => i.key === open.key) ?? open : null;
+  // keep the open drawer in sync after an override is saved; it closes if the item no longer matches the filters
+  const live = open ? (list.data ? list.data.items.find((i) => i.key === open.key) ?? null : open) : null;
   return (
     <>
       <h1>Catalog</h1>

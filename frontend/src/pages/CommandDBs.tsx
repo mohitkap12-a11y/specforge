@@ -157,7 +157,7 @@ export default function CommandDBsPage() {
           {tab === "mapping" && <Mapping src={src} />}
           {tab === "problems" && (
             src.unknown?.errors?.length
-              ? <div className="scroll" style={{ maxHeight: 360 }}>{src.unknown.errors.map((e, i) => <div key={i} className="mono small">{e}</div>)}</div>
+              ? <div className="scroll" style={{ maxHeight: 360 }}>{src.unknown.errors.length < (src.unknown.undecodable_rows ?? 0) && <div className="muted small">Showing the first {src.unknown.errors.length} of {src.unknown.undecodable_rows} failures.</div>}{src.unknown.errors.map((e, i) => <div key={i} className="mono small">row {typeof e.row === "object" ? JSON.stringify(e.row) : String(e.row)}: {e.error}</div>)}</div>
               : <div className="muted">{src.status === "imported" ? "Every row decoded." : "Import the source to see decoding problems."}</div>
           )}
         </div>
