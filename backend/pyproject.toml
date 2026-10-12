@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "specforge"
+version = "0.1.0"
+description = "NVMe / NVMe-MI specification scenario and command coverage tool"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "pydantic>=2.6",
+  "pymupdf>=1.24",
+  "pdfplumber>=0.11",
+  "python-docx>=1.1",
+  "openpyxl>=3.1",
+  "httpx>=0.27",
+  "pyyaml>=6.0",
+  "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "reportlab>=4", "ruff>=0.4"]
+docling = ["docling>=2.0"]
+
+[project.scripts]
+specforge = "specforge.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["specforge*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E9", "F"]
