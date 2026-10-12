@@ -386,3 +386,10 @@ def test_sets_report_approved_and_draft_scenario_counts(client):
     c.close()
     s = next(x for x in client.get("/api/sets").json() if x["id"] == sid)
     assert (s["scenarios"], s["scenarios_approved"], s["scenarios_draft"]) == (4, 2, 1)
+
+
+@pytest.mark.parametrize("bad", [1, "cmd:admin:06", {"a": 1}, [1, 2], ["ok", None]])
+def test_ai_generation_validates_item_keys_before_submitting(client, bad):
+    r = client.post("/api/sets/1/scenarios/ai", json={"item_keys": bad})
+    assert r.status_code == 422 and "item_keys" in r.text
+    assert client.get("/api/jobs").json() == []                     # nothing was queued

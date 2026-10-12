@@ -6,9 +6,11 @@ import { api, logStreamUrl } from "../api";
 import { Badge, Empty, ErrorNote, Loading, PageHeader, Segmented } from "../components/ui";
 import { useToast } from "../components/Toasts";
 import { useDebounced } from "../hooks";
+import { trimRows } from "../util";
 import type { Job, LogEvent, LogLevel } from "../types";
 
-const MAX_ROWS = 4000;
+const MAX_ROWS = 4000;       // kept while following the live tail
+const HARD_MAX_ROWS = 20000; // ceiling while the user is reading history
 const LENSES = {
   all: { label: "All", sources: "" },
   process: { label: "Processing", sources: "job,parser,catalog,scenarios,import,coverage" },
@@ -92,6 +94,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
   const [stick, setStick] = useState(true);
   const box = useRef<HTMLDivElement>(null);
   const pendingRef = useRef<LogEvent[]>([]);
+  const stickRef = useRef(true);                  // mirrors `stick` so the live-append callback can read it without re-subscribing
   const liveRef = useRef(live);
   liveRef.current = live;
   const qRef = useRef(q);
@@ -107,8 +110,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
       const seen = new Set(cur.slice(-500).map((x) => x.id));
       const fresh = batch.filter((x) => !seen.has(x.id));
       if (!fresh.length) return cur;
-      const all = [...cur, ...fresh];
-      return all.length > MAX_ROWS ? all.slice(all.length - MAX_ROWS) : all;
+      return trimRows([...cur, ...fresh], stickRef.current, MAX_ROWS, HARD_MAX_ROWS);
     });
   }, []);
 
@@ -142,6 +144,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
   }, [live, append]);
 
   useLayoutEffect(() => { if (stick && box.current) box.current.scrollTop = box.current.scrollHeight; }, [events, stick, loading]);
+  stickRef.current = stick;
   const onScroll = () => { const el = box.current; if (el) setStick(el.scrollHeight - el.scrollTop - el.clientHeight < 48); };
 
   const loadOlder = async () => {

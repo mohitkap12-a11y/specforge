@@ -14,3 +14,10 @@ export function setIn<T extends Record<string, any>>(obj: T, path: string[], val
   const [head, ...rest] = path;
   return { ...obj, [head]: setIn((obj?.[head] ?? {}) as Record<string, any>, rest, value) };
 }
+
+/** Bound a live log list. While following the tail (`following`) it is trimmed from the top to `soft`; while the user reads
+ *  history (scrolled up, or after loading older events) nothing is dropped until a larger `hard` cap, so explicitly loaded rows stay visible. */
+export function trimRows<T>(rows: T[], following: boolean, soft: number, hard: number): T[] {
+  const max = following ? soft : hard;
+  return rows.length > max ? rows.slice(rows.length - max) : rows;
+}

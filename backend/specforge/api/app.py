@@ -480,12 +480,15 @@ def create_app() -> FastAPI:
         lim = body.get("limit")
         if lim is not None and (not isinstance(lim, int) or isinstance(lim, bool) or lim < 0):
             raise HTTPException(422, "limit must be a non-negative integer")
+        keys = body.get("item_keys")
+        if keys is not None and not (isinstance(keys, list) and all(isinstance(k, str) for k in keys)):
+            raise HTTPException(422, "item_keys must be a list of catalog item keys (strings)")
         st = settings()
 
         def work(c, prog):
             svc = LLMService(c, st)
             return generate_ai_scenarios(c, set_id, svc, body.get("item_keys"), body.get("limit"), progress=lambda a, b: prog("AI scenarios", a, b))
-        audit(f"AI scenario generation requested for set #{set_id}", set_id=set_id, limit=lim, item_keys=len(body.get("item_keys") or []) or None)
+        audit(f"AI scenario generation requested for set #{set_id}", set_id=set_id, limit=lim, item_keys=len(keys or []) or None)
         return {"job": jobs.submit(conn(), "ai-scenarios", work, {"set_id": set_id}, DB)}
 
     # ------------------------------------------------------------------ command DBs
