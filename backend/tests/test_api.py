@@ -93,3 +93,15 @@ def test_settings_and_provider_errors(client):
     r = client.get("/api/providers/ollama/models").json()
     assert r["ok"] is False and "failed" in r["error"]
     assert client.get("/api/jobs/9999").status_code == 404
+
+
+def test_reset_wipes_work_but_keeps_settings(client, demo_dir):
+    client.put("/api/settings", json={"ollama": {"base_url": "http://example:1"}})
+    docs = client.post("/api/specs/upload", files=[("files", (p.name, p.read_bytes(), "application/pdf")) for p in sorted(demo_dir.glob("nvme-base-2.4.pdf"))]).json()
+    client.post("/api/sets", json={"name": "demo", "document_ids": [d["id"] for d in docs]})
+    r = client.post("/api/reset")
+    assert r.status_code == 200 and r.json()["deleted"]["spec_document"] == 1
+    assert client.get("/api/specs").json() == [] and client.get("/api/sets").json() == []
+    assert client.get("/api/settings").json()["ollama"]["base_url"] == "http://example:1"
+    from specforge.core.config import workspace_dir
+    assert not list((workspace_dir() / "specs").iterdir())

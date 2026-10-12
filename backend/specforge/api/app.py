@@ -91,6 +91,26 @@ def create_app() -> FastAPI:
         audit("Settings saved", sections=sorted(body) if isinstance(body, dict) else [])
         return saved
 
+    @app.post("/api/reset")
+    def reset_workspace():
+        """Wipe everything produced while working (specs, sets, scenarios, command DBs, coverage, jobs, log, cache). Settings are kept."""
+        if jobs.active(conn()):
+            raise HTTPException(409, "Jobs are still running. Cancel them or wait for them to finish, then reset.")
+        eventlog.drain(1.0)
+        c = conn()
+        counts = {}
+        for table in ("spec_document", "spec_set", "cmd_source", "correction", "llm_cache", "enrichment", "job", "event_log"):
+            counts[table] = c.execute(f"DELETE FROM {table}").rowcount    # parse runs, nodes, catalogs, scenarios and coverage go with these via ON DELETE CASCADE
+        c.commit()
+        files = 0
+        for sub in ("specs", "uploads"):
+            for f in (config.workspace_dir() / sub).iterdir():
+                if f.is_file():
+                    f.unlink(missing_ok=True)
+                    files += 1
+        eventlog.emit("warn", "system", "Workspace reset: all specs, sets, scenarios, command databases, coverage runs and logs removed (settings kept)", **counts, files=files)
+        return {"ok": True, "deleted": counts, "files": files}
+
     @app.get("/api/providers/{name}/models")
     def provider_models(name: str):
         try:

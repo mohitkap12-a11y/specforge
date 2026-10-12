@@ -9,7 +9,7 @@ import { setIn } from "../util";
 
 type S = Record<string, any>;
 const TASKS = [["classify", "Classify", "Labels items (reserved for future use)"], ["generate", "Draft scenarios", "Reads each normative statement and proposes test scenarios"], ["embed", "Embeddings", "Semantic search (reserved for future use)"]] as const;
-const SECTIONS = [["ai", "AI providers"], ["models", "Models"], ["parser", "Parser"], ["logging", "Logging"], ["mi", "NVMe-MI layout"], ["appearance", "Appearance"], ["about", "About"]] as const;
+const SECTIONS = [["ai", "AI providers"], ["models", "Models"], ["parser", "Parser"], ["logging", "Logging"], ["mi", "NVMe-MI layout"], ["appearance", "Appearance"], ["reset", "Reset"], ["about", "About"]] as const;
 
 function Section({ id, title, description, children }: { id: string; title: string; description?: ReactNode; children: ReactNode }) {
   return (
@@ -55,6 +55,10 @@ export default function SettingsPage() {
   const save = useMutation({
     mutationFn: (b: S) => api.saveSettings(b),
     onSuccess: () => { qc.invalidateQueries(); toast.push({ title: "Settings saved", tone: "ok" }); },
+  });
+  const reset = useMutation({
+    mutationFn: () => api.resetWorkspace(),
+    onSuccess: () => { qc.invalidateQueries(); toast.push({ title: "Workspace reset", tone: "ok" }); },
   });
   if (q.isLoading || q.error || !s) return <><PageHeader title="Settings" /><Loading q={q} /></>;
 
@@ -143,6 +147,13 @@ export default function SettingsPage() {
           <Section id="appearance" title="Appearance">
             <Segmented<ThemePref> label="Theme" value={theme} onChange={setTheme} options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]} />
             <p className="muted small" style={{ marginTop: 8 }}>Stored in this browser only. Tip: press <span className="kbd">⌘ K</span> / <span className="kbd">Ctrl K</span> anywhere to jump to a page.</p>
+          </Section>
+
+          <Section id="reset" title="Reset workspace" description="Start over: permanently deletes all uploaded specs and parse runs, spec sets, catalogs, scenarios, command databases, coverage runs, jobs, the activity log and the AI cache. Your settings above are kept.">
+            <button className="danger" disabled={reset.isPending} onClick={() => { if (confirm("Delete everything created so far (specs, sets, scenarios, command DBs, coverage runs, logs)? This cannot be undone. Settings are kept.")) reset.mutate(); }}>
+              {reset.isPending && <span className="spinner" />}Reset everything
+            </button>
+            <ErrorNote error={reset.error} />
           </Section>
 
           <Section id="about" title="About">
