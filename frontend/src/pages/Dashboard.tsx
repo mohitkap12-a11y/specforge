@@ -11,11 +11,14 @@ function Trend({ runs }: { runs: CovRun[] }) {
   if (pts.length < 2) return null;
   return (
     <div className="row" style={{ alignItems: "flex-end", height: 44, gap: 4 }} role="img"
-      aria-label={`Covered percentage over the last ${pts.length} runs: ${pts.map((r) => (r.overall?.pct_covered ?? 0).toFixed(0) + "%").join(", ")}`}>
-      {pts.map((r) => (
-        <div key={r.id} title={`Run #${r.id}: ${r.overall?.pct_covered?.toFixed(1) ?? "–"}%`}
-          style={{ width: 14, height: `${Math.max(3, r.overall?.pct_covered ?? 0) * 0.44}px`, background: "var(--accent)", borderRadius: 2 }} />
-      ))}
+      aria-label={`Covered percentage over the last ${pts.length} runs: ${pts.map((r) => (r.overall?.pct_covered == null ? "n/a" : r.overall.pct_covered.toFixed(0) + "%")).join(", ")}`}>
+      {pts.map((r) => {
+        const v = r.overall?.pct_covered;   // null when a run has no observable items: show "unavailable", not 0%
+        return (
+          <div key={r.id} title={`Run #${r.id}: ${v == null ? "n/a" : `${v.toFixed(1)}%`}`}
+            style={{ width: 14, height: v == null ? 2 : `${Math.max(3, v) * 0.44}px`, background: v == null ? "var(--border)" : "var(--accent)", borderRadius: 2 }} />
+        );
+      })}
     </div>
   );
 }
