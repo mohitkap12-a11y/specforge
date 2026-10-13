@@ -1,4 +1,4 @@
-import type { LogEvent, CatalogItem, CmdSource, DecodedCommand, RefResult, CovItem, CovRun, CovSummary, Evidence, Issue, Job, Scenario, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { LogEvent, CatalogItem, CmdSource, DecodedCommand, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, Evidence, Issue, Job, Scenario, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -73,7 +73,9 @@ export const api = {
   patchScenario: (id: number, b: Record<string, unknown>) => req<{ ok: boolean; state: string }>("PATCH", `/api/scenarios/${id}`, b),
   bulkScenarios: (ids: number[], state: string) => req<{ ok: boolean; updated: number[]; refused: { id: number; errors: string[] }[] }>("POST", "/api/scenarios/bulk", { ids, state }),
   validate: (set_id: number, predicate: unknown) => req<{ errors: string[] }>("POST", "/api/scenarios/validate", { set_id, predicate }),
-  aiGenerate: (set: number, b: { limit?: number }) => req<{ job: number }>("POST", `/api/sets/${set}/scenarios/ai`, b),
+  sections: (set: number, f: { q?: string; limit?: number }) => req<{ total: number; sections: SectionRow[] }>("GET", `/api/sets/${set}/sections${qs(f)}`),
+  crossPlan: (set: number, b: CrossSelection) => req<{ units: CrossUnit[] }>("POST", `/api/sets/${set}/scenarios/cross/plan`, b),
+  crossGenerate: (set: number, b: CrossSelection & { focus?: string; max_per_section?: number }) => req<{ job: number }>("POST", `/api/sets/${set}/scenarios/cross`, b),
 
   sources: () => req<CmdSource[]>("GET", "/api/cmddb"),
   suggestMapping: (path: string) => req<Record<string, any>>("GET", `/api/cmddb/suggest${qs({ path })}`),

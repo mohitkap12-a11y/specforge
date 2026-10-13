@@ -38,6 +38,17 @@ _FIELD_DESC = re.compile(r"^(?P<name>[^:(]+?)(?:\s*\((?P<abbr>[A-Za-z0-9_/ -]{1,
 _STIMULUS_WORDS = re.compile(r"\b(abort|status|error|invalid|fail|reject|return(?:s|ed)? (?:an )?error)\b", re.I)
 
 
+def _mention_patterns(commands: dict[str, dict]) -> dict[str, re.Pattern]:
+    """How a command is named in running text.  Multi-word names ('Get Log Page') are distinctive; a one-word name
+    ('Read', 'Write', 'Identify') only counts when followed by 'command', so ordinary prose is not mistaken for a reference."""
+    out = {}
+    for k, c in commands.items():
+        n = re.sub(r"\s+[Cc]ommand$", "", c["name"].strip())
+        if len(n) >= 4:
+            out[k] = re.compile(rf"\b{re.escape(n)}\b" + (r"(?:\s+[Cc]ommand)?" if " " in n else r"\s+[Cc]ommand\b"))
+    return out
+
+
 def _dash(s: str) -> str:
     return norm_title(s)
 
@@ -305,6 +316,7 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
             for n in subtree(c["ir"], c["section"]["number"]):
                 cmd_by_section.setdefault((c["ir"]["prefix"], n), c)
     field_items = [i for i in items.values() if i["kind"] == "field"]
+    mention_rx = _mention_patterns(commands)
     for ir in irs:
         for rq in ir["requirements"]:
             cmd = None
@@ -321,15 +333,18 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
                         linked_fields.append(fi["key"])
                     elif rq.get("table") and a["table"] == f"{ir['prefix']}/fig:{rq['table']}" and rq["text"] in a["desc"]:
                         linked_fields.append(fi["key"])
+            mentions = [k for k, rx in mention_rx.items() if k != (cmd["key"] if cmd else None) and rx.search(rq["text"])]
             if cmd and _STIMULUS_WORDS.search(rq["text"]):
                 obs, basis = "stimulus", "heuristic: names an error/abort outcome"
             elif cmd and linked_fields:
                 obs, basis = "stimulus", "heuristic: mentions a field of the command"
+            elif mentions and (cmd or len(mentions) > 1):
+                obs, basis = "stimulus", "heuristic: relates several commands"
             else:
                 obs, basis = "unobservable", "heuristic: no command-level stimulus identified"
             add(_item(rq["key"], "requirement", cmd["key"] if cmd else None, rq["text"][:140], obs, text=rq["text"],
                       strength=rq["strength"], word=rq.get("word"), command=cmd["key"] if cmd else None, fields=linked_fields,
-                      page=rq.get("page"), basis=basis, family=ir["family"], version=ir["version"]))
+                      mentions=mentions, page=rq.get("page"), basis=basis, family=ir["family"], version=ir["version"]))
 
     # ---- persist (preserving reviewer overrides)
     over = {r["key"]: r for r in rows(conn, "SELECT * FROM item_override WHERE set_id=?", (set_id,))}

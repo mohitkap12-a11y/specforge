@@ -36,8 +36,6 @@ def test_predicate_edits_keep_links_valid_and_reset_approval(ws, conn, parsed_se
         assert patch({"predicate": same_cmd}).status_code == 200
         assert conn.execute("SELECT state FROM scenario WHERE id=?", (sid,)).fetchone()[0] == "draft"      # the edit invalidated the approval
         assert patch({"predicate": same_cmd, "state": "approved"}).status_code == 200                       # re-approval in the same request
-        tmpl = conn.execute("SELECT id FROM scenario WHERE origin='template' LIMIT 1").fetchone()[0]
-        assert client.patch(f"/api/scenarios/{tmpl}", json={"predicate": same_cmd}).status_code == 409
 
 
 def test_report_text_is_never_interpreted_as_a_formula(conn, parsed_set, demo_dir):

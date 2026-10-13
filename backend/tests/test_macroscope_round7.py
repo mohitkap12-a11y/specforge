@@ -2,14 +2,11 @@
 import shutil
 import sqlite3
 
-import pytest
 from fastapi.testclient import TestClient
-from llm_helpers import Fake, settings
 
 from specforge import catalog, cmddb
 from specforge.core.hashing import sha256_file
 from specforge.devtools.synth import sqe
-from specforge.llm.base import LLMError
 
 
 def test_deleting_a_set_cleans_legacy_databases_without_cascade_foreign_keys(ws, conn, parsed_set):
@@ -31,33 +28,6 @@ def test_deleting_a_set_cleans_legacy_databases_without_cascade_foreign_keys(ws,
     with TestClient(create_app()) as client:
         assert client.delete("/api/sets/1").json() == {"ok": True}          # through the endpoint, not direct SQL
     assert [conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("coverage_run", "coverage_result", "item_result")] == [0, 0, 0]
-
-
-def test_cancellation_is_checked_on_failed_ai_requests_too(conn, parsed_set):
-    from specforge.ai import generate_ai_scenarios
-    from specforge.llm.service import LLMService
-
-    keys = [r["key"] for r in conn.execute("SELECT key FROM catalog_item WHERE kind='requirement' AND observability<>'unobservable'").fetchall()]
-    assert len(keys) >= 3
-    calls = []
-
-    def boom(messages):
-        calls.append(1)
-        raise LLMError("model unavailable")
-
-    st = settings()
-    st["llm"]["max_retries"] = 0
-    svc = LLMService(conn, st, Fake([boom]))
-    seen = []
-
-    def progress(done, total):
-        seen.append(done)
-        if done >= 1:                               # the user cancels after the first requirement
-            raise InterruptedError("cancelled")
-
-    with pytest.raises(InterruptedError):
-        generate_ai_scenarios(conn, 1, svc, keys, progress=progress)
-    assert len(calls) == 1 and seen == [0, 1]       # the failing first requirement did not let the loop run on unchecked
 
 
 def test_import_records_the_hash_of_the_bytes_it_imported(conn, parsed_set, demo_dir, tmp_path):

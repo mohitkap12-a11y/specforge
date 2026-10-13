@@ -1,10 +1,8 @@
 """Regression tests for the Macroscope review findings on PR #1."""
-import json
 import sqlite3
 import time
 
 from fastapi.testclient import TestClient
-from llm_helpers import Fake, settings
 
 from specforge import catalog, cmddb, coverage, refs
 from specforge.core.db import connect, rows
@@ -78,45 +76,15 @@ def test_evidence_is_limited_to_the_runs_spec_set(ws, demo_dir):
         sets = [client.post("/api/sets", json={"name": f"s{i}", "document_ids": docs}).json()["id"] for i in (1, 2)]
         for s in sets:
             assert wait_job(client, client.post(f"/api/sets/{s}/catalog/build").json()["job"])["state"] == "done"
+            from seed import generate_templates
+
+            from specforge.core.db import connect
+            generate_templates(connect(), s)       # test seed: the product only generates cross-command scenarios
         src = client.post("/api/cmddb", json={"path": str(demo_dir / "cmds-a.db")}).json()["id"]
         wait_job(client, client.post(f"/api/cmddb/{src}/import").json()["job"])
         run = wait_job(client, client.post("/api/coverage/run", json={"set_id": sets[0], "source_id": src}).json()["job"])["result"]["run_id"]
         ev = client.get(f"/api/coverage/{run}/evidence", params={"item": "cmd:admin:06"}).json()
         assert len(ev) == 1 and ev[0]["result"] == "matched"             # the identical scenario of the other set is not returned
-
-
-# ------------------------------------------------------------------ ai.py
-
-def _gen(conn, keys, scenario):
-    from specforge.ai import generate_ai_scenarios
-    from specforge.llm.service import LLMService
-
-    svc = LLMService(conn, settings(), Fake([json.dumps({"testable": True, "scenarios": [scenario]})]))
-    return generate_ai_scenarios(conn, 1, svc, keys)
-
-
-def _scenario(**kw):
-    s = {"title": "Identify with reserved bits", "observability": "stimulus", "quotes": ["The Identify command returns a data structure to the host."],
-         "steps": [{"command": "cmd:admin:06", "fields": [{"dw": 10, "hi": 15, "lo": 8, "op": "ne", "value": 0}]}]}
-    s.update(kw)
-    return s
-
-
-def test_duplicate_predicate_links_the_second_requirement(conn, parsed_set):
-    r1 = next(r["key"] for r in rows(conn, "SELECT key,label FROM catalog_item WHERE kind='requirement'") if "Invalid Field in Command if a reserved" in r["label"])
-    r2 = next(r["key"] for r in rows(conn, "SELECT key,label FROM catalog_item WHERE kind='requirement'") if "shall not specify a reserved value" in r["label"])
-    catalog.set_override(conn, 1, r2, "stimulus", None)
-    stats = _gen(conn, [r1, r2], _scenario())
-    assert (stats["created"], stats["duplicates"]) == (1, 1)
-    sc = rows(conn, "SELECT id FROM scenario WHERE origin='ai'")
-    assert len(sc) == 1
-    assert {r[0] for r in conn.execute("SELECT item_key FROM scenario_item WHERE scenario_id=?", (sc[0]["id"],))} == {r1, r2}
-
-
-def test_within_zero_is_rejected_not_unlimited(conn, parsed_set):
-    r1 = next(r["key"] for r in rows(conn, "SELECT key,label FROM catalog_item WHERE kind='requirement'") if "Invalid Field in Command if a reserved" in r["label"])
-    stats = _gen(conn, [r1], _scenario(within=0))
-    assert stats["created"] == 0 and stats["rejected"] == 1
 
 
 # ------------------------------------------------------------------ catalog.py

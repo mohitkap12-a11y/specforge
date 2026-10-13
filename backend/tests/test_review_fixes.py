@@ -6,7 +6,7 @@ import time
 
 from fastapi.testclient import TestClient
 
-from specforge import cmddb, coverage, jobs, scenarios
+from specforge import cmddb, coverage, jobs
 from specforge.core.db import connect, rows
 from specforge.devtools.synth import sqe, write_pdf
 from specforge.ingest.pdf import parse_pdf
@@ -106,39 +106,6 @@ def test_bulk_approve_validates_predicates(ws, demo_dir):
         rid = c.execute("SELECT MAX(id) FROM parse_run").fetchone()[0]
         assert client.post(f"/api/runs/{rid}/activate").status_code == 409
         assert client.post("/api/runs/99999/activate").status_code == 404
-
-
-def test_template_regeneration_keeps_ids_and_reviewer_decisions(conn, parsed_set):
-    sid = "T:cmd:admin:06/dw10[07:00]=03h"
-    before = conn.execute("SELECT id FROM scenario WHERE sid=?", (sid,)).fetchone()[0]
-    conn.execute("UPDATE scenario SET state='rejected' WHERE id=?", (before,)); conn.commit()
-    from specforge import catalog
-
-    catalog.build_catalog(conn, 1)
-    scenarios.generate_templates(conn, 1)
-    after = conn.execute("SELECT id,state FROM scenario WHERE sid=?", (sid,)).fetchone()
-    assert (after[0], after[1]) == (before, "rejected")
-    assert conn.execute("SELECT COUNT(*) FROM scenario WHERE origin='template'").fetchone()[0] == 152
-    assert conn.execute("SELECT COUNT(*) FROM scenario_item").fetchone()[0] == 152
-
-
-def test_ai_grounding_uses_the_requirements_section(conn, parsed_set):
-    from llm_helpers import Fake, reply_for, settings
-
-    from specforge.ai import generate_ai_scenarios
-    from specforge.llm.service import LLMService
-
-    req, base = reply_for(conn)
-    # quote comes from a NEIGHBOURING sentence of the same section, not from the requirement itself
-    base["quotes"] = ["The Identify command returns a data structure to the host."]
-    svc = LLMService(conn, settings(), Fake([json.dumps({"testable": True, "scenarios": [base]})]))
-    stats = generate_ai_scenarios(conn, 1, svc, [req["key"]])
-    assert stats["created"] == 1 and stats["rejected"] == 0
-    # the same quote lifted from another section must still be rejected
-    conn.execute("DELETE FROM scenario WHERE origin='ai'"); conn.execute("DELETE FROM llm_cache"); conn.commit()
-    base["quotes"] = ["The Write command writes data and metadata to the namespace."]
-    svc = LLMService(conn, settings(), Fake([json.dumps({"testable": True, "scenarios": [base]})]))
-    assert generate_ai_scenarios(conn, 1, svc, [req["key"]])["rejected"] == 1
 
 
 def test_command_db_path_with_special_characters(conn, demo_dir, tmp_path):

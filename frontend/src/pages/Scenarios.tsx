@@ -4,7 +4,7 @@ import { api } from "../api";
 import { FlaskConical } from "lucide-react";
 import { Badge, Empty, ErrorNote, Loading, Pager, PageHeader } from "../components/ui";
 import { SetPicker, useSelectedSet } from "../components/SetPicker";
-import { useJobs } from "../components/jobs";
+import CrossGenerator from "../components/CrossGenerator";
 import { useDebounced } from "../hooks";
 import type { Scenario } from "../types";
 
@@ -12,7 +12,6 @@ const LIMIT = 100;
 
 function Drawer({ s, setId, onClose }: { s: Scenario; setId: number; onClose: () => void }) {
   const qc = useQueryClient();
-  const editable = s.origin !== "template";
   const [title, setTitle] = useState(s.title);
   const [desc, setDesc] = useState(s.description ?? "");
   const [pred, setPred] = useState(JSON.stringify(s.predicate, null, 2));
@@ -42,15 +41,14 @@ function Drawer({ s, setId, onClose }: { s: Scenario; setId: number; onClose: ()
     <aside className="drawer" aria-label="Scenario detail">
       <div className="row"><h2 className="grow">{s.sid}</h2><button onClick={onClose}>Close</button></div>
       <div className="row"><Badge value={s.state} label={s.state} /><span className="badge">{s.origin}</span><span className="badge">{s.observability}</span></div>
-      {!editable && <p className="muted small">Template scenarios are generated from the catalog and are read-only. They change only when the catalog is rebuilt.</p>}
-      <label>Title<input style={{ width: "100%" }} value={title} disabled={!editable} onChange={(e) => setTitle(e.target.value)} /></label>
-      <label>Description<textarea rows={3} value={desc} disabled={!editable} onChange={(e) => setDesc(e.target.value)} /></label>
+            <label>Title<input style={{ width: "100%" }} value={title} onChange={(e) => setTitle(e.target.value)} /></label>
+      <label>Description<textarea rows={3} value={desc} onChange={(e) => setDesc(e.target.value)} /></label>
       <h3>Predicate</h3>
-      <textarea rows={16} spellCheck={false} value={pred} disabled={!editable} onChange={(e) => setPred(e.target.value)} aria-label="Predicate JSON" />
+      <textarea rows={16} spellCheck={false} value={pred} onChange={(e) => setPred(e.target.value)} aria-label="Predicate JSON" />
       {errors.length > 0 ? <div className="toast bad" role="alert">{errors.map((e, i) => <div key={i}>{e}</div>)}</div>
         : !parseErr && live.data && debounced === pred && <div className="toast ok">Predicate is valid.</div>}
       <ErrorNote error={save.error} />
-      {editable && (
+      {(
         <div className="row" style={{ margin: "10px 0" }}>
           <button disabled={!dirty || !!parseErr || save.isPending} onClick={() => save.mutate(body())}>Save{s.state === "approved" && JSON.stringify(parsed) !== JSON.stringify(s.predicate) ? " (resets to draft)" : ""}</button>
           <button className="primary" disabled={s.state === "approved" && !dirty || !!parseErr || save.isPending} onClick={() => save.mutate({ ...body(), state: "approved" })}>Approve</button>
@@ -67,7 +65,6 @@ function Drawer({ s, setId, onClose }: { s: Scenario; setId: number; onClose: ()
 
 export default function ScenariosPage() {
   const sel = useSelectedSet();
-  const { track } = useJobs();
   const qc = useQueryClient();
   const [origin, setOrigin] = useState("");
   const [state, setState] = useState("");
@@ -91,28 +88,28 @@ export default function ScenariosPage() {
     mutationFn: (st: string) => api.bulkScenarios([...checked], st),
     onSuccess: () => { setChecked(new Set()); qc.invalidateQueries({ queryKey: ["scenarios"] }); },
   });
-  const ai = useMutation({ mutationFn: () => api.aiGenerate(sel.setId!, {}), onSuccess: (r) => track(r.job, "AI scenario generation") });
+  const [showGen, setShowGen] = useState(false);
   const rows = list.data?.scenarios ?? [];
-  const reviewable = rows.filter((s) => s.origin !== "template");
   const current = rows.find((s) => s.id === open);
   const toggle = (id: number) => setChecked((c) => { const n = new Set(c); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
   return (
     <>
-      <PageHeader title="Scenarios" description="Template scenarios come from the catalog. AI-drafted scenarios stay drafts until you approve them; only approved scenarios count toward coverage." />
+      <PageHeader title="Scenarios" description="Cross-command scenarios are drafted from selected spec sections and stay drafts until you approve them; only approved scenarios count toward coverage." />
       <div className="row" style={{ marginBottom: 12 }}>
         <SetPicker sel={sel} />
         <select value={origin} onChange={(e) => setOrigin(e.target.value)} aria-label="Origin">
-          <option value="">All origins</option><option value="template">Template</option><option value="ai">AI</option>
+          <option value="">All origins</option><option value="cross">Cross-command</option>
         </select>
         <select value={state} onChange={(e) => setState(e.target.value)} aria-label="State">
           <option value="">All states</option><option value="draft">Draft</option><option value="approved">Approved</option><option value="rejected">Rejected</option>
         </select>
         <input placeholder="Search title or id…" value={q} onChange={(e) => setQ(e.target.value)} />
         <span className="grow" />
-        <button disabled={sel.setId === null || ai.isPending} onClick={() => ai.mutate()} title="Drafts scenarios from normative statements; nothing counts until you approve it">Generate with AI</button>
+        <button className={showGen ? "" : "primary"} disabled={sel.setId === null} onClick={() => setShowGen((v) => !v)}>{showGen ? "Hide generator" : "Generate cross-command scenarios"}</button>
       </div>
-      <ErrorNote error={sel.error ?? list.error ?? ai.error} />
+      <ErrorNote error={sel.error ?? list.error} />
+      {showGen && sel.setId !== null && <CrossGenerator setId={sel.setId} />}
       {checked.size > 0 && (
         <div className="card row">
           <strong>{checked.size} selected</strong>
@@ -130,18 +127,18 @@ export default function ScenariosPage() {
         </div>
       )}
       {sel.setId !== null && <Loading q={list} />}
-      {list.data && rows.length === 0 && <Empty icon={FlaskConical} title="No scenarios match">Build the catalog for this set on the Sets page to create template scenarios, or change the filters.</Empty>}
+      {list.data && rows.length === 0 && <Empty icon={FlaskConical} title="No scenarios match">Use “Generate cross-command scenarios” to draft some from the spec sections, or change the filters.</Empty>}
       {rows.length > 0 && (
         <div className="card">
           <div className="scroll">
             <table className="t">
               <thead><tr>
-                <th><input type="checkbox" aria-label="Select all reviewable" checked={reviewable.length > 0 && reviewable.every((s) => checked.has(s.id))}
-                  onChange={(e) => setChecked(e.target.checked ? new Set(reviewable.map((s) => s.id)) : new Set())} /></th>
+                <th><input type="checkbox" aria-label="Select all" checked={rows.length > 0 && rows.every((s) => checked.has(s.id))}
+                  onChange={(e) => setChecked(e.target.checked ? new Set(rows.map((s) => s.id)) : new Set())} /></th>
                 <th>ID</th><th>Title</th><th>Origin</th><th>State</th><th>Observability</th><th>Items</th></tr></thead>
               <tbody>{rows.map((s) => (
                 <tr key={s.id} className={`click ${open === s.id ? "sel" : ""}`} onClick={() => setOpen(s.id)}>
-                  <td onClick={(e) => e.stopPropagation()}><input type="checkbox" aria-label={`Select ${s.sid}`} disabled={s.origin === "template"} checked={checked.has(s.id)} onChange={() => toggle(s.id)} /></td>
+                  <td onClick={(e) => e.stopPropagation()}><input type="checkbox" aria-label={`Select ${s.sid}`} checked={checked.has(s.id)} onChange={() => toggle(s.id)} /></td>
                   <td className="mono small">{s.sid}</td><td>{s.title}</td><td>{s.origin}</td><td><Badge value={s.state} label={s.state} /></td>
                   <td className="small">{s.observability}</td><td>{s.items.length}</td>
                 </tr>
