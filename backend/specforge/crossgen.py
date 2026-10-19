@@ -36,10 +36,9 @@ PROMPT_VERSION = "cross-v1"
 PRIMARY_CHARS = 10_000       # budget for the selected section (its sub-sections and tables)
 RELATED_CHARS = 8_000        # budget for all connected passages together
 PASSAGE_CHARS = 2_000        # budget for one connected passage
-CATALOG_CHARS = 9_000
-MAX_COMMANDS = 14
-MAX_GROUP = 5            # selected sections that still share each other's commands
-MAX_ENTRIES_PER_COMMAND = 80
+CATALOG_CHARS = 16_000       # shared out between the commands in scope, so every one of them is shown
+MIN_PER_COMMAND = 600
+MAX_COMMANDS = 24
 
 # ----------------------------------------------------------------------------- model output
 
@@ -232,8 +231,10 @@ def _section_block(ix: _Index, key: str, limit: int, with_tables: bool = True) -
 
 # ----------------------------------------------------------------------------- planning
 
-def list_sections(conn: sqlite3.Connection, set_id: int, q: str | None = None, limit: int = 400) -> dict[str, Any]:
-    """Sections of the set's documents for the picker; `commands` are the catalog commands defined inside each section."""
+def list_sections(conn: sqlite3.Connection, set_id: int, q: str | None = None, limit: int = 400, family: str | None = None,
+                  offset: int = 0) -> dict[str, Any]:
+    """Sections of the set's documents for the picker, optionally of one spec family and paged; `commands` are the catalog commands
+    defined inside each section and `specs` lists every document of the set (so a picker can offer a per-spec filter)."""
     ix = _Index(load_set_irs(conn, set_id))
     cmd_sec = {}
     for r in rows(conn, "SELECT key,label,attrs_json FROM catalog_item WHERE set_id=? AND kind='command'", (set_id,)):
@@ -243,13 +244,16 @@ def list_sections(conn: sqlite3.Connection, set_id: int, q: str | None = None, l
     out = []
     needle = (q or "").lower()
     for ir in ix.irs:
+        if family and ir["family"] != family:
+            continue
         for n in ir["section_order"]:
             s = ir["sections"][n]
             if needle and needle not in f"{s['number']} {s['title']}".lower():
                 continue
             out.append({"key": s["key"], "family": ir["family"], "version": ir["version"], "number": s["number"], "title": s["title"],
                         "level": s["level"], "chars": len(s["text"]), "commands": cmd_sec.get(s["key"], [])})
-    return {"total": len(out), "sections": out[:limit]}
+    specs = [{"family": ir["family"], "version": ir["version"], "sections": len(ir["sections"])} for ir in ix.irs]
+    return {"total": len(out), "sections": out[offset:offset + limit], "specs": specs}
 
 
 def build_units(conn: sqlite3.Connection, set_id: int, section_keys: list[str] | None = None, command_keys: list[str] | None = None) -> list[dict]:
@@ -346,14 +350,14 @@ def build_units(conn: sqlite3.Connection, set_id: int, section_keys: list[str] |
             related.append(c)
 
         in_related = [k for k, rx in patterns.items() if k not in unit_cmds and any(rx.search(r_["text"]) for r_ in related)]
-        # commands of the other selected sections join last, and only for a small related group: in a large selection they
-        # would bury the real relationships (select the sections that belong together, a few at a time)
-        selected_cmds = [c for other in keys if other != key for sk in (s_["key"] for s_ in ix.subtree(other)) for c in cmd_by_sec.get(sk, [])] \
-            if len(keys) <= MAX_GROUP else []
-        involved = list(dict.fromkeys(unit_cmds + named + in_related +
+        # the commands the user selected, and those of the other selected sections, are one group: they rank right after this
+        # section's own commands, however large the selection (a scenario across them is what was asked for)
+        selected_cmds = list(dict.fromkeys(
+            [k for k in (command_keys or []) if k in cat] +
+            [c for other in keys if other != key for sk in (s_["key"] for s_ in ix.subtree(other)) for c in cmd_by_sec.get(sk, [])]))
+        involved = list(dict.fromkeys(unit_cmds + selected_cmds + named + in_related +
                                       [m for rk, ms in req_mentions.items() if rk in own_nodes for m in ms] +
-                                      [c for r_ in related if r_["why"] != "selected together with this section" for c in cmd_by_sec.get(r_["section"] or "", [])] +
-                                      selected_cmds))
+                                      [c for r_ in related if r_["why"] != "selected together with this section" for c in cmd_by_sec.get(r_["section"] or "", [])]))
         involved = [c for c in involved if c in cat][:MAX_COMMANDS]
         units.append({"section_key": key, "family": ir["family"], "version": ir["version"], "number": root["number"], "title": root["title"],
                       "commands": involved, "own_commands": unit_cmds, "primary": primary, "related": related})
@@ -370,13 +374,33 @@ def plan(conn: sqlite3.Connection, set_id: int, section_keys: list[str] | None =
 
 # ----------------------------------------------------------------------------- generation
 
-def _messages(conn: sqlite3.Connection, set_id: int, u: dict, focus: str, limit: int) -> tuple[list[dict], str]:
-    catalog: list[dict] = []
-    for ck in u["commands"]:
-        catalog += _catalog_for(conn, set_id, ck)[:MAX_ENTRIES_PER_COMMAND]
+_KIND_ORDER = {"name": 0, "field": 1, "value_of": 2}
+
+
+def _catalog_text(conn: sqlite3.Connection, set_id: int, commands: list[str]) -> str:
+    """The catalog slice, one compact JSON object per line.  Each command gets an equal share of the budget (its command line and
+    fields first, enumerated values last), so a long command can never push another one out of the prompt."""
+    per = max(MIN_PER_COMMAND, CATALOG_CHARS // max(1, len(commands)))
+    out: list[str] = []
+    for ck in commands:
+        entries = sorted(_catalog_for(conn, set_id, ck), key=lambda e: next((v for k, v in _KIND_ORDER.items() if k in e), 3))
+        used = 0
+        for e in entries:
+            line = json.dumps(e, separators=(",", ":"))
+            if used + len(line) > per:
+                out.append(json.dumps({"command": ck, "note": "further fields / values omitted for space"}, separators=(",", ":")))
+                break
+            out.append(line)
+            used += len(line) + 1
+    return "\n".join(out)
+
+
+def _messages(conn: sqlite3.Connection, set_id: int, u: dict, focus: str, limit: int, group: list[str] | None = None) -> tuple[list[dict], str]:
     related = "\n\n".join(f"[{r['title']} - {r['why']}]\n{r['text']}" for r in u["related"]) or "(none found)"
     user = (f"SECTION §{u['number']} {u['title']}:\n{u['primary']}\n\nRELATED:\n{related}\n\n"
-            f"CATALOG (the only commands/fields you may use):\n{json.dumps(catalog, indent=1)[:CATALOG_CHARS]}\n\n"
+            f"CATALOG (the only commands/fields you may use; one JSON object per line):\n{_catalog_text(conn, set_id, u['commands'])}\n\n"
+            + (f"SELECTED TOGETHER: the user chose these commands to be tested as a group, so scenarios should combine them where the text supports it: "
+               f"{', '.join(group)}.\n\n" if group and len(group) > 1 else "")
             + (f"FOCUS requested by the user: {focus}\n\n" if focus.strip() else "") + f"Write at most {limit} scenarios.")
     corpus = u["primary"] + "\n" + "\n".join(r["text"] for r in u["related"])
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}], corpus
@@ -392,6 +416,7 @@ def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMServ
         raise ValueError("max_per_section must be an integer from 1 to 20")
     units = build_units(conn, set_id, section_keys, command_keys)
     cmds, fields = catalog_context(conn, set_id)
+    group = [cmds[k]["name"] for k in dict.fromkeys([*(command_keys or []), *(c for u in units for c in u["own_commands"])]) if k in cmds]
     req_text = {r["key"]: norm_text(jloads(r["attrs_json"], {}).get("text", "")) for r in rows(conn, "SELECT key,attrs_json FROM catalog_item WHERE set_id=? AND kind='requirement'", (set_id,))}
     existing = {r["predicate_json"] for r in rows(conn, "SELECT predicate_json FROM scenario WHERE set_id=?", (set_id,))}
     stats = {"sections": len(units), "created": 0, "not_testable": 0, "rejected": 0, "failed": 0, "duplicates": 0}
@@ -404,7 +429,7 @@ def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMServ
         tag = f"[{n + 1}/{len(units)}] §{u['number']} {u['title'][:60]}"
         eventlog.emit("info", "agent", f"{tag}: reading {len(u['primary'])} chars plus {len(u['related'])} connected passage(s), {len(u['commands'])} command(s) in scope",
                       section=u["section_key"], related=[{"key": r["key"], "why": r["why"]} for r in u["related"]], commands=u["commands"])
-        msgs, corpus = _messages(conn, set_id, u, focus, max_per_section)
+        msgs, corpus = _messages(conn, set_id, u, focus, max_per_section, group)
         try:
             out, meta = svc.generate_model("generate", msgs, AIOutput, PROMPT_VERSION)
         except LLMError as e:

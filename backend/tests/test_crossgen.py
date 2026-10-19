@@ -196,3 +196,55 @@ def test_the_agent_narrates_each_decision(conn, parsed_set):
     assert msgs[0].startswith("Cross-command agent starting") and "[1/2]" in msgs[1] and "reading" in msgs[1]
     assert any("rejected draft 'bad quote'" in m and "ungrounded" in m for m in msgs)
     assert any("drafted" in m for m in msgs) and msgs[-1].startswith("Cross-command agent finished")
+
+
+def test_a_large_selection_keeps_every_selected_command_visible_to_the_model(conn, parsed_set):
+    sel = ["cmd:admin:09", "cmd:admin:0A", "cmd:admin:06", "cmd:admin:02", "cmd:io:nvm:02", "cmd:io:nvm:01"]       # six sections, two specs
+    units = crossgen.build_units(conn, 1, command_keys=sel)
+    assert len(units) > 5                                                 # more sections than the old 'small group' limit
+    for u in units:
+        assert set(sel) <= set(u["commands"]), (u["title"], set(sel) - set(u["commands"]))
+        msgs, _ = crossgen._messages(conn, 1, u, "", 6, sel)
+        text = msgs[1]["content"]
+        assert all(f'"command":"{k}"' in text for k in sel)              # every command has its own share of the catalog text
+        assert "SELECTED TOGETHER" in text
+
+
+def test_catalog_text_gives_each_command_a_share_and_never_cuts_a_line(conn, parsed_set, monkeypatch):
+    monkeypatch.setattr(crossgen, "CATALOG_CHARS", 1500)
+    monkeypatch.setattr(crossgen, "MIN_PER_COMMAND", 200)
+    cmds = ["cmd:admin:09", "cmd:admin:06", "cmd:admin:0A"]
+    text = crossgen._catalog_text(conn, 1, cmds)
+    lines = text.split("\n")
+    assert all(json.loads(ln) for ln in lines)                           # every line is whole JSON
+    assert all(any(f'"command":"{k}"' in ln for ln in lines) for k in cmds)
+    assert any("omitted for space" in ln for ln in lines)                # truncation is announced, not silent
+
+
+def test_sections_and_catalog_can_be_paged_and_filtered_by_spec(ws, demo_dir):
+    from specforge.api.app import create_app
+
+    with TestClient(create_app()) as client:
+        docs = [client.post("/api/specs/upload", files=[("files", (n, open(demo_dir / n, "rb"), "application/pdf"))]).json()[0]["id"]
+                for n in ("nvme-base-2.4.pdf", "nvme-nvm-cs-1.3.pdf")]
+        import time
+
+        def wait(j):
+            for _ in range(600):
+                r = client.get(f"/api/jobs/{j}").json()
+                if r["state"] in ("done", "error", "failed"):
+                    return r
+                time.sleep(0.1)
+        for d in docs:
+            wait(client.post(f"/api/specs/{d}/parse").json()["job"])
+        sid = client.post("/api/sets", json={"name": "two", "document_ids": docs}).json()["id"]
+        assert wait(client.post(f"/api/sets/{sid}/catalog/build").json()["job"])["state"] == "done"
+        allsec = client.get(f"/api/sets/{sid}/sections", params={"limit": 5}).json()
+        assert len(allsec["sections"]) == 5 and allsec["total"] > 5
+        assert {s["family"] for s in allsec["specs"]} == {"nvme-base", "nvme-nvm-cs"} and all(s["sections"] > 0 for s in allsec["specs"])
+        cs = client.get(f"/api/sets/{sid}/sections", params={"family": "nvme-nvm-cs", "limit": 500}).json()
+        assert cs["sections"] and {s["family"] for s in cs["sections"]} == {"nvme-nvm-cs"}
+        page2 = client.get(f"/api/sets/{sid}/sections", params={"limit": 5, "offset": 5}).json()["sections"]
+        assert page2 and page2[0]["key"] != allsec["sections"][0]["key"]
+        cmds = client.get(f"/api/sets/{sid}/catalog", params={"kind": "command", "family": "nvme-nvm-cs"}).json()
+        assert cmds["total"] > 0 and {i["attrs"]["family"] for i in cmds["items"]} == {"nvme-nvm-cs"}
