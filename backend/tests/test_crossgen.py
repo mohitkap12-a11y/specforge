@@ -97,10 +97,10 @@ def test_regeneration_replaces_unreviewed_drafts_but_never_approved_ones(conn, p
 
 def test_not_testable_and_model_failure_are_recorded(conn, parsed_set):
     svc = LLMService(conn, settings(), Fake([json.dumps({"testable": False, "reason": "single command"})]))
-    assert crossgen.generate_cross_scenarios(conn, 1, svc, command_keys=[SETF])["not_testable"] == 1
+    assert crossgen.generate_cross_scenarios(conn, 1, svc, command_keys=[SETF], passes=1)["not_testable"] == 1
     svc = LLMService(conn, settings(), Fake(["not json"]))
-    assert crossgen.generate_cross_scenarios(conn, 1, svc, command_keys=[SETF], focus="retry")["failed"] == 1
-    assert {r["state"] for r in rows(conn, "SELECT state FROM enrichment WHERE task='cross'")} == {"not_testable", "failed"}
+    assert crossgen.generate_cross_scenarios(conn, 1, svc, command_keys=[SETF], focus="retry", passes=1)["failed"] == 1
+    assert {r["state"] for r in rows(conn, "SELECT state FROM enrichment WHERE task LIKE 'cross%'")} == {"not_testable", "failed"}
 
 
 def test_api_selection_sections_plan_and_validation(ws, demo_dir):
@@ -126,8 +126,11 @@ def test_api_selection_sections_plan_and_validation(ws, demo_dir):
         plan = client.post(f"/api/sets/{sid}/scenarios/cross/plan", json={"command_keys": ["cmd:admin:06"]}).json()["units"]
         assert plan[0]["related"] and plan[0]["own_commands"] == ["cmd:admin:06"]
         for body in ({}, {"section_keys": []}, {"section_keys": "x"}, {"command_keys": [SETF], "max_per_section": 0},
-                     {"command_keys": [SETF], "focus": 3}, {"command_keys": ["cmd:admin:EE"]}):
+                     {"command_keys": [SETF], "focus": 3}, {"command_keys": ["cmd:admin:EE"]},
+                     {"command_keys": [SETF], "passes": 0}, {"command_keys": [SETF], "passes": 9}, {"command_keys": [SETF], "passes": "3"}):
             assert client.post(f"/api/sets/{sid}/scenarios/cross", json=body).status_code == 422, body
+        angles = client.get("/api/cross/angles").json()
+        assert angles["default"] == crossgen.DEFAULT_PASSES and [a["id"] for a in angles["angles"]] == [a["id"] for a in crossgen.ANGLES]
         assert not [j for j in client.get("/api/jobs").json() if j["type"] == "cross-scenarios"]      # rejected selections queue nothing
 
 
@@ -204,7 +207,7 @@ def test_a_large_selection_keeps_every_selected_command_visible_to_the_model(con
     assert len(units) > 5                                                 # more sections than the old 'small group' limit
     for u in units:
         assert set(sel) <= set(u["commands"]), (u["title"], set(sel) - set(u["commands"]))
-        msgs, _ = crossgen._messages(conn, 1, u, "", 6, sel)
+        msgs, _, _ = crossgen._messages(conn, 1, u, "", 6, sel)
         text = msgs[1]["content"]
         assert all(f'"command":"{k}"' in text for k in sel)              # every command has its own share of the catalog text
         assert "SELECTED TOGETHER" in text
@@ -298,3 +301,141 @@ def test_two_revisions_of_one_family_can_be_told_apart(ws, tmp_path):
         assert allc["total"] > 0 and by_version["2.3"]["total"] + by_version["2.4"]["total"] == allc["total"]      # the version filter partitions the family
         for v, r in by_version.items():
             assert {i["attrs"]["version"] for i in r["items"]} <= {v}                                             # (the catalog keeps one command per opcode across revisions)
+
+
+class _ByAngle:
+    """A model whose answer depends on the ANGLE it is asked for; records every prompt."""
+    name = "by-angle"
+
+    def __init__(self, answers):
+        self.answers, self.prompts = answers, []
+
+    def generate(self, messages, **kw):
+        text = messages[-1]["content"]
+        self.prompts.append(text)
+        angle = next((a for a in crossgen.ANGLES if f"ANGLE for this pass - {a['title']}" in text), None)
+        return json.dumps(self.answers.get(angle["id"] if angle else None, {"testable": False, "reason": "nothing"}))
+
+    def list_models(self): return []
+    def health(self): return {"ok": True}
+    def embed(self, t, **kw): return []
+
+
+def _ev_flow(ev_ids, title, **over):
+    f = _flow("unused", title=title, **over)
+    f["quotes"] = []
+    f["evidence"] = ev_ids
+    return f
+
+
+def test_each_pass_asks_for_a_different_kind_of_scenario_and_the_results_add_up(conn, parsed_set):
+    units = crossgen.build_units(conn, 1, command_keys=[SETF, GETF])
+    _, _, ev = crossgen._messages(conn, 1, units[0], "", 6)
+    first = sorted(ev, key=lambda k: int(k[1:]))[0]
+    mk = lambda title, fid: {**_ev_flow([first], title), "steps": [{**_flow("x")["steps"][0], "fields": [{"dw": 10, "hi": 7, "lo": 0, "op": "eq", "value": fid}]}, _flow("x")["steps"][1]]}
+    model = _ByAngle({"explicit": {"testable": True, "scenarios": [mk("explicit one", 1)]},
+                      "fields": {"testable": True, "scenarios": [mk("field one", 2), mk("field two", 3)]},
+                      "negative": {"testable": True, "scenarios": [mk("negative one", 4)]}})
+    svc = LLMService(conn, settings(), model)
+    stats = crossgen.generate_cross_scenarios(conn, 1, svc, command_keys=[SETF, GETF], passes=3)
+    assert len(model.prompts) == 2 * 3                                        # two sections x three passes
+    assert {a["title"] for a in crossgen.ANGLES[:3]} <= {t.split(" - ")[1].split(":")[0] for p_ in model.prompts for t in p_.split("\n") if t.startswith("ANGLE for this pass - ")}
+    assert stats["created"] == 4                                              # the same answers from the second section are duplicates
+    angles = {json.loads(r["provenance_json"])["angle"] for r in rows(conn, "SELECT provenance_json FROM scenario WHERE origin='cross'")}
+    assert angles == {"explicit", "fields", "negative"}
+    assert {r["task"] for r in rows(conn, "SELECT task FROM enrichment")} == {"cross:explicit", "cross:fields", "cross:negative"}
+
+
+def test_the_prompt_numbers_every_sentence_and_evidence_ids_resolve_to_it(conn, parsed_set):
+    (u, _) = crossgen.build_units(conn, 1, command_keys=[SETF, GETF])
+    msgs, corpus, ev = crossgen._messages(conn, 1, u, "", 6, None, crossgen.ANGLES[1])
+    text = msgs[1]["content"]
+    assert "[S1] " in text and "ANGLE for this pass - " + crossgen.ANGLES[1]["title"] in text and "Write up to 6" in text
+    assert all(f"[{k}] " in text for k in list(ev)[:5])
+    some = next(iter(ev))
+    good = crossgen._evidence(crossgen.AIScenario(title="t", observability="stimulus", steps=[], evidence=[f"[{some}]"]), ev, corpus)
+    assert good == ([ev[some]], [])                                           # brackets and case are tolerated
+    bad = crossgen._evidence(crossgen.AIScenario(title="t", observability="stimulus", steps=[], evidence=["S99999"]), ev, corpus)
+    assert bad[0] == [] and "unknown evidence id" in bad[1][0]
+    none = crossgen._evidence(crossgen.AIScenario(title="t", observability="stimulus", steps=[]), ev, corpus)
+    assert none == ([], ["no evidence cited"])
+
+
+def test_cited_sentence_ids_ground_a_draft_and_unknown_ids_reject_it(conn, parsed_set):
+    units = crossgen.build_units(conn, 1, command_keys=[SETF, GETF])
+    _, _, ev = crossgen._messages(conn, 1, units[0], "", 6)
+    first = sorted(ev, key=lambda k: int(k[1:]))[0]
+    answer = {"testable": True, "scenarios": [_ev_flow([first], "cited"), _ev_flow(["S99999"], "invented id")]}
+    stats = crossgen.generate_cross_scenarios(conn, 1, _svc(conn, answer["scenarios"]), command_keys=[SETF, GETF], passes=1)
+    assert stats["created"] == 1 and stats["rejected"] >= 1
+    prov = json.loads(rows(conn, "SELECT provenance_json FROM scenario WHERE origin='cross'")[0]["provenance_json"])
+    assert prov["quotes"] == [ev[first]] and prov["angle"] == "explicit"       # the sentence itself is stored as the quote
+
+
+def test_a_varied_field_is_expanded_from_the_catalog_values(conn, parsed_set):
+    units = crossgen.build_units(conn, 1, command_keys=["cmd:io:nvm:01", "cmd:io:nvm:02"])
+    _, _, ev = crossgen._messages(conn, 1, units[0], "", 6)
+    first = sorted(ev, key=lambda k: int(k[1:]))[0]
+    wr = {"command": "cmd:io:nvm:01", "note": "write with FUA", "fields": [{"dw": 12, "hi": 30, "lo": 30, "op": "eq", "value": 1, "vary": True}]}
+    rd = {"command": "cmd:io:nvm:02", "note": "read back", "fields": []}
+    sc = {"title": "FUA write then read", "observability": "stimulus", "steps": [wr, rd], "evidence": [first]}
+    stats = crossgen.generate_cross_scenarios(conn, 1, _svc(conn, [sc]), command_keys=["cmd:io:nvm:01", "cmd:io:nvm:02"], passes=1)
+    assert stats["created"] == 2 and stats["variants"] == 1                    # FUA=1 as asked, plus FUA=0 from the catalog
+    got = rows(conn, "SELECT title,predicate_json,provenance_json FROM scenario WHERE origin='cross' ORDER BY id")
+    values = {json.loads(r["predicate_json"])["steps"][0]["fields"][0]["value"] for r in got}
+    assert values == {0, 1} and any(r["title"].endswith("[FUA=0]") for r in got)
+    assert all("vary" not in json.dumps(json.loads(r["predicate_json"])) for r in got)    # the marker is not part of the predicate
+
+
+def test_the_per_section_cap_stops_a_runaway_section(conn, parsed_set, monkeypatch):
+    monkeypatch.setattr(crossgen, "MAX_PER_SECTION", 1)
+    units = crossgen.build_units(conn, 1, command_keys=[SETF, GETF])
+    _, _, ev = crossgen._messages(conn, 1, units[0], "", 6)
+    first = sorted(ev, key=lambda k: int(k[1:]))[0]
+    sc = [{**_ev_flow([first], f"s{i}"), "steps": [{**_flow("x")["steps"][0], "fields": [{"dw": 10, "hi": 7, "lo": 0, "op": "eq", "value": i}]}, _flow("x")["steps"][1]]} for i in range(1, 4)]
+    crossgen.generate_cross_scenarios(conn, 1, _svc(conn, sc), command_keys=[SETF, GETF], passes=1)
+    per_section = [json.loads(r["provenance_json"])["section"] for r in rows(conn, "SELECT provenance_json FROM scenario WHERE origin='cross'")]
+    assert per_section and max(per_section.count(k) for k in set(per_section)) == 1                # three were offered; one is kept per section
+
+
+def test_passes_are_validated(conn, parsed_set):
+    for bad in (0, 5, True, "3"):
+        with pytest.raises(ValueError, match="passes"):
+            crossgen.generate_cross_scenarios(conn, 1, _svc(conn, []), command_keys=[SETF], passes=bad)
+
+
+def test_long_sentences_are_split_into_pieces_not_truncated():
+    long = " ".join(f"word{i}" for i in range(300))                            # about 2,000 characters, as long field descriptions are
+    text, ev, last = crossgen._numbered(f"Short rule. {long} The final condition matters.", 0, cap=500)
+    assert last == len(ev) and all(len(v) <= 500 for v in ev.values())
+    joined = " ".join(ev.values())
+    assert "word0" in joined and "word299" in joined and "The final condition matters." in joined       # the remainder is kept
+    assert " ".join(v for v in ev.values() if v.startswith("word") or "word" in v).count("word") >= 300
+    assert "".join(crossgen._chunks("x" * 1200, 500)) == "x" * 1200                                      # even one unbroken token survives
+    assert all(f"[{k}] " in text for k in ev)
+
+
+def test_variants_are_generated_even_when_the_base_flow_already_exists(conn, parsed_set):
+    units = crossgen.build_units(conn, 1, command_keys=["cmd:io:nvm:01", "cmd:io:nvm:02"])
+    _, _, ev = crossgen._messages(conn, 1, units[0], "", 6)
+    first = sorted(ev, key=lambda k: int(k[1:]))[0]
+
+    def flow(vary):
+        wr = {"command": "cmd:io:nvm:01", "note": "write with FUA", "fields": [{"dw": 12, "hi": 30, "lo": 30, "op": "eq", "value": 1, "vary": vary}]}
+        rd = {"command": "cmd:io:nvm:02", "note": "read back", "fields": []}
+        return {"title": "FUA write then read", "observability": "stimulus", "steps": [wr, rd], "evidence": [first]}
+
+    # pass 1 states the flow plainly; pass 2 restates the same flow only to have FUA swept over the catalog's values
+    model = _ByAngle({"explicit": {"testable": True, "scenarios": [flow(False)]}, "fields": {"testable": True, "scenarios": [flow(True)]}})
+    stats = crossgen.generate_cross_scenarios(conn, 1, LLMService(conn, settings(), model), command_keys=["cmd:io:nvm:01", "cmd:io:nvm:02"], passes=2)
+    assert stats["variants"] >= 1 and stats["duplicates"] >= 1                          # the base was a duplicate, the variant was still made
+    values = {json.loads(r["predicate_json"])["steps"][0]["fields"][0]["value"] for r in rows(conn, "SELECT predicate_json FROM scenario WHERE origin='cross'")}
+    assert values == {0, 1}
+
+
+def test_field_values_include_both_endpoints_of_a_range(conn, parsed_set):
+    f = {"dw": 12, "hi": 15, "lo": 8}
+    attrs = {"command": "cmd:x:01", "dw": 12, "hi": 15, "lo": 8, "vlo": 2, "vhi": 5}
+    conn.execute("INSERT INTO catalog_item(set_id,key,kind,parent_key,label,observability,na_reason,attrs_json) VALUES(1,'cmd:x:01/v1','value','cmd:x:01','r','','',?)",
+                 (json.dumps(attrs),))
+    assert crossgen._field_values(conn, 1, "cmd:x:01", f) == [2, 5]

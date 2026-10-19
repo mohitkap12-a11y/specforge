@@ -73,12 +73,15 @@ export default function CrossGenerator({ setId }: { setId: number }) {
   const [commands, setCommands] = useState<Picked>(new Map());
   const [focus, setFocus] = useState("");
   const [max, setMax] = useState(6);
+  const [passes, setPasses] = useState<number | null>(null);
+  const angles = useQuery({ queryKey: ["cross-angles"], queryFn: api.crossAngles, staleTime: Infinity });
+  const depth = passes ?? angles.data?.default ?? 3;
   const sel = { section_keys: [...sections.keys()], command_keys: [...commands.keys()] };
   const empty = sel.section_keys.length + sel.command_keys.length === 0;
 
   const specs = useQuery({ queryKey: ["cross-specs", setId], queryFn: () => api.sections(setId, { limit: 1 }), staleTime: 60_000 }).data?.specs ?? [];
   const plan = useMutation({ mutationFn: () => api.crossPlan(setId, sel) });
-  const gen = useMutation({ mutationFn: () => api.crossGenerate(setId, { ...sel, focus, max_per_section: max }), onSuccess: (r) => track(r.job, "Cross-command scenarios") });
+  const gen = useMutation({ mutationFn: () => api.crossGenerate(setId, { ...sel, focus, max_per_section: max, passes: depth }), onSuccess: (r) => track(r.job, "Cross-command scenarios") });
 
   return (
     <div className="card">
@@ -96,13 +99,19 @@ export default function CrossGenerator({ setId }: { setId: number }) {
       </div>
       <div className="row" style={{ margin: "12px 0", gap: 12, flexWrap: "wrap" }}>
         <input className="grow" placeholder="Optional focus, e.g. “resource creation and deletion order”" value={focus} onChange={(e) => setFocus(e.target.value)} aria-label="Focus" />
-        <label className="small">Max per section <input type="number" min={1} max={20} value={max} onChange={(e) => setMax(Math.min(20, Math.max(1, Number(e.target.value) || 1)))} style={{ width: 60 }} /></label>
+        <label className="small" title={angles.data?.angles.slice(0, depth).map((a) => a.title).join(" · ")}>Depth{" "}
+          <select value={depth} onChange={(e) => setPasses(Number(e.target.value))} aria-label="Passes per section">
+            {(angles.data?.angles ?? []).map((a, i) => <option key={a.id} value={i + 1}>{i + 1} pass{i ? "es" : ""}{i === 0 ? ": stated flows only" : `: + ${a.title.toLowerCase()}`}</option>)}
+          </select>
+        </label>
+        <label className="small">Max per pass <input type="number" min={1} max={20} value={max} onChange={(e) => setMax(Math.min(20, Math.max(1, Number(e.target.value) || 1)))} style={{ width: 60 }} /></label>
         <button disabled={empty || plan.isPending} onClick={() => plan.mutate()}>Preview scope</button>
         <button className="primary" disabled={empty || gen.isPending} onClick={() => gen.mutate()}>Generate{empty ? "" : ` (${sel.section_keys.length + sel.command_keys.length} selected)`}</button>
       </div>
       <ErrorNote error={plan.error ?? gen.error} />
       {plan.data && (
         <div>
+          <p className="small muted">{plan.data.units.length} section(s) × {depth} pass(es) = {plan.data.units.length * depth} model call(s). Each pass looks for a different kind of scenario; more passes find more.</p>
           {plan.data.units.map((u) => (
             <details key={u.section_key} open={plan.data!.units.length === 1} style={{ marginBottom: 6 }}>
               <summary><strong>{u.title}</strong> <span className="muted small">{u.family} {u.version} · {u.primary_chars.toLocaleString()} chars · {u.commands.length} command(s) · {u.related.length} connected passage(s)</span></summary>

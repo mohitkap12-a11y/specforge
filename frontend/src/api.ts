@@ -75,7 +75,8 @@ export const api = {
   validate: (set_id: number, predicate: unknown) => req<{ errors: string[] }>("POST", "/api/scenarios/validate", { set_id, predicate }),
   sections: (set: number, f: { q?: string; family?: string; version?: string; offset?: number; limit?: number }) => req<{ total: number; sections: SectionRow[]; specs: SpecInSet[] }>("GET", `/api/sets/${set}/sections${qs(f)}`),
   crossPlan: (set: number, b: CrossSelection) => req<{ units: CrossUnit[] }>("POST", `/api/sets/${set}/scenarios/cross/plan`, b),
-  crossGenerate: (set: number, b: CrossSelection & { focus?: string; max_per_section?: number }) => req<{ job: number }>("POST", `/api/sets/${set}/scenarios/cross`, b),
+  crossAngles: () => req<{ default: number; angles: { id: string; title: string; focus: string }[] }>("GET", "/api/cross/angles"),
+  crossGenerate: (set: number, b: CrossSelection & { focus?: string; max_per_section?: number; passes?: number }) => req<{ job: number }>("POST", `/api/sets/${set}/scenarios/cross`, b),
 
   sources: () => req<CmdSource[]>("GET", "/api/cmddb"),
   suggestMapping: (path: string) => req<Record<string, any>>("GET", `/api/cmddb/suggest${qs({ path })}`),
