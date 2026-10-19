@@ -26,13 +26,13 @@ from pydantic import BaseModel, Field
 from . import eventlog
 from .catalog import _mention_patterns
 from .core.db import jloads, rows
-from .ingest.normalize import norm_text
+from .ingest.normalize import norm_text, split_sentences
 from .llm.base import LLMError
 from .llm.service import LLMService
 from .refs import load_set_irs, resolve_references
 from .scenarios import catalog_context, validate_predicate
 
-PROMPT_VERSION = "cross-v1"
+PROMPT_VERSION = "cross-v2"
 PRIMARY_CHARS = 10_000       # budget for the selected section (its sub-sections and tables)
 RELATED_CHARS = 8_000        # budget for all connected passages together
 PASSAGE_CHARS = 2_000        # budget for one connected passage
@@ -48,6 +48,7 @@ class AIField(BaseModel):
     lo: int
     op: Literal["eq", "ne", "in", "range", "mask"] = "eq"
     value: Any
+    vary: bool = Field(default=False, description="repeat the scenario for the catalog's values of this field (the tool expands it)")
 
 
 class AICapture(BaseModel):
@@ -71,7 +72,8 @@ class AIScenario(BaseModel):
     order: Literal["strict", "any"] = "strict"
     scope: Literal["global", "test", "script"] = "test"
     within: int | None = None
-    quotes: list[str] = Field(description="verbatim excerpts of the requirement that justify the scenario")
+    evidence: list[str] = Field(default=[], description="ids of the numbered sentences that justify the scenario, e.g. ['S12', 'S40']")
+    quotes: list[str] = Field(default=[], description="alternative to evidence: verbatim excerpts that justify the scenario")
 
 
 class AIOutput(BaseModel):
@@ -80,21 +82,51 @@ class AIOutput(BaseModel):
     scenarios: list[AIScenario] = []
 
 
+# Each pass over a section looks for a different kind of scenario.  Spec text rarely states a multi-command flow outright, so a
+# single "what does the text say" pass yields one or two; the later passes walk the field descriptions, the preconditions and
+# the value space, which is where a test developer finds most scenarios.
+ANGLES = [
+    {"id": "explicit", "title": "Flows the text states",
+     "focus": "Multi-command flows, orderings, preconditions and dependencies that the SECTION or RELATED text states."},
+    {"id": "fields", "title": "Field behaviours across commands",
+     "focus": "Walk the fields in the SECTION's tables one by one. For each field whose description says what the device does with data, "
+              "state, limits or ordering, write a scenario: the section's command submitted with that field set, then a partner command from "
+              "CATALOG that observes or depends on the effect (reads back, verifies, compares, queries, releases, undoes). One scenario per field "
+              "that gives you something to check; use different partner commands where several fit."},
+    {"id": "negative", "title": "Misuse, preconditions and limits",
+     "focus": "What happens when a precondition is skipped or an ordering rule is broken (the dependent command before its setup, the release "
+              "before the dependent command, a limit exceeded, a reserved value used) and the error cases the text describes, each using two or "
+              "more commands."},
+    {"id": "variants", "title": "Value and boundary variants",
+     "focus": "The flows above repeated across the values of the fields the text defines: flags set and cleared, each enumerated value, size "
+              "minimum / maximum. Mark such a field condition with \"vary\": true instead of listing the variants."},
+]
+DEFAULT_PASSES = 3
+MAX_VARIANTS = 8                # values tried per varied field
+MAX_PER_SECTION = 60            # drafts kept per section across all passes and variants
+
 SYSTEM = """You write functional test scenarios for a device specification, the way a test-script developer does.
 A scenario is an ordered sequence of SEVERAL commands; it is checked against a log of SUBMITTED commands only
 (no completions or responses are logged).
 
-You are given SECTION (the part of the specification the scenarios are about), RELATED passages from elsewhere in the
-specification that connect to it, and CATALOG (the only commands, bit ranges and values you may use).
+You are given SECTION (the part of the specification the scenarios are about) and RELATED passages from elsewhere in the
+specification, both as numbered sentences like [S12]; CATALOG (the only commands, bit ranges and values you may use);
+and an ANGLE: the kind of scenario to write in this pass.
 
 Rules:
 - Every scenario MUST use at least two different commands from CATALOG. A scenario about one command alone is useless here.
   Typical shapes: set something up, exercise the behaviour the SECTION describes, then observe it with another command;
-  create a resource before using it and release it afterwards; configure, then read the configuration back.
-- Take the ordering, preconditions and dependencies from the SECTION and RELATED text. Do not invent behaviour the text
-  does not support. If the text implies no multi-command flow, reply testable=false with a reason and no scenarios.
+  create a resource before using it and release it afterwards; write, then read back or verify.
+- Mine the text. The SECTION's tables define each field and what it does. A field description that says what the device does
+  with data, state, limits or ordering is enough for a scenario even when the text names no second command: pair the command
+  with a partner from CATALOG that can observe or depend on the effect. Do not invent behaviour the text does not support.
+- Write as many DISTINCT scenarios as the text supports for the ANGLE, up to the stated limit. A different field, precondition,
+  partner command or ordering is a different scenario; the same flow with cosmetic changes is not. Do not stop at one when more
+  fit. Reply testable=false only when the text gives nothing at all for this ANGLE.
 - Never invent opcodes, commands or bit positions. Use only CATALOG. Field values are decimal integers; operators are
   'eq','ne','in' (list),'range' ({"lo","hi"}) or 'mask' ({"mask","value"}).
+- When a scenario should be repeated for the values of one field (a flag, an enumerated value, a size boundary), put
+  "vary": true on that field condition; the tool expands it from the catalog. Do not write the variants yourself.
 - Link steps through values: in an earlier step add "capture": {"name": {"dw":..,"hi":..,"lo":..}} and in a later step's
   field use "value": {"var": "name"} with op 'eq' or 'ne' (for example the identifier chosen in one command is the
   identifier used by the next). A captured value is a single integer.
@@ -102,7 +134,7 @@ Rules:
 - order 'strict' when the text requires an order, otherwise 'any'. scope 'test' keeps all steps in one test.
 - observability 'submission' = the whole flow is visible in what was submitted; 'stimulus' = only the commands that drive the
   behaviour are visible, the device's response cannot be verified.
-- Each scenario needs 1+ quotes copied EXACTLY (character for character) from SECTION or RELATED text.
+- Cite the sentences that justify each scenario in "evidence": ["S12", "S40"], copying the ids exactly. Do not quote text.
 - Reply with one JSON object only."""
 
 
@@ -138,7 +170,7 @@ def to_predicate(sc: AIScenario, cmds: dict[str, dict]) -> dict:
             raise ValueError(f"unknown command {st.command}")
         steps.append({"command": st.command, "interface": c["interface"], "queue": c["queue"],
                       "cs": c["cs"] if c["queue"] == "io" else None, "opcode": c["opcode"],
-                      "fields": [f.model_dump() for f in st.fields],
+                      "fields": [f.model_dump(exclude={"vary"}) for f in st.fields],
                       **({"note": st.note} if st.note else {}),
                       **({"capture": {k: v.model_dump() for k, v in st.capture.items()}} if st.capture else {})})
     pred: dict[str, Any] = {"scope": sc.scope, "order": sc.order, "steps": steps}
@@ -147,10 +179,10 @@ def to_predicate(sc: AIScenario, cmds: dict[str, dict]) -> dict:
     return pred
 
 
-def _record(conn, set_id, key, svc, state, output, error, meta=None):
+def _record(conn, set_id, key, svc, state, output, error, meta=None, task="cross"):
     cfg = svc.task_cfg("generate")          # the row is labelled "cross"; provider / model are those configured for generation
     conn.execute("INSERT INTO enrichment(set_id,item_key,task,provider,model,prompt_version,state,output_json,error) VALUES(?,?,?,?,?,?,?,?,?)",
-                 (set_id, key, "cross", (meta or {}).get("provider", cfg["provider"]), cfg["model"], PROMPT_VERSION, state,
+                 (set_id, key, task, (meta or {}).get("provider", cfg["provider"]), cfg["model"], PROMPT_VERSION, state,
                   json.dumps(output) if output is not None else None, error))
     conn.commit()
 
@@ -398,101 +430,204 @@ def _catalog_text(conn: sqlite3.Connection, set_id: int, commands: list[str]) ->
     return "\n".join(out)
 
 
-def _messages(conn: sqlite3.Connection, set_id: int, u: dict, focus: str, limit: int, group: list[str] | None = None) -> tuple[list[dict], str]:
-    related = "\n\n".join(f"[{r['title']} - {r['why']}]\n{r['text']}" for r in u["related"]) or "(none found)"
-    user = (f"SECTION §{u['number']} {u['title']}:\n{u['primary']}\n\nRELATED:\n{related}\n\n"
+def _numbered(text: str, n: int, cap: int = 500) -> tuple[str, dict[str, str], int]:
+    """Text with each sentence on its own line as '[S12] ...'; returns (rendered, id -> sentence, last number used).  The model cites
+    ids, so its evidence is exact by construction instead of depending on it copying text character for character."""
+    lines, ev = [], {}
+    for ln in text.split("\n"):
+        ln = ln.strip()
+        if not ln:
+            lines.append("")
+            continue
+        for part in split_sentences(ln) or [ln]:
+            n += 1
+            ev[f"S{n}"] = part[:cap]
+            lines.append(f"[S{n}] {part[:cap]}")
+    return "\n".join(lines), ev, n
+
+
+def _messages(conn: sqlite3.Connection, set_id: int, u: dict, focus: str, limit: int, group: list[str] | None = None,
+              angle: dict | None = None) -> tuple[list[dict], str, dict[str, str]]:
+    section, ev, n = _numbered(u["primary"], 0)
+    parts = []
+    for r in u["related"]:
+        text, e, n = _numbered(r["text"], n)
+        ev.update(e)
+        parts.append(f"[{r['title']} - {r['why']}]\n{text}")
+    related = "\n\n".join(parts) or "(none found)"
+    user = (f"SECTION §{u['number']} {u['title']}:\n{section}\n\nRELATED:\n{related}\n\n"
             f"CATALOG (the only commands/fields you may use; one JSON object per line):\n{_catalog_text(conn, set_id, u['commands'])}\n\n"
             + (f"SELECTED TOGETHER: the user chose these commands to be tested as a group, so scenarios should combine them where the text supports it: "
                f"{', '.join(group)}.\n\n" if group and len(group) > 1 else "")
-            + (f"FOCUS requested by the user: {focus}\n\n" if focus.strip() else "") + f"Write at most {limit} scenarios.")
+            + (f"FOCUS requested by the user: {focus}\n\n" if focus.strip() else "")
+            + (f"ANGLE for this pass - {angle['title']}: {angle['focus']}\n\n" if angle else "")
+            + f"Write up to {limit} scenarios; reach that number when the text supports it.")
     corpus = u["primary"] + "\n" + "\n".join(r["text"] for r in u["related"])
-    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}], corpus
+    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}], corpus, ev
 
 
 def _like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _evidence(sc: AIScenario, ev: dict[str, str], corpus: str) -> tuple[list[str], list[str]]:
+    """(evidence sentences, problems): cited ids must exist; quoted text must occur verbatim in what the model was shown."""
+    out: list[str] = []
+    errs: list[str] = []
+    for i in sc.evidence:
+        t = ev.get(i.strip().strip("[]").upper())
+        if t is None:
+            errs.append(f"unknown evidence id {i!r}")
+        else:
+            out.append(t)
+    for q in sc.quotes:
+        if _grounded(q, corpus):
+            out.append(q)
+        else:
+            errs.append("ungrounded quote")
+    if not out and not errs:
+        errs.append("no evidence cited")
+    return out, errs
+
+
+def _field_values(conn: sqlite3.Connection, set_id: int, cmd_key: str, f: dict) -> list[int]:
+    """Values the catalog lists for a field (enumerated values, then its min / max; 0 and 1 for a single bit)."""
+    vals: set[int] = set()
+    for r in rows(conn, "SELECT attrs_json FROM catalog_item WHERE set_id=? AND kind IN ('value','boundary') AND key LIKE ? ESCAPE '\\'",
+                  (set_id, _like(cmd_key) + "/%")):
+        a = jloads(r["attrs_json"], {})
+        if a.get("command") == cmd_key and (a.get("dw"), a.get("hi"), a.get("lo")) == (f["dw"], f["hi"], f["lo"]) \
+                and not a.get("reserved_value") and a.get("vlo") == a.get("vhi"):
+            vals.add(a["vlo"])
+    if not vals and f["hi"] == f["lo"]:
+        vals = {0, 1}
+    return sorted(vals)[:MAX_VARIANTS]
+
+
+def _variants(conn: sqlite3.Connection, set_id: int, sc: AIScenario, pred: dict, scoped_fields: dict[str, list[dict]]) -> list[tuple[str, dict]]:
+    """One variant per catalog value of every field the model marked `vary` (one field at a time, not the cross product)."""
+    out: list[tuple[str, dict]] = []
+    for si, st in enumerate(sc.steps):
+        for fi, f in enumerate(st.fields):
+            cur = pred["steps"][si]["fields"][fi]
+            if not f.vary or f.op != "eq" or isinstance(f.value, dict):
+                continue
+            label = next((a.get("abbr") or a.get("name") for a in scoped_fields.get(st.command, [])
+                          if (a["dw"], a["hi"], a["lo"]) == (cur["dw"], cur["hi"], cur["lo"])), f"dw{cur['dw']}[{cur['hi']}:{cur['lo']}]")
+            for v in _field_values(conn, set_id, st.command, cur):
+                if v == cur["value"]:
+                    continue
+                p2 = json.loads(json.dumps(pred))
+                p2["steps"][si]["fields"][fi]["value"] = v
+                out.append((f"{label}={v}", p2))
+    return out
+
+
 def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService, section_keys: list[str] | None = None,
-                             command_keys: list[str] | None = None, focus: str = "", max_per_section: int = 6, progress=None) -> dict[str, int]:
+                             command_keys: list[str] | None = None, focus: str = "", max_per_section: int = 6, progress=None,
+                             passes: int = DEFAULT_PASSES) -> dict[str, int]:
+    """One model call per section per pass (`passes` of ANGLES, in order); `max_per_section` is the limit asked of each call."""
     if not isinstance(max_per_section, int) or isinstance(max_per_section, bool) or not 1 <= max_per_section <= 20:
         raise ValueError("max_per_section must be an integer from 1 to 20")
+    if not isinstance(passes, int) or isinstance(passes, bool) or not 1 <= passes <= len(ANGLES):
+        raise ValueError(f"passes must be an integer from 1 to {len(ANGLES)}")
     units = build_units(conn, set_id, section_keys, command_keys)
     cmds, fields = catalog_context(conn, set_id)
+    angles = ANGLES[:passes]
     group = [cmds[k]["name"] for k in dict.fromkeys([*(command_keys or []), *(c for u in units for c in u["own_commands"])]) if k in cmds]
     req_text = {r["key"]: norm_text(jloads(r["attrs_json"], {}).get("text", "")) for r in rows(conn, "SELECT key,attrs_json FROM catalog_item WHERE set_id=? AND kind='requirement'", (set_id,))}
-    existing = {r["predicate_json"] for r in rows(conn, "SELECT predicate_json FROM scenario WHERE set_id=?", (set_id,))}
-    stats = {"sections": len(units), "created": 0, "not_testable": 0, "rejected": 0, "failed": 0, "duplicates": 0}
+    stats = {"sections": len(units), "created": 0, "variants": 0, "not_testable": 0, "rejected": 0, "failed": 0, "duplicates": 0}
     cfg = svc.task_cfg("generate")
-    eventlog.emit("info", "agent", f"Cross-command agent starting: {len(units)} section(s), model {cfg['provider']}/{cfg['model'] or '(unset)'}",
-                  sections=[u["section_key"] for u in units], provider=cfg["provider"], model=cfg["model"], focus=focus or None)
+    eventlog.emit("info", "agent", f"Cross-command agent starting: {len(units)} section(s) x {len(angles)} pass(es), model {cfg['provider']}/{cfg['model'] or '(unset)'}",
+                  sections=[u["section_key"] for u in units], passes=[a["id"] for a in angles], provider=cfg["provider"], model=cfg["model"], focus=focus or None)
+    step = 0
     for n, u in enumerate(units):
-        if progress:
-            progress(n, len(units))
-        tag = f"[{n + 1}/{len(units)}] §{u['number']} {u['title'][:60]}"
-        eventlog.emit("info", "agent", f"{tag}: reading {len(u['primary'])} chars plus {len(u['related'])} connected passage(s), {len(u['commands'])} command(s) in scope",
-                      section=u["section_key"], related=[{"key": r["key"], "why": r["why"]} for r in u["related"]], commands=u["commands"])
-        msgs, corpus = _messages(conn, set_id, u, focus, max_per_section, group)
-        try:
-            out, meta = svc.generate_model("generate", msgs, AIOutput, PROMPT_VERSION)
-        except LLMError as e:
-            stats["failed"] += 1
-            eventlog.emit("error", "agent", f"{tag}: model failed: {str(e)[:200]}", section=u["section_key"], error=str(e))
-            _record(conn, set_id, u["section_key"], svc, "failed", None, str(e))
-            continue
-        if not out.testable or not out.scenarios:
-            stats["not_testable"] += 1
-            eventlog.emit("info", "agent", f"{tag}: no multi-command flow found: {(out.reason or 'no reason given')[:200]}", section=u["section_key"])
-            _record(conn, set_id, u["section_key"], svc, "not_testable", out.model_dump(), out.reason, meta)
-            continue
-        # a successful answer replaces this section's earlier unreviewed drafts; approved / rejected scenarios are never touched
-        conn.execute("DELETE FROM scenario WHERE set_id=? AND origin='cross' AND state='draft' AND sid LIKE ? ESCAPE '\\'",
-                     (set_id, _like(u["section_key"]) + "#%"))
-        existing = {r["predicate_json"] for r in rows(conn, "SELECT predicate_json FROM scenario WHERE set_id=?", (set_id,))}
         scoped_cmds = {k: v for k, v in cmds.items() if k in u["commands"]}
         scoped_fields = {k: v for k, v in fields.items() if k in u["commands"]}
-        created, problems = 0, []
-        for sc in out.scenarios[:max_per_section]:
-            errs: list[str] = []
-            if not sc.quotes or not all(_grounded(q, corpus) for q in sc.quotes):
-                errs.append("ungrounded quote(s)")
-            if len({(s.command) for s in sc.steps}) < 2:
-                errs.append("not cross-command: needs at least two different commands")
+        cleared, kept = False, 0
+        for angle in angles:
+            if progress:                 # first thing in every pass: a failed or empty pass still checks for cancellation
+                progress(step, len(units) * len(angles))
+            step += 1
+            tag = f"[{n + 1}/{len(units)}] §{u['number']} {u['title'][:50]} ({angle['id']})"
+            if angle is angles[0]:
+                eventlog.emit("info", "agent", f"{tag}: reading {len(u['primary'])} chars plus {len(u['related'])} connected passage(s), {len(u['commands'])} command(s) in scope",
+                              section=u["section_key"], related=[{"key": r["key"], "why": r["why"]} for r in u["related"]], commands=u["commands"])
+            msgs, corpus, ev = _messages(conn, set_id, u, focus, max_per_section, group, angle)
+            task = f"cross:{angle['id']}"
             try:
-                pred = to_predicate(sc, scoped_cmds)
-                errs += validate_predicate(pred, scoped_cmds, scoped_fields)
-            except ValueError as e:
-                pred, errs = None, errs + [str(e)]
-            if errs:
-                stats["rejected"] += 1
-                problems.append(f"{sc.title}: {'; '.join(errs)}")
-                eventlog.emit("warn", "agent", f"{tag}: rejected draft '{sc.title[:100]}': {'; '.join(errs)[:200]}", section=u["section_key"], errors=errs, quotes=sc.quotes)
+                out, meta = svc.generate_model("generate", msgs, AIOutput, PROMPT_VERSION)
+            except LLMError as e:
+                stats["failed"] += 1
+                eventlog.emit("error", "agent", f"{tag}: model failed: {str(e)[:200]}", section=u["section_key"], error=str(e))
+                _record(conn, set_id, u["section_key"], svc, "failed", None, str(e), task=task)
                 continue
-            pj = json.dumps(pred)
-            if pj in existing:
-                stats["duplicates"] += 1
+            if not out.testable or not out.scenarios:
+                stats["not_testable"] += 1
+                eventlog.emit("info", "agent", f"{tag}: nothing for this angle: {(out.reason or 'no reason given')[:200]}", section=u["section_key"])
+                _record(conn, set_id, u["section_key"], svc, "not_testable", out.model_dump(), out.reason, meta, task=task)
                 continue
-            existing.add(pj)
-            taken = [int(r[0].rsplit("#", 1)[1]) for r in conn.execute("SELECT sid FROM scenario WHERE set_id=? AND sid LIKE ? ESCAPE '\\'", (set_id, _like(u["section_key"]) + "#%"))
-                     if r[0].rsplit("#", 1)[1].isdigit()]
-            sid = f"{u['section_key']}#{max(taken, default=0) + 1}"          # never collides with an approved / rejected scenario of the section
-            cur = conn.execute("INSERT OR IGNORE INTO scenario(set_id,sid,origin,kind,title,description,observability,predicate_json,state,provenance_json)"
-                               " VALUES(?,?,?,?,?,?,?,?,?,?)",
-                               (set_id, sid, "cross", "cross", sc.title, sc.description, sc.observability, pj, "draft",
-                                json.dumps({**meta, "prompt_version": PROMPT_VERSION, "quotes": sc.quotes, "section": u["section_key"],
-                                            "related": [r["key"] for r in u["related"]], "focus": focus or None})))
-            if not cur.rowcount:
-                continue
-            created += 1
-            stats["created"] += 1
-            # linked to the commands it drives and to the statements it quotes: those items are judged by it
-            links = {s.command for s in sc.steps}
-            for q in sc.quotes:
-                nq = norm_text(q)
-                links |= {k for k, t in req_text.items() if t and (nq in t or t in nq)}
-            conn.executemany("INSERT OR IGNORE INTO scenario_item(scenario_id,item_key) VALUES(?,?)", [(cur.lastrowid, k) for k in sorted(links)])
-            eventlog.emit("info", "agent", f"{tag}: drafted '{sc.title[:120]}' ({len(sc.steps)} steps, awaiting review)", section=u["section_key"], sid=sid, predicate=pred)
-        _record(conn, set_id, u["section_key"], svc, "ok" if created else "needs_review", out.model_dump(), "; ".join(problems) or None, meta)
-        conn.commit()
+            if not cleared:      # a successful answer replaces this section's earlier unreviewed drafts; approved / rejected ones are never touched
+                conn.execute("DELETE FROM scenario WHERE set_id=? AND origin='cross' AND state='draft' AND sid LIKE ? ESCAPE '\\'", (set_id, _like(u["section_key"]) + "#%"))
+                cleared = True
+            existing = {r["predicate_json"] for r in rows(conn, "SELECT predicate_json FROM scenario WHERE set_id=?", (set_id,))}
+            created, problems = 0, []
+
+            def store(title: str, desc: str, obs: str, pred: dict, evidence: list[str], steps: list[str], extra: dict) -> bool:
+                nonlocal kept
+                pj = json.dumps(pred)
+                if pj in existing:
+                    stats["duplicates"] += 1
+                    return False
+                if kept >= MAX_PER_SECTION:
+                    return False
+                taken = [int(r[0].rsplit("#", 1)[1]) for r in conn.execute("SELECT sid FROM scenario WHERE set_id=? AND sid LIKE ? ESCAPE '\\'", (set_id, _like(u["section_key"]) + "#%"))
+                         if r[0].rsplit("#", 1)[1].isdigit()]
+                sid = f"{u['section_key']}#{max(taken, default=0) + 1}"          # never collides with an approved / rejected scenario of the section
+                cur = conn.execute("INSERT OR IGNORE INTO scenario(set_id,sid,origin,kind,title,description,observability,predicate_json,state,provenance_json)"
+                                   " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                                   (set_id, sid, "cross", "cross", title, desc, obs, pj, "draft",
+                                    json.dumps({**meta, "prompt_version": PROMPT_VERSION, "angle": angle["id"], "quotes": evidence, "section": u["section_key"],
+                                                "related": [r["key"] for r in u["related"]], "focus": focus or None, **extra})))
+                if not cur.rowcount:
+                    return False
+                existing.add(pj)
+                kept += 1
+                # linked to the commands it drives and to the statements it cites: those items are judged by it
+                links = set(steps)
+                for q in evidence:
+                    nq = norm_text(q)
+                    links |= {k for k, t in req_text.items() if t and (nq in t or t in nq)}
+                conn.executemany("INSERT OR IGNORE INTO scenario_item(scenario_id,item_key) VALUES(?,?)", [(cur.lastrowid, k) for k in sorted(links)])
+                eventlog.emit("info", "agent", f"{tag}: drafted '{title[:120]}' ({len(steps)} steps, awaiting review)", section=u["section_key"], sid=sid, predicate=pred)
+                return True
+
+            for sc in out.scenarios[:max_per_section]:
+                evidence, errs = _evidence(sc, ev, corpus)
+                if len({s_.command for s_ in sc.steps}) < 2:
+                    errs.append("not cross-command: needs at least two different commands")
+                try:
+                    pred = to_predicate(sc, scoped_cmds)
+                    errs += validate_predicate(pred, scoped_cmds, scoped_fields)
+                except ValueError as e:
+                    pred, errs = None, errs + [str(e)]
+                if errs:
+                    stats["rejected"] += 1
+                    problems.append(f"{sc.title}: {'; '.join(errs)}")
+                    eventlog.emit("warn", "agent", f"{tag}: rejected draft '{sc.title[:100]}': {'; '.join(errs)[:200]}", section=u["section_key"], errors=errs, evidence=sc.evidence, quotes=sc.quotes)
+                    continue
+                if not store(sc.title, sc.description, sc.observability, pred, evidence, [s_.command for s_ in sc.steps], {}):
+                    continue
+                created += 1
+                stats["created"] += 1
+                for label, p2 in _variants(conn, set_id, sc, pred, scoped_fields):
+                    if validate_predicate(p2, scoped_cmds, scoped_fields):
+                        continue
+                    if store(f"{sc.title} [{label}]", sc.description, sc.observability, p2, evidence, [s_.command for s_ in sc.steps], {"variant": label, "variant_of": sc.title}):
+                        created += 1
+                        stats["created"] += 1
+                        stats["variants"] += 1
+            _record(conn, set_id, u["section_key"], svc, "ok" if created else "needs_review", out.model_dump(), "; ".join(problems) or None, meta, task=task)
+            conn.commit()
     eventlog.emit("info" if not stats["failed"] else "warn", "agent", "Cross-command agent finished: " + ", ".join(f"{v} {k}" for k, v in stats.items()), **stats)
     return stats

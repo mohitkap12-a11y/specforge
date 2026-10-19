@@ -523,14 +523,21 @@ def create_app() -> FastAPI:
         except ValueError as e:
             raise HTTPException(422, str(e))
 
+    @app.get("/api/cross/angles")
+    def cross_angles():
+        """The kinds of scenario each pass over a section looks for, in order; `passes` N runs the first N."""
+        return {"default": crossgen.DEFAULT_PASSES, "angles": [{"id": a["id"], "title": a["title"], "focus": a["focus"]} for a in crossgen.ANGLES]}
+
     @app.post("/api/sets/{set_id}/scenarios/cross")
     def cross_generate(set_id: int, body: dict = Body(...)):
         secs, cmds = _selection(body)
-        focus, mx = body.get("focus", ""), body.get("max_per_section", 6)
+        focus, mx, passes = body.get("focus", ""), body.get("max_per_section", 6), body.get("passes", crossgen.DEFAULT_PASSES)
         if not isinstance(focus, str):
             raise HTTPException(422, "focus must be a string")
         if not isinstance(mx, int) or isinstance(mx, bool) or not 1 <= mx <= 20:
             raise HTTPException(422, "max_per_section must be an integer from 1 to 20")
+        if not isinstance(passes, int) or isinstance(passes, bool) or not 1 <= passes <= len(crossgen.ANGLES):
+            raise HTTPException(422, f"passes must be an integer from 1 to {len(crossgen.ANGLES)}")
         try:
             crossgen.build_units(conn(), set_id, secs, cmds)       # reject a bad selection now, not inside the job
         except ValueError as e:
@@ -538,8 +545,8 @@ def create_app() -> FastAPI:
         st = settings()
 
         def work(c, prog):
-            return generate_cross_scenarios(c, set_id, LLMService(c, st), secs, cmds, focus, mx, progress=lambda a, b: prog("cross-command scenarios", a, b))
-        audit(f"Cross-command scenario generation requested for set #{set_id}", set_id=set_id, sections=len(secs), commands=len(cmds), focus=focus or None)
+            return generate_cross_scenarios(c, set_id, LLMService(c, st), secs, cmds, focus, mx, progress=lambda a, b: prog("cross-command scenarios", a, b), passes=passes)
+        audit(f"Cross-command scenario generation requested for set #{set_id}", set_id=set_id, sections=len(secs), commands=len(cmds), passes=passes, focus=focus or None)
         return {"job": jobs.submit(conn(), "cross-scenarios", work, {"set_id": set_id}, DB)}
 
     # ------------------------------------------------------------------ command DBs
