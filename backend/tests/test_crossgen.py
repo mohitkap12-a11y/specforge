@@ -402,3 +402,14 @@ def test_passes_are_validated(conn, parsed_set):
     for bad in (0, 5, True, "3"):
         with pytest.raises(ValueError, match="passes"):
             crossgen.generate_cross_scenarios(conn, 1, _svc(conn, []), command_keys=[SETF], passes=bad)
+
+
+def test_long_sentences_are_split_into_pieces_not_truncated():
+    long = " ".join(f"word{i}" for i in range(300))                            # about 2,000 characters, as long field descriptions are
+    text, ev, last = crossgen._numbered(f"Short rule. {long} The final condition matters.", 0, cap=500)
+    assert last == len(ev) and all(len(v) <= 500 for v in ev.values())
+    joined = " ".join(ev.values())
+    assert "word0" in joined and "word299" in joined and "The final condition matters." in joined       # the remainder is kept
+    assert " ".join(v for v in ev.values() if v.startswith("word") or "word" in v).count("word") >= 300
+    assert "".join(crossgen._chunks("x" * 1200, 500)) == "x" * 1200                                      # even one unbroken token survives
+    assert all(f"[{k}] " in text for k in ev)

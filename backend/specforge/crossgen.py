@@ -430,6 +430,28 @@ def _catalog_text(conn: sqlite3.Connection, set_id: int, commands: list[str]) ->
     return "\n".join(out)
 
 
+def _chunks(text: str, cap: int) -> list[str]:
+    """`text` as pieces of at most `cap` characters cut at word boundaries; nothing is dropped, so a long field description keeps
+    its trailing conditions and exceptions (each piece gets its own sentence id)."""
+    if len(text) <= cap:
+        return [text]
+    out: list[str] = []
+    cur = ""
+    for word in text.split(" "):
+        while len(word) > cap:                               # a single word longer than the cap (a long token): hard cut
+            if cur:
+                out.append(cur)
+                cur = ""
+            out.append(word[:cap])
+            word = word[cap:]
+        if cur and len(cur) + 1 + len(word) > cap:
+            out.append(cur)
+            cur = word
+        else:
+            cur = f"{cur} {word}" if cur else word
+    return [*out, cur] if cur else out
+
+
 def _numbered(text: str, n: int, cap: int = 500) -> tuple[str, dict[str, str], int]:
     """Text with each sentence on its own line as '[S12] ...'; returns (rendered, id -> sentence, last number used).  The model cites
     ids, so its evidence is exact by construction instead of depending on it copying text character for character."""
@@ -439,10 +461,11 @@ def _numbered(text: str, n: int, cap: int = 500) -> tuple[str, dict[str, str], i
         if not ln:
             lines.append("")
             continue
-        for part in split_sentences(ln) or [ln]:
-            n += 1
-            ev[f"S{n}"] = part[:cap]
-            lines.append(f"[S{n}] {part[:cap]}")
+        for sentence in split_sentences(ln) or [ln]:
+            for part in _chunks(sentence, cap):
+                n += 1
+                ev[f"S{n}"] = part
+                lines.append(f"[S{n}] {part}")
     return "\n".join(lines), ev, n
 
 
