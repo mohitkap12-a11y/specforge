@@ -286,6 +286,13 @@ def build_units(conn: sqlite3.Connection, set_id: int, section_keys: list[str] |
     req_mentions = {r["key"]: jloads(r["attrs_json"], {}).get("mentions", []) for r in req_items}
     refs = [r for r in resolve_references(conn, set_id, ix.irs) if r["state"] == "resolved" and r["target_key"]]
 
+    # the commands the user selected, plus those defined in the sections they selected: one group, shown whole to the model
+    selected_all = list(dict.fromkeys([k for k in (command_keys or []) if k in cat] +
+                                      [c for key in keys for sk in (s_["key"] for s_ in ix.subtree(key)) for c in cmd_by_sec.get(sk, [])]))
+    if len(selected_all) > MAX_COMMANDS:
+        raise ValueError(f"{len(selected_all)} commands are selected (including those in the selected sections); at most {MAX_COMMANDS} "
+                         "can be tested together. Select fewer, or generate in smaller related groups.")
+
     units = []
     for key in keys:
         ir, root = ix.sec[key]
@@ -350,11 +357,7 @@ def build_units(conn: sqlite3.Connection, set_id: int, section_keys: list[str] |
             related.append(c)
 
         in_related = [k for k, rx in patterns.items() if k not in unit_cmds and any(rx.search(r_["text"]) for r_ in related)]
-        # the commands the user selected, and those of the other selected sections, are one group: they rank right after this
-        # section's own commands, however large the selection (a scenario across them is what was asked for)
-        selected_cmds = list(dict.fromkeys(
-            [k for k in (command_keys or []) if k in cat] +
-            [c for other in keys if other != key for sk in (s_["key"] for s_ in ix.subtree(other)) for c in cmd_by_sec.get(sk, [])]))
+        selected_cmds = selected_all          # all of them rank right after this section's own commands (never truncated: see the check above)
         involved = list(dict.fromkeys(unit_cmds + selected_cmds + named + in_related +
                                       [m for rk, ms in req_mentions.items() if rk in own_nodes for m in ms] +
                                       [c for r_ in related if r_["why"] != "selected together with this section" for c in cmd_by_sec.get(r_["section"] or "", [])]))

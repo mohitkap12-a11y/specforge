@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { ErrorNote } from "./ui";
 import { useJobs } from "./jobs";
@@ -12,16 +12,21 @@ const PAGE = 60;
 
 function Picker({ title, hint, picked, setPicked, specs, search }: {
   title: string; hint: string; picked: Picked; setPicked: (p: Picked) => void; specs: SpecInSet[];
-  search: (q: string, family: string, limit: number) => Promise<{ rows: Row[]; total: number }>;
+  search: (q: string, family: string, limit: number, offset: number) => Promise<{ rows: Row[]; total: number }>;
 }) {
   const [q, setQ] = useState("");
   const [family, setFamily] = useState("");
-  const [limit, setLimit] = useState(PAGE);
   const dq = useDebounced(q);
-  useEffect(() => setLimit(PAGE), [dq, family]);
-  const res = useQuery({ queryKey: ["cross-pick", title, dq, family, limit], queryFn: () => search(dq, family, limit), staleTime: 30_000, placeholderData: (prev) => prev });
-  const rows = res.data?.rows ?? [];
-  const total = res.data?.total ?? 0;
+  // pages are fetched by offset and appended, so a set larger than the endpoints' row cap is still reachable
+  const res = useInfiniteQuery({
+    queryKey: ["cross-pick", title, dq, family],
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) => search(dq, family, PAGE, pageParam),
+    getNextPageParam: (last, all) => { const seen = all.reduce((n, p) => n + p.rows.length, 0); return seen < last.total && last.rows.length > 0 ? seen : undefined; },
+    staleTime: 30_000,
+  });
+  const rows = res.data?.pages.flatMap((p) => p.rows) ?? [];
+  const total = res.data?.pages[0]?.total ?? 0;
   const toggle = (k: string, label: string) => { const n = new Map(picked); n.has(k) ? n.delete(k) : n.set(k, label); setPicked(n); };
   const allShown = rows.length > 0 && rows.every((r) => picked.has(r.key));
   const toggleShown = () => { const n = new Map(picked); rows.forEach((r) => (allShown ? n.delete(r.key) : n.set(r.key, r.label))); setPicked(n); };
@@ -47,9 +52,9 @@ function Picker({ title, hint, picked, setPicked, specs, search }: {
         {res.data && rows.length === 0 && <div className="muted small" style={{ padding: 8 }}>No matches.</div>}
       </div>
       <div className="row small" style={{ marginTop: 4, gap: 8 }}>
-        <span className="muted grow">Showing {rows.length} of {total}{rows.length < total ? " — narrow with search or the spec filter, or load more" : ""}</span>
+        <span className="muted grow">Showing {rows.length} of {total}{res.hasNextPage ? " — narrow with search or the spec filter, or load more" : ""}</span>
         {rows.length > 0 && <button onClick={toggleShown}>{allShown ? "Unselect shown" : "Select all shown"}</button>}
-        {rows.length < total && <button disabled={res.isFetching} onClick={() => setLimit((l) => l + PAGE)}>Load more</button>}
+        {res.hasNextPage && <button disabled={res.isFetchingNextPage} onClick={() => res.fetchNextPage()}>Load more</button>}
       </div>
       {picked.size > 0 && (
         <div className="row" style={{ flexWrap: "wrap", gap: 4, marginTop: 6 }}>
@@ -84,10 +89,10 @@ export default function CrossGenerator({ setId }: { setId: number }) {
         need several commands. Drafts stay unapproved until you review them.
       </p>
       <div className="row" style={{ alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
-        <Picker title="Commands" hint="select several: they are tested together; each uses its own section" picked={commands} setPicked={setCommands} specs={specs}
-          search={async (q, family, limit) => { const r = await api.catalog(setId, { kind: "command", q, family, limit }); return { total: r.total, rows: r.items.map((i) => ({ key: i.key, label: i.label, sub: i.attrs.family })) }; }} />
+        <Picker title="Commands" hint="select several (up to 24): they are tested together; each uses its own section" picked={commands} setPicked={setCommands} specs={specs}
+          search={async (q, family, limit, offset) => { const r = await api.catalog(setId, { kind: "command", q, family, limit, offset }); return { total: r.total, rows: r.items.map((i) => ({ key: i.key, label: i.label, sub: i.attrs.family })) }; }} />
         <Picker title="Sections" hint="any section of any spec in the set" picked={sections} setPicked={setSections} specs={specs}
-          search={async (q, family, limit) => { const r = await api.sections(setId, { q, family, limit }); return { total: r.total, rows: r.sections.map((s) => ({ key: s.key, label: `§${s.number} ${s.title}`, sub: `${s.family} ${s.version}` })) }; }} />
+          search={async (q, family, limit, offset) => { const r = await api.sections(setId, { q, family, limit, offset }); return { total: r.total, rows: r.sections.map((s) => ({ key: s.key, label: `§${s.number} ${s.title}`, sub: `${s.family} ${s.version}` })) }; }} />
       </div>
       <div className="row" style={{ margin: "12px 0", gap: 12, flexWrap: "wrap" }}>
         <input className="grow" placeholder="Optional focus, e.g. “resource creation and deletion order”" value={focus} onChange={(e) => setFocus(e.target.value)} aria-label="Focus" />

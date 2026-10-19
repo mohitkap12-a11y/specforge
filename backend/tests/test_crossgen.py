@@ -248,3 +248,14 @@ def test_sections_and_catalog_can_be_paged_and_filtered_by_spec(ws, demo_dir):
         assert page2 and page2[0]["key"] != allsec["sections"][0]["key"]
         cmds = client.get(f"/api/sets/{sid}/catalog", params={"kind": "command", "family": "nvme-nvm-cs"}).json()
         assert cmds["total"] > 0 and {i["attrs"]["family"] for i in cmds["items"]} == {"nvme-nvm-cs"}
+
+
+def test_an_oversized_selection_is_rejected_not_silently_truncated(conn, parsed_set, monkeypatch):
+    sel = ["cmd:admin:09", "cmd:admin:0A", "cmd:admin:06", "cmd:admin:02"]
+    monkeypatch.setattr(crossgen, "MAX_COMMANDS", 3)
+    with pytest.raises(ValueError, match="at most 3"):
+        crossgen.build_units(conn, 1, command_keys=sel)
+    units = crossgen.build_units(conn, 1, command_keys=sel[:3])                 # exactly the limit: all of them stay in every scope
+    assert all(set(sel[:3]) <= set(u["commands"]) for u in units)
+    with pytest.raises(ValueError, match="at most 3"):                          # commands of a selected section count too
+        crossgen.build_units(conn, 1, command_keys=sel[:3], section_keys=[_sec(conn, "Get Log Page")])
