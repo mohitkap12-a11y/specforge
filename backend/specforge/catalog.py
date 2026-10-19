@@ -77,12 +77,13 @@ def _is_reserved(desc: str) -> bool:
 
 
 _RESPONSE_TABLE = re.compile(r"completion queue entry|\bresponse\b|status values?|\bCQE\b", re.I)
-_HEX = re.compile(r"^[0-9A-Fa-f]{1,2}h(?:\s*(?:to|-)\s*[0-9A-Fa-f]{1,2}h)?$", re.I)
-_NOT_A_NAME = re.compile(r"^(yes|no|n/a|note\b.*|notes?:.*|\d+(\.\d+)*)$", re.I)
+_HEXV = r"(?:0x[0-9A-Fa-f]{1,2}|[0-9A-Fa-f]{1,2}h)"          # a bare number (footnote, reference, decimal) is never an opcode
+_HEX = re.compile(rf"^{_HEXV}(?:\s*(?:to|-|\u2013|\u2014)\s*{_HEXV})?$", re.I)
+_NOT_A_NAME = re.compile(r"^(yes|no|n/a|note\b.*|notes?:.*|\d+(\.\d+)*|(section|sec\.?|figure|refer\b).*)$", re.I)
 _FOOTNOTE = re.compile(r"^\d{1,2}\s+(?=[A-Za-z])|(?<=[A-Za-z])\s+\d{1,2}$")
 
 
-def _opcode_cols(rows: list[list[str]]) -> tuple[int, int] | None:
+def _opcode_cols(rows: list[list[str]], header: list[str] | None = None) -> tuple[int, int] | None:
     """(opcode column, command-name column) of an opcode table, chosen by cell content: PDF opcode tables have multi-row
     headers, binary 'opcode by field' columns, footnote markers and merged cells, so header names are not reliable."""
     width = max((len(r) for r in rows), default=0)
@@ -95,9 +96,12 @@ def _opcode_cols(rows: list[list[str]]) -> tuple[int, int] | None:
     def names(i: int) -> int:
         return sum(1 for r in rows if _HEX.match(cell(r, oc)) and len(re.findall(r"[A-Za-z]", cell(r, i))) >= 3 and not _NOT_A_NAME.match(cell(r, i)))
 
-    scores = [(names(i), i) for i in range(width) if i != oc]
-    best = max(scores, default=(0, 0))
-    return (oc, best[1]) if best[0] >= 1 else None
+    def titled(i: int) -> int:        # a header over this column names it a command (equal scores: references / descriptions lose)
+        h = norm_title(header[i]) if header and i < len(header) else ""
+        return 1 if "command" in h else 0
+
+    best = max(((names(i), titled(i), -i) for i in range(width) if i != oc), default=(0, 0, 0))
+    return (oc, -best[2]) if best[0] >= 1 else None
 
 
 def _opcode_queue(ir: dict, t: dict) -> tuple[str, str, str] | None:
@@ -131,7 +135,7 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
     commands: dict[str, dict] = {}
     for ir in irs:
         for t in ir["tables"].values():
-            cols = _opcode_cols(t["rows"])
+            cols = _opcode_cols(t["rows"], t["header"])
             if cols is None or not (classify_table(t["header"], t["caption"]) == "opcode" or re.search(r"\bopcodes?\b", norm_title(t["caption"]))):
                 continue
             ci, ni = cols
@@ -256,8 +260,8 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
     def value_rows(t: dict) -> list[tuple[tuple[int, int], dict]]:
         """(value range, {desc,row}) of an enumeration table.  A table the PDF split over pages (key 'x#2', 'x#3') is read whole,
         and the description is the wordiest column: merged cells make header positions unreliable."""
-        base = t["key"].split("#")[0]
-        parts = [p for i in irs for p in i["tables"].values() if p["key"].split("#")[0] == base] or [t]
+        base, cap = t["key"].split("#")[0], norm_title(t["caption"])
+        parts = [p for i in irs for p in i["tables"].values() if p["key"].split("#")[0] == base and norm_title(p["caption"]) == cap] or [t]
         out = []
         for part in parts:
             valued = [r for r in part["rows"] if r and parse_value_range(r[0]) is not None]

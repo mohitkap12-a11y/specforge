@@ -35,6 +35,8 @@ def _specs():
              [["10h", "", "M", "Gamma code."], ["20h", "", "O", "Delta code."], ["30h", "", "O", "Epsilon code."]], None),
             ("table", "Figure 4: Foo – Modes", ["Value", "", "O/M", "Description"],
              [["00h", "", "M", "Alpha selects the first behaviour."], ["01h", "", "O", "Beta selects the second behaviour."]], None),
+            ("table", "Figure 4: Foo – Other Codes", ["Value", "", "O/M", "Description"],
+             [["10h", "", "M", "Gamma code."], ["20h", "", "O", "Delta code."]], None),          # a different table that reuses the label
             ("table", "Figure 5: Foo – Completion Queue Entry Dword 0", ["Bits", "Description"], [["00", "Done (DN): the done flag."]], None)]
     mi = [("title", "NVM Express® Management Interface Specification", "Revision 2.0"), ("h", 1, "5 Commands"),
           ("table", "Figure 6: Opcodes for Management Interface Command Set", ["Opcode", "Command"], [["00h", "Bar"]], None),
@@ -58,6 +60,8 @@ def test_catalog_reads_real_shaped_tables(conn, tmp_path):
     assert desc.get(0, "").startswith("Alpha") and desc.get(1, "").startswith("Beta")      # description column chosen by content
     flag = {r["key"]: jloads(r["attrs_json"], {}).get("desc") for r in rows(conn, "SELECT key,attrs_json FROM catalog_item WHERE kind='value' AND key LIKE 'cmd:admin:10/dw12[08:08]=%'")}
     assert set(flag.values()) == {"cleared", "set"}          # a cited table whose values cannot fit one bit is not the flag's value list
+    mode = {jloads(r["attrs_json"], {})["vlo"] for r in rows(conn, "SELECT attrs_json FROM catalog_item WHERE kind='value' AND key LIKE 'cmd:admin:10/dw12[07:00]=%'")}
+    assert mode == {0, 1}                                   # the other table that reuses 'Figure 4' is not folded into the enumeration
     assert res["version"]
 
 
@@ -68,3 +72,20 @@ def test_doubled_hyperlink_text_is_collapsed_so_references_resolve():
         "is shown in Figure 336. Refer to section 5.2.14 and Figure 12A."
     assert clean("Figure 3 and Figure 33 are listed") == "Figure 3 and Figure 33 are listed"          # distinct references stay distinct
     assert [r.label for r in extract_references(clean("defined in Figure 296Figure 296."), "nvme-base")] == ["296"]
+
+
+def test_compact_table_keeps_the_header_over_its_own_column():
+    assert compact_table(["Opcode", "O/M", "Command"], [["00h", "", "Foo"]]) == (["Opcode", "Command"], [["00h", "Foo"]])
+
+
+def test_opcode_spellings_the_parser_accepts_are_accepted_here_too():
+    assert _opcode_cols([["0x02", "Read"], ["04h\u20130Fh", "Reserved block"]]) == (0, 1)
+    assert _opcode_cols([["3", "Read"], ["10", "Write"]]) is None                 # bare numbers are footnotes / references, not opcodes
+
+
+def test_command_column_beats_reference_column_on_equal_scores():
+    rows_ = [["00h", "Section 3.2", "Read"], ["01h", "Section 3.3", "Write"]]
+    assert _opcode_cols(rows_) == (0, 2)                                            # a 'Section x' cell is a reference, never a name
+    both = [["00h", "Basic thing", "Read"], ["01h", "Other thing", "Write"]]
+    assert _opcode_cols(both, ["Opcode", "Description", "Command"]) == (0, 2)      # equal scores: the 'Command' header decides
+    assert _opcode_cols(both) == (0, 1)                                              # no header: leftmost, not rightmost
