@@ -413,3 +413,21 @@ def test_long_sentences_are_split_into_pieces_not_truncated():
     assert " ".join(v for v in ev.values() if v.startswith("word") or "word" in v).count("word") >= 300
     assert "".join(crossgen._chunks("x" * 1200, 500)) == "x" * 1200                                      # even one unbroken token survives
     assert all(f"[{k}] " in text for k in ev)
+
+
+def test_variants_are_generated_even_when_the_base_flow_already_exists(conn, parsed_set):
+    units = crossgen.build_units(conn, 1, command_keys=["cmd:io:nvm:01", "cmd:io:nvm:02"])
+    _, _, ev = crossgen._messages(conn, 1, units[0], "", 6)
+    first = sorted(ev, key=lambda k: int(k[1:]))[0]
+
+    def flow(vary):
+        wr = {"command": "cmd:io:nvm:01", "note": "write with FUA", "fields": [{"dw": 12, "hi": 30, "lo": 30, "op": "eq", "value": 1, "vary": vary}]}
+        rd = {"command": "cmd:io:nvm:02", "note": "read back", "fields": []}
+        return {"title": "FUA write then read", "observability": "stimulus", "steps": [wr, rd], "evidence": [first]}
+
+    # pass 1 states the flow plainly; pass 2 restates the same flow only to have FUA swept over the catalog's values
+    model = _ByAngle({"explicit": {"testable": True, "scenarios": [flow(False)]}, "fields": {"testable": True, "scenarios": [flow(True)]}})
+    stats = crossgen.generate_cross_scenarios(conn, 1, LLMService(conn, settings(), model), command_keys=["cmd:io:nvm:01", "cmd:io:nvm:02"], passes=2)
+    assert stats["variants"] >= 1 and stats["duplicates"] >= 1                          # the base was a duplicate, the variant was still made
+    values = {json.loads(r["predicate_json"])["steps"][0]["fields"][0]["value"] for r in rows(conn, "SELECT predicate_json FROM scenario WHERE origin='cross'")}
+    assert values == {0, 1}

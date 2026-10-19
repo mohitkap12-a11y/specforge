@@ -639,10 +639,11 @@ def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMServ
                     problems.append(f"{sc.title}: {'; '.join(errs)}")
                     eventlog.emit("warn", "agent", f"{tag}: rejected draft '{sc.title[:100]}': {'; '.join(errs)[:200]}", section=u["section_key"], errors=errs, evidence=sc.evidence, quotes=sc.quotes)
                     continue
-                if not store(sc.title, sc.description, sc.observability, pred, evidence, [s_.command for s_ in sc.steps], {}):
-                    continue
-                created += 1
-                stats["created"] += 1
+                if store(sc.title, sc.description, sc.observability, pred, evidence, [s_.command for s_ in sc.steps], {}):
+                    created += 1
+                    stats["created"] += 1
+                # the variants do not depend on the base being new: a later pass may restate a flow an earlier pass already stored
+                # (or one that was approved / rejected before) just to have its values swept, and each variant is de-duplicated itself
                 for label, p2 in _variants(conn, set_id, sc, pred, scoped_fields):
                     if validate_predicate(p2, scoped_cmds, scoped_fields):
                         continue
