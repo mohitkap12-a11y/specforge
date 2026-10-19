@@ -32,7 +32,7 @@ from .llm.service import LLMService
 from .refs import load_set_irs, resolve_references
 from .scenarios import catalog_context, validate_predicate
 
-PROMPT_VERSION = "cross-v2"
+PROMPT_VERSION = "cross-v3"
 PRIMARY_CHARS = 10_000       # budget for the selected section (its sub-sections and tables)
 RELATED_CHARS = 8_000        # budget for all connected passages together
 PASSAGE_CHARS = 2_000        # budget for one connected passage
@@ -134,7 +134,9 @@ Rules:
 - order 'strict' when the text requires an order, otherwise 'any'. scope 'test' keeps all steps in one test.
 - observability 'submission' = the whole flow is visible in what was submitted; 'stimulus' = only the commands that drive the
   behaviour are visible, the device's response cannot be verified.
-- Cite the sentences that justify each scenario in "evidence": ["S12", "S40"], copying the ids exactly. Do not quote text.
+- Cite the sentences that justify each scenario in "evidence": ["S12", "S40"], copying the ids exactly. Every scenario needs
+  at least one id. Do not quote text.
+- Leave "within" out unless the text states a window; when present it is a positive integer (a count of commands), never 0.
 - Reply with one JSON object only."""
 
 
@@ -174,7 +176,7 @@ def to_predicate(sc: AIScenario, cmds: dict[str, dict]) -> dict:
                       **({"note": st.note} if st.note else {}),
                       **({"capture": {k: v.model_dump() for k, v in st.capture.items()}} if st.capture else {})})
     pred: dict[str, Any] = {"scope": sc.scope, "order": sc.order, "steps": steps}
-    if sc.within is not None:   # 0 must reach validation (it is invalid), not silently mean 'unlimited'
+    if sc.within:   # models write 0 / null for "no window"
         pred["within"] = sc.within
     return pred
 
@@ -493,24 +495,12 @@ def _like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _evidence(sc: AIScenario, ev: dict[str, str], corpus: str) -> tuple[list[str], list[str]]:
-    """(evidence sentences, problems): cited ids must exist; quoted text must occur verbatim in what the model was shown."""
-    out: list[str] = []
-    errs: list[str] = []
-    for i in sc.evidence:
-        t = ev.get(i.strip().strip("[]").upper())
-        if t is None:
-            errs.append(f"unknown evidence id {i!r}")
-        else:
-            out.append(t)
-    for q in sc.quotes:
-        if _grounded(q, corpus):
-            out.append(q)
-        else:
-            errs.append("ungrounded quote")
-    if not out and not errs:
-        errs.append("no evidence cited")
-    return out, errs
+def _evidence(sc: AIScenario, ev: dict[str, str], corpus: str) -> list[str]:
+    """Sentences that support the scenario. Cited ids must exist and quoted text must occur verbatim in what the model was shown;
+    citations that do not check out are dropped (a scenario without any is kept, flagged ungrounded, for the reviewer to judge)."""
+    out = [t for t in (ev.get(i.strip().strip("[]").upper()) for i in sc.evidence) if t is not None]
+    out += [q for q in sc.quotes if _grounded(q, corpus)]
+    return out
 
 
 def _field_values(conn: sqlite3.Connection, set_id: int, cmd_key: str, f: dict) -> list[int]:
@@ -623,11 +613,12 @@ def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMServ
                     nq = norm_text(q)
                     links |= {k for k, t in req_text.items() if t and (nq in t or t in nq)}
                 conn.executemany("INSERT OR IGNORE INTO scenario_item(scenario_id,item_key) VALUES(?,?)", [(cur.lastrowid, k) for k in sorted(links)])
-                eventlog.emit("info", "agent", f"{tag}: drafted '{title[:120]}' ({len(steps)} steps, awaiting review)", section=u["section_key"], sid=sid, predicate=pred)
+                eventlog.emit("info", "agent", f"{tag}: drafted '{title[:120]}' ({len(steps)} steps, awaiting review{'' if evidence else ', NO supporting sentence found'})", section=u["section_key"], sid=sid, predicate=pred)
                 return True
 
             for sc in out.scenarios[:max_per_section]:
-                evidence, errs = _evidence(sc, ev, corpus)
+                evidence = _evidence(sc, ev, corpus)
+                errs: list[str] = []
                 if len({s_.command for s_ in sc.steps}) < 2:
                     errs.append("not cross-command: needs at least two different commands")
                 try:
@@ -640,7 +631,7 @@ def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMServ
                     problems.append(f"{sc.title}: {'; '.join(errs)}")
                     eventlog.emit("warn", "agent", f"{tag}: rejected draft '{sc.title[:100]}': {'; '.join(errs)[:200]}", section=u["section_key"], errors=errs, evidence=sc.evidence, quotes=sc.quotes)
                     continue
-                if store(sc.title, sc.description, sc.observability, pred, evidence, [s_.command for s_ in sc.steps], {}):
+                if store(sc.title, sc.description, sc.observability, pred, evidence, [s_.command for s_ in sc.steps], {} if evidence else {"ungrounded": True}):
                     created += 1
                     stats["created"] += 1
                 # the variants do not depend on the base being new: a later pass may restate a flow an earlier pass already stored
@@ -648,7 +639,7 @@ def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMServ
                 for label, p2 in _variants(conn, set_id, sc, pred, scoped_fields):
                     if validate_predicate(p2, scoped_cmds, scoped_fields):
                         continue
-                    if store(f"{sc.title} [{label}]", sc.description, sc.observability, p2, evidence, [s_.command for s_ in sc.steps], {"variant": label, "variant_of": sc.title}):
+                    if store(f"{sc.title} [{label}]", sc.description, sc.observability, p2, evidence, [s_.command for s_ in sc.steps], {"variant": label, "variant_of": sc.title, **({} if evidence else {"ungrounded": True})}):
                         created += 1
                         stats["created"] += 1
                         stats["variants"] += 1
