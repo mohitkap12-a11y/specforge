@@ -15,13 +15,13 @@ function Picker({ title, hint, picked, setPicked, specs, search }: {
   search: (q: string, spec: { family?: string; version?: string }, limit: number, offset: number) => Promise<{ rows: Row[]; total: number }>;
 }) {
   const [q, setQ] = useState("");
-  const [spec, setSpec] = useState("");          // "family@version", unambiguous when a set holds two revisions of a family
+  const [spec, setSpec] = useState("");          // index into `specs`: structural, so no character in a family or version name can break it
   const dq = useDebounced(q);
   // pages are fetched by offset and appended, so a set larger than the endpoints' row cap is still reachable
   const res = useInfiniteQuery({
-    queryKey: ["cross-pick", title, dq, spec],
+    queryKey: ["cross-pick", title, dq, spec, specs.length],
     initialPageParam: 0,
-    queryFn: ({ pageParam }) => { const [family, version] = spec ? spec.split("@") : [undefined, undefined]; return search(dq, { family, version }, PAGE, pageParam); },
+    queryFn: ({ pageParam }) => { const sel = spec === "" ? undefined : specs[Number(spec)]; return search(dq, { family: sel?.family, version: sel?.version }, PAGE, pageParam); },
     getNextPageParam: (last, all) => { const seen = all.reduce((n, p) => n + p.rows.length, 0); return seen < last.total && last.rows.length > 0 ? seen : undefined; },
     staleTime: 30_000,
   });
@@ -38,7 +38,7 @@ function Picker({ title, hint, picked, setPicked, specs, search }: {
         {specs.length > 1 && (
           <select value={spec} onChange={(e) => setSpec(e.target.value)} aria-label={`${title}: spec`}>
             <option value="">All specs</option>
-            {specs.map((s) => <option key={`${s.family}@${s.version}`} value={`${s.family}@${s.version}`}>{s.family} {s.version}</option>)}
+            {specs.map((s, i) => <option key={i} value={String(i)}>{s.family} {s.version}</option>)}
           </select>
         )}
       </div>
