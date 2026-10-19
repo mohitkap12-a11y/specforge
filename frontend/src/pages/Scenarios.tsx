@@ -57,6 +57,7 @@ function Drawer({ s, setId, onClose }: { s: Scenario; setId: number; onClose: ()
       )}
       <h3>Linked catalog items ({s.items.length})</h3>
       <div className="small mono">{s.items.slice(0, 30).map((k) => <div key={k}>{k}</div>)}{s.items.length > 30 && <div className="muted">+{s.items.length - 30} more</div>}</div>
+      {(prov as any).ungrounded && <div className="req">No supporting sentence was found for this draft: check it against the spec before approving.</div>}
       {quotes.length > 0 && <><h3>Source quotes</h3>{quotes.map((q, i) => <div key={i} className="req">{q}</div>)}</>}
       {Object.keys(prov).length > 0 && <><h3>Provenance</h3><pre>{JSON.stringify(prov, null, 1)}</pre></>}
     </aside>

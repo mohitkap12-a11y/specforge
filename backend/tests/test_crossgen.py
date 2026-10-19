@@ -148,11 +148,12 @@ def test_grounding_accepts_connected_text_and_rejects_text_from_unrelated_sectio
     assert not crossgen._grounded("The Write command writes data and metadata to the namespace.", u["primary"] + "\n" + related["text"])
 
 
-def test_invalid_within_is_rejected_not_treated_as_unlimited(conn, parsed_set):
+def test_a_zero_within_means_no_window(conn, parsed_set):
     units = crossgen.build_units(conn, 1, command_keys=[SETF, GETF])
     quote = next(x for x in units[0]["primary"].split("\n") if "configures a feature" in x)[:60]
     stats = crossgen.generate_cross_scenarios(conn, 1, _svc(conn, [_flow(quote, within=0)]), command_keys=[SETF, GETF])
-    assert stats["created"] == 0 and stats["rejected"] >= 1
+    assert stats["created"] == 1
+    assert "within" not in json.loads(rows(conn, "SELECT predicate_json FROM scenario WHERE origin='cross'")[0]["predicate_json"])
 
 
 def test_a_rejected_scenario_is_not_resurrected_by_regeneration(conn, parsed_set):
@@ -192,12 +193,14 @@ def test_the_agent_narrates_each_decision(conn, parsed_set):
 
     units = crossgen.build_units(conn, 1, command_keys=[SETF, GETF])
     quote = next(x for x in units[0]["primary"].split("\n") if "configures a feature" in x)[:60]
-    bad = {**_flow(quote), "title": "bad quote", "quotes": ["the device shall levitate above the rack"]}
+    other = _flow(quote)
+    other["steps"][0]["fields"][0]["value"] = 9
+    bad = {**other, "title": "bad quote", "quotes": ["the device shall levitate above the rack"]}
     crossgen.generate_cross_scenarios(conn, 1, _svc(conn, [_flow(quote), bad]), command_keys=[SETF, GETF])
     assert eventlog.drain(10)
     msgs = [e["message"] for e in eventlog.query(conn, limit=2000, sources=["agent"])]
     assert msgs[0].startswith("Cross-command agent starting") and "[1/2]" in msgs[1] and "reading" in msgs[1]
-    assert any("rejected draft 'bad quote'" in m and "ungrounded" in m for m in msgs)
+    assert any("drafted 'bad quote'" in m and "NO supporting sentence" in m for m in msgs)
     assert any("drafted" in m for m in msgs) and msgs[-1].startswith("Cross-command agent finished")
 
 
@@ -354,22 +357,22 @@ def test_the_prompt_numbers_every_sentence_and_evidence_ids_resolve_to_it(conn, 
     assert all(f"[{k}] " in text for k in list(ev)[:5])
     some = next(iter(ev))
     good = crossgen._evidence(crossgen.AIScenario(title="t", observability="stimulus", steps=[], evidence=[f"[{some}]"]), ev, corpus)
-    assert good == ([ev[some]], [])                                           # brackets and case are tolerated
-    bad = crossgen._evidence(crossgen.AIScenario(title="t", observability="stimulus", steps=[], evidence=["S99999"]), ev, corpus)
-    assert bad[0] == [] and "unknown evidence id" in bad[1][0]
-    none = crossgen._evidence(crossgen.AIScenario(title="t", observability="stimulus", steps=[]), ev, corpus)
-    assert none == ([], ["no evidence cited"])
+    assert good == [ev[some]]                                                 # brackets and case are tolerated
+    assert crossgen._evidence(crossgen.AIScenario(title="t", observability="stimulus", steps=[], evidence=["S99999", some]), ev, corpus) == [ev[some]]
+    assert crossgen._evidence(crossgen.AIScenario(title="t", observability="stimulus", steps=[]), ev, corpus) == []
 
 
-def test_cited_sentence_ids_ground_a_draft_and_unknown_ids_reject_it(conn, parsed_set):
+def test_cited_sentence_ids_ground_a_draft_and_unknown_ids_flag_it(conn, parsed_set):
     units = crossgen.build_units(conn, 1, command_keys=[SETF, GETF])
     _, _, ev = crossgen._messages(conn, 1, units[0], "", 6)
     first = sorted(ev, key=lambda k: int(k[1:]))[0]
-    answer = {"testable": True, "scenarios": [_ev_flow([first], "cited"), _ev_flow(["S99999"], "invented id")]}
-    stats = crossgen.generate_cross_scenarios(conn, 1, _svc(conn, answer["scenarios"]), command_keys=[SETF, GETF], passes=1)
-    assert stats["created"] == 1 and stats["rejected"] >= 1
-    prov = json.loads(rows(conn, "SELECT provenance_json FROM scenario WHERE origin='cross'")[0]["provenance_json"])
-    assert prov["quotes"] == [ev[first]] and prov["angle"] == "explicit"       # the sentence itself is stored as the quote
+    invented = _ev_flow(["S99999"], "invented id")
+    invented["steps"][0]["fields"][0]["value"] = 9
+    stats = crossgen.generate_cross_scenarios(conn, 1, _svc(conn, [_ev_flow([first], "cited"), invented]), command_keys=[SETF, GETF], passes=1)
+    assert stats["created"] == 2 and stats["rejected"] == 0                   # an unverifiable citation does not cost the scenario ...
+    got = {r["title"]: json.loads(r["provenance_json"]) for r in rows(conn, "SELECT title,provenance_json FROM scenario WHERE origin='cross'")}
+    assert got["cited"]["quotes"] == [ev[first]] and got["cited"]["angle"] == "explicit" and "ungrounded" not in got["cited"]
+    assert got["invented id"]["quotes"] == [] and got["invented id"]["ungrounded"]   # ... it is flagged for the reviewer instead
 
 
 def test_a_varied_field_is_expanded_from_the_catalog_values(conn, parsed_set):
