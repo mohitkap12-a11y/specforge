@@ -22,7 +22,7 @@ Scenario and command **coverage for the NVMe / NVMe-MI specifications**, fully o
 | Ollama / OpenCode providers, AI scenario generation with grounding and validation | implemented, tested against a mock Ollama server and a stub `opencode` binary |
 | REST API, CLI, Excel/HTML/CSV/JSON reports | implemented, tested |
 | React UI (all pages: Dashboard, Specs, Explorer, Sets, Catalog, Scenarios, Command DBs, Coverage, Reports, Jobs, Settings) | implemented in `frontend/`; checked in a browser against the synthetic demo. Not yet exercised on real specs |
-| Real NVMe specs | **not yet run**: they could not be downloaded in the build environment. Run them next; see "Before trusting real-spec results" |
+| Real NVMe specs (`docs/specifications/`: Base 2.4, MI 2.2, NVM Command Set 1.3) | run end to end once (parse, references, catalog, cross-command generation, approval, import, coverage, export); parser audit still reports errors (see "Before trusting real-spec results"); not yet run against a real command log or a local model |
 
 ## Install
 
@@ -96,7 +96,7 @@ Family and version are detected from the title page (override with `--family nvm
 
 ### Before trusting real-spec results
 
-The parser was built and tested against synthetic documents. On the first real run:
+The parser was built on synthetic documents and then run once on the three real PDFs in `docs/specifications/` (870, 214 and 177 pages). That run fixed merged-cell tables, opcode-table detection, 64-bit fields, doubled hyperlink text and completion-layout tables. Remaining known gaps: the audit still reports `heading_not_found` and `low_table_quality` for many pages, and about 500 tables with empty captions are not linked to a command. On any new document:
 
 1. Check `specforge ingest` output: `errors=0`, then read the warnings (`GET /api/runs/{id}/issues`).
 2. Compare 10-20 tables by eye with the PDF (cells, multi-page tables, Figure numbers). Fix any wrong table with a correction (`PUT /api/runs/{id}/tables/correction`), then reparse.

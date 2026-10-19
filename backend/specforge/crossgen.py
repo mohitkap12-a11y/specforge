@@ -38,6 +38,7 @@ RELATED_CHARS = 8_000        # budget for all connected passages together
 PASSAGE_CHARS = 2_000        # budget for one connected passage
 CATALOG_CHARS = 9_000
 MAX_COMMANDS = 14
+MAX_GROUP = 5            # selected sections that still share each other's commands
 MAX_ENTRIES_PER_COMMAND = 80
 
 # ----------------------------------------------------------------------------- model output
@@ -311,22 +312,18 @@ def build_units(conn: sqlite3.Connection, set_id: int, section_keys: list[str] |
         for r in refs:
             if r["src_key"] in own_nodes and r["target_key"] not in own_nodes:
                 add(r["target_key"], f"referenced from the section ('{r['raw']}')")
-        # 2. the other sections selected in the same request
-        for other in keys:
-            if other != key:
-                add(other, "selected together with this section")
-        # 3. commands the section names
+        # 2. commands the section names
         text_all = primary
         named = [k for k, rx in patterns.items() if rx.search(text_all) and k not in unit_cmds]
         for k in named:
             c = cat[k]
             if c.get("section") in ix.sec:
                 add(c["section"], f"defines the command '{c['name']}' named in the section")
-        # 4. what points into the section
+        # 3. what points into the section
         for r in refs:
             if r["target_key"] in own_nodes and r["src_key"] not in own_nodes:
                 add(r["src_key"] if r["src_key"] in ix.sec else (ix.section_of(r["src_key"]) or r["src_key"]), f"refers to the section ('{r['raw']}')")
-        # 5. statements elsewhere that name a command defined in the section
+        # 4. statements elsewhere that name a command defined in the section
         for rk, ms in req_mentions.items():
             if rk in ix.req and rk not in own_nodes and any(m in unit_cmds for m in ms):
                 _, rq = ix.req[rk]
@@ -334,6 +331,11 @@ def build_units(conn: sqlite3.Connection, set_id: int, section_keys: list[str] |
                 add(rk, "normative statement elsewhere naming a command of the section", rq["text"])
                 if sec in ix.sec:
                     cands[-1]["title"] = ix.sec[sec][1]["title"]
+
+        # 5. the other sections selected in the same request: weakest signal, so last and short (their commands still join the scope)
+        for other in keys:
+            if other != key:
+                add(other, "selected together with this section", _section_block(ix, other, 700, with_tables=False))
 
         related, used, seen = [], 0, set()
         for c in cands:
@@ -343,8 +345,15 @@ def build_units(conn: sqlite3.Connection, set_id: int, section_keys: list[str] |
             used += len(c["text"])
             related.append(c)
 
-        involved = list(dict.fromkeys(unit_cmds + named + [m for rk, ms in req_mentions.items() if rk in own_nodes for m in ms] +
-                                      [c for r_ in related for c in cmd_by_sec.get(r_["section"] or "", [])]))
+        in_related = [k for k, rx in patterns.items() if k not in unit_cmds and any(rx.search(r_["text"]) for r_ in related)]
+        # commands of the other selected sections join last, and only for a small related group: in a large selection they
+        # would bury the real relationships (select the sections that belong together, a few at a time)
+        selected_cmds = [c for other in keys if other != key for sk in (s_["key"] for s_ in ix.subtree(other)) for c in cmd_by_sec.get(sk, [])] \
+            if len(keys) <= MAX_GROUP else []
+        involved = list(dict.fromkeys(unit_cmds + named + in_related +
+                                      [m for rk, ms in req_mentions.items() if rk in own_nodes for m in ms] +
+                                      [c for r_ in related if r_["why"] != "selected together with this section" for c in cmd_by_sec.get(r_["section"] or "", [])] +
+                                      selected_cmds))
         involved = [c for c in involved if c in cat][:MAX_COMMANDS]
         units.append({"section_key": key, "family": ir["family"], "version": ir["version"], "number": root["number"], "title": root["title"],
                       "commands": involved, "own_commands": unit_cmds, "primary": primary, "related": related})
