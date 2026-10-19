@@ -520,8 +520,9 @@ def _field_values(conn: sqlite3.Connection, set_id: int, cmd_key: str, f: dict) 
                   (set_id, _like(cmd_key) + "/%")):
         a = jloads(r["attrs_json"], {})
         if a.get("command") == cmd_key and (a.get("dw"), a.get("hi"), a.get("lo")) == (f["dw"], f["hi"], f["lo"]) \
-                and not a.get("reserved_value") and a.get("vlo") == a.get("vhi"):
-            vals.add(a["vlo"])
+                and not a.get("reserved_value"):
+            # a range contributes both endpoints
+            vals.update(v for v in (a.get("vlo"), a.get("vhi")) if isinstance(v, int))
     if not vals and f["hi"] == f["lo"]:
         vals = {0, 1}
     return sorted(vals)[:MAX_VARIANTS]

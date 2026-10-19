@@ -431,3 +431,11 @@ def test_variants_are_generated_even_when_the_base_flow_already_exists(conn, par
     assert stats["variants"] >= 1 and stats["duplicates"] >= 1                          # the base was a duplicate, the variant was still made
     values = {json.loads(r["predicate_json"])["steps"][0]["fields"][0]["value"] for r in rows(conn, "SELECT predicate_json FROM scenario WHERE origin='cross'")}
     assert values == {0, 1}
+
+
+def test_field_values_include_both_endpoints_of_a_range(conn, parsed_set):
+    f = {"dw": 12, "hi": 15, "lo": 8}
+    attrs = {"command": "cmd:x:01", "dw": 12, "hi": 15, "lo": 8, "vlo": 2, "vhi": 5}
+    conn.execute("INSERT INTO catalog_item(set_id,key,kind,parent_key,label,observability,na_reason,attrs_json) VALUES(1,'cmd:x:01/v1','value','cmd:x:01','r','','',?)",
+                 (json.dumps(attrs),))
+    assert crossgen._field_values(conn, 1, "cmd:x:01", f) == [2, 5]
