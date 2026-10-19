@@ -89,3 +89,8 @@ def test_command_column_beats_reference_column_on_equal_scores():
     both = [["00h", "Basic thing", "Read"], ["01h", "Other thing", "Write"]]
     assert _opcode_cols(both, ["Opcode", "Description", "Command"]) == (0, 2)      # equal scores: the 'Command' header decides
     assert _opcode_cols(both) == (0, 1)                                              # no header: leftmost, not rightmost
+
+
+def test_commands_that_merely_start_like_a_reference_word_are_still_names():
+    assert _opcode_cols([["81h", "Security Send"], ["82h", "Security Receive"]]) == (0, 1)       # 'Sec' inside 'Security' is not a reference
+    assert _opcode_cols([["81h", "Sec. 3.2", "Security Send"], ["82h", "Sec. 3.3", "Security Receive"]]) == (0, 2)

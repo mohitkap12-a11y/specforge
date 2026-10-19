@@ -79,7 +79,7 @@ def _is_reserved(desc: str) -> bool:
 _RESPONSE_TABLE = re.compile(r"completion queue entry|\bresponse\b|status values?|\bCQE\b", re.I)
 _HEXV = r"(?:0x[0-9A-Fa-f]{1,2}|[0-9A-Fa-f]{1,2}h)"          # a bare number (footnote, reference, decimal) is never an opcode
 _HEX = re.compile(rf"^{_HEXV}(?:\s*(?:to|-|\u2013|\u2014)\s*{_HEXV})?$", re.I)
-_NOT_A_NAME = re.compile(r"^(yes|no|n/a|note\b.*|notes?:.*|\d+(\.\d+)*|(section|sec\.?|figure|refer\b).*)$", re.I)
+_NOT_A_NAME = re.compile(r"^(yes|no|n/a|note\b.*|notes?:.*|\d+(\.\d+)*|(section\b|sec(?:\.|\b)|figure\b|refer\b).*)$", re.I)
 _FOOTNOTE = re.compile(r"^\d{1,2}\s+(?=[A-Za-z])|(?<=[A-Za-z])\s+\d{1,2}$")
 
 
