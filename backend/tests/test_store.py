@@ -60,8 +60,8 @@ def test_parser_version_bump_flags_reparse_available(conn, demo_dir, monkeypatch
     d = store.register_document(conn, demo_dir / "nvme-base-2.4.pdf")
     store.run_parse(conn, d["id"], workers=1)
     assert store.reparse_available(conn) == []
-    monkeypatch.setattr(config, "PARSER_VERSION", "2")
-    monkeypatch.setattr(store, "PARSER_VERSION", "2")
+    monkeypatch.setattr(config, "PARSER_VERSION", "999")
+    monkeypatch.setattr(store, "PARSER_VERSION", "999")
     assert store.reparse_available(conn) == [d["id"]]
 
 

@@ -22,6 +22,7 @@ from .core.db import rows
 from .ingest.normalize import (
     classify_table,
     clean,
+    compact_table,
     extract_references,
     find_col,
     norm_title,
@@ -75,18 +76,47 @@ def _is_reserved(desc: str) -> bool:
     return bool(re.match(r"^\s*(reserved|rsvd)\b", desc, re.I))
 
 
-def _opcode_queue(ir: dict, t: dict) -> tuple[str, str, str]:
+_RESPONSE_TABLE = re.compile(r"completion queue entry|\bresponse\b|status values?|\bCQE\b", re.I)
+_HEX = re.compile(r"^[0-9A-Fa-f]{1,2}h(?:\s*(?:to|-)\s*[0-9A-Fa-f]{1,2}h)?$", re.I)
+_NOT_A_NAME = re.compile(r"^(yes|no|n/a|note\b.*|notes?:.*|\d+(\.\d+)*)$", re.I)
+_FOOTNOTE = re.compile(r"^\d{1,2}\s+(?=[A-Za-z])|(?<=[A-Za-z])\s+\d{1,2}$")
+
+
+def _opcode_cols(rows: list[list[str]]) -> tuple[int, int] | None:
+    """(opcode column, command-name column) of an opcode table, chosen by cell content: PDF opcode tables have multi-row
+    headers, binary 'opcode by field' columns, footnote markers and merged cells, so header names are not reliable."""
+    width = max((len(r) for r in rows), default=0)
+    cell = lambda r, i: clean(r[i]) if i < len(r) else ""  # noqa: E731
+    hexn = [sum(1 for r in rows if _HEX.match(cell(r, i))) for i in range(width)]
+    if not hexn or max(hexn) < 1:
+        return None
+    oc = hexn.index(max(hexn))
+
+    def names(i: int) -> int:
+        return sum(1 for r in rows if _HEX.match(cell(r, oc)) and len(re.findall(r"[A-Za-z]", cell(r, i))) >= 3 and not _NOT_A_NAME.match(cell(r, i)))
+
+    scores = [(names(i), i) for i in range(width) if i != oc]
+    best = max(scores, default=(0, 0))
+    return (oc, best[1]) if best[0] >= 1 else None
+
+
+def _opcode_queue(ir: dict, t: dict) -> tuple[str, str, str] | None:
+    """(interface, queue, command set) an opcode table belongs to, from its caption; None for tables that list no commands."""
     cap = norm_title(t["caption"])
-    fam = ir["family"]
-    if fam == "nvme-mi":
-        return "mi", "mi", "mi"
+    if "control primitive" in cap or "out-of-band" in cap or "pcie" in cap:
+        return None
     if "admin" in cap:
         return "pcie", "admin", "base"
-    return "pcie", "io", CS_BY_FAMILY.get(fam, "base")
+    if ir["family"] == "nvme-mi":
+        return "mi", "mi", "mi"
+    return "pcie", "io", CS_BY_FAMILY.get(ir["family"], "base")
 
 
 def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
     irs = load_set_irs(conn, set_id)
+    for ir in irs:        # merged-cell padding from PDF extraction is removed once, before anything reads a table
+        for t in ir["tables"].values():
+            t["header"], t["rows"] = compact_table(t["header"], t["rows"])
     eventlog.emit("info", "catalog", "Building catalog from " + ", ".join(f"{i['family']} {i['version']}" for i in irs), set_id=set_id)
     items: dict[str, dict] = {}
     issues: list[dict] = []
@@ -101,17 +131,20 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
     commands: dict[str, dict] = {}
     for ir in irs:
         for t in ir["tables"].values():
-            if classify_table(t["header"], t["caption"]) != "opcode":
+            cols = _opcode_cols(t["rows"])
+            if cols is None or not (classify_table(t["header"], t["caption"]) == "opcode" or re.search(r"\bopcodes?\b", norm_title(t["caption"]))):
                 continue
-            ci = find_col(t["header"], "opcode")
-            ni = find_col(t["header"], "command")
+            ci, ni = cols
             oi = find_col(t["header"], "o/m", "mandatory")
-            iface, queue, cs = _opcode_queue(ir, t)
+            route = _opcode_queue(ir, t)
+            if route is None:
+                continue
+            iface, queue, cs = route
             for r in t["rows"]:
-                if ci is None or ni is None or ci >= len(r) or ni >= len(r):
+                if ci >= len(r) or ni >= len(r) or not _HEX.match(clean(r[ci])):
                     continue
                 rg = parse_value_range(r[ci])
-                name = clean(r[ni])
+                name = _FOOTNOTE.sub("", clean(r[ni]))
                 if not rg or not name or _is_reserved(name):
                     continue
                 if re.match(r"^(reserved|vendor)", norm_title(name)):
@@ -163,6 +196,8 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
         for t in ir["tables"].values():
             if classify_table(t["header"], t["caption"]) != "cdw":
                 continue
+            if _RESPONSE_TABLE.search(t["caption"]):
+                continue            # completion / response layouts are not part of what the host submits
             cap = _dash(t["caption"]).replace(" - ", " - ")
             dw: str | int | None = None
             name = None
@@ -219,18 +254,48 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
         return ir["tables"].get(label)
 
     def value_rows(t: dict) -> list[tuple[tuple[int, int], dict]]:
+        """(value range, {desc,row}) of an enumeration table.  A table the PDF split over pages (key 'x#2', 'x#3') is read whole,
+        and the description is the wordiest column: merged cells make header positions unreliable."""
+        base = t["key"].split("#")[0]
+        parts = [p for i in irs for p in i["tables"].values() if p["key"].split("#")[0] == base] or [t]
         out = []
-        desc_i = find_col(t["header"], "description")        # header text is matched case-insensitively
-        if desc_i is None:
-            desc_i = 2 if len(t["header"]) > 2 and find_col(t["header"], "o/m") is not None else 1
-        for r in t["rows"]:
-            if not r:
-                continue
-            rg = parse_value_range(r[0])
-            if rg is None:
-                continue
-            out.append((rg, {"desc": clean(r[desc_i]) if desc_i < len(r) else "", "row": r}))
+        for part in parts:
+            valued = [r for r in part["rows"] if r and parse_value_range(r[0]) is not None]
+            width = max((len(r) for r in valued), default=0)
+            desc_i = max(range(1, width), key=lambda i: sum(len(clean(r[i])) if i < len(r) else 0 for r in valued), default=1)
+            for r in valued:
+                out.append((parse_value_range(r[0]), {"desc": clean(r[desc_i]) if desc_i < len(r) else "", "row": r}))
         return out
+
+    def split_wide(fields: list[dict]) -> list[dict]:
+        """A field wider than one dword (e.g. a 64-bit address in Command Dwords 10-11, written '63:00') is addressed per dword by
+        predicates, so it becomes one field per dword, each with bit positions inside its own dword."""
+        out = []
+        for f in fields:
+            t, dw = f["table"], f["dw"]
+            spans = [parse_bit_range(r[0]) if r else None for r in t["rows"]]
+            if not isinstance(dw, int) or not any(sp and sp[0] > 31 for sp in spans):
+                out.append(f)
+                continue
+            for k in range(max(sp[0] for sp in spans if sp) // 32 + 1):
+                part = []
+                for r, sp in zip(t["rows"], spans):
+                    if sp and sp[1] <= 32 * k + 31 and sp[0] >= 32 * k:
+                        part.append([f"{min(sp[0], 32 * k + 31) - 32 * k:02d}:{max(sp[1], 32 * k) - 32 * k:02d}", *r[1:]])
+                if part:
+                    out.append({**f, "table": {**t, "rows": part}, "dw": dw + k})
+        return out
+
+    for c in commands.values():
+        if c["interface"] == "mi":       # request dwords of a management-interface message are NMD0 / NMD1 (as decoded), not CDW numbers
+            c["fields"] = [{**f, "dw": f"nmd{f['dw']}"} if isinstance(f["dw"], int) and f["dw"] in (0, 1) else f for f in c["fields"]]
+        c["fields"] = split_wide(c["fields"])
+
+    def fits(cand: dict, width: int) -> bool:
+        """A table that merely happens to be cited in a field's description (an unrelated enumeration) is not the field's value
+        list: most of its values would not fit the field."""
+        vr = value_rows(cand)
+        return bool(vr) and sum(1 for (_, hi), _m in vr if hi < (1 << width)) * 2 >= len(vr)
 
     # ---- commands, fields, values
     for c in commands.values():
@@ -265,14 +330,14 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
                 for ref in extract_references(r[1], ir["family"]):
                     if ref.kind == "figure":
                         cand = find_table(ir, ref.label, ref.family, t["key"], ref.raw)
-                        if cand and classify_table(cand["header"], cand["caption"]) == "values" and value_rows(cand):
+                        if cand and classify_table(cand["header"], cand["caption"]) == "values" and fits(cand, width):
                             vt = cand
                             break
-                if vt is None and abbr:
+                if vt is None and (abbr or name):
                     for cand in ir["tables"].values():
                         capn = norm_title(cand["caption"])
-                        if classify_table(cand["header"], cand["caption"]) == "values" and _cmd_norm(c["name"]) in capn \
-                                and abbr.lower() in capn and cand["label"] != t["label"]:
+                        if classify_table(cand["header"], cand["caption"]) == "values" and fits(cand, width) and _cmd_norm(c["name"]) in capn \
+                                and ((abbr and abbr.lower() in capn) or (name and norm_title(name) in capn)) and cand["label"] != t["label"]:
                             vt = cand
                             break
                 fattrs["value_table"] = vt["key"] if vt else None

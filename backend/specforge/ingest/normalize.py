@@ -11,10 +11,14 @@ _DASHES = str.maketrans({"\u2013": "-", "\u2014": "-", "\u2212": "-", "\u2010": 
 _QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u00a0": " "})
 
 
+# PDF hyperlinks put the visible text in the page twice ("Figure 336Figure 336"); left in, the reference reads as "Figure 336F"
+_DOUBLED_LINK = re.compile(r"\b((?:Figure|Table|[Ss]ection)\s+\d+(?:\.\d+)*[A-Za-z]?)\s?\1(?!\w|\.\d)")
+
+
 def clean(s: str | None) -> str:
     if s is None:
         return ""
-    return _WS.sub(" ", s.translate(_QUOTES)).strip()
+    return _DOUBLED_LINK.sub(r"\1", _WS.sub(" ", s.translate(_QUOTES)).strip())
 
 
 def norm_text(s: str) -> str:
@@ -136,6 +140,23 @@ def classify_table(header: list[str], caption: str) -> str:
     if "command dword" in cap and (first.startswith("bit") or "bit" in first):
         return "cdw"
     return "other"
+
+
+def compact_table(header: list[str], rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
+    """Undo merged-cell padding from PDF table extraction.
+
+    One logical column often arrives as several physical ones, the extras empty in every data row.  Such columns are
+    dropped; the header is compacted separately (its cells sit over the merged span, not over the data) and padded to
+    the new width.  A table with no always-empty column is returned unchanged, so genuinely blank cells stay put.
+    """
+    width = max([len(header), *(len(r) for r in rows)] or [0])
+    pad = lambda r: [*r, *[""] * (width - len(r))]  # noqa: E731
+    keep = [i for i in range(width) if any(clean(pad(r)[i]) for r in rows)]
+    if not rows or len(keep) == width:
+        return header, rows
+    data = [[pad(r)[i] for i in keep] for r in rows]
+    head = [h for h in header if clean(h)]
+    return (head + [""] * (len(keep) - len(head)))[:max(len(keep), 0)] if len(head) <= len(keep) else head[:len(keep)], data
 
 
 def find_col(header: list[str], *needles: str) -> int | None:
