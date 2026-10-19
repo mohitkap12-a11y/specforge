@@ -54,7 +54,7 @@ export const api = {
   deleteSet: (id: number) => req("DELETE", `/api/sets/${id}`),
   references: (id: number, state?: string) => req<{ summary: Record<string, number>; references: RefResult[] }>("GET", `/api/sets/${id}/references${qs({ state })}`),
   chooseRef: (id: number, src_key: string, raw: string, chosen_key: string) => req("POST", `/api/sets/${id}/references/choose`, { src_key, raw, chosen_key }),
-  catalog: (id: number, f: { kind?: string; command?: string; observability?: string; family?: string; q?: string; offset?: number; limit?: number }) =>
+  catalog: (id: number, f: { kind?: string; command?: string; observability?: string; family?: string; version?: string; q?: string; offset?: number; limit?: number }) =>
     req<{ total: number; items: CatalogItem[] }>("GET", `/api/sets/${id}/catalog${qs(f)}`),
   override: (id: number, key: string, observability: string | null, na_reason: string | null) =>
     req("PUT", `/api/sets/${id}/catalog/override`, { key, observability, na_reason }),
@@ -73,7 +73,7 @@ export const api = {
   patchScenario: (id: number, b: Record<string, unknown>) => req<{ ok: boolean; state: string }>("PATCH", `/api/scenarios/${id}`, b),
   bulkScenarios: (ids: number[], state: string) => req<{ ok: boolean; updated: number[]; refused: { id: number; errors: string[] }[] }>("POST", "/api/scenarios/bulk", { ids, state }),
   validate: (set_id: number, predicate: unknown) => req<{ errors: string[] }>("POST", "/api/scenarios/validate", { set_id, predicate }),
-  sections: (set: number, f: { q?: string; family?: string; offset?: number; limit?: number }) => req<{ total: number; sections: SectionRow[]; specs: SpecInSet[] }>("GET", `/api/sets/${set}/sections${qs(f)}`),
+  sections: (set: number, f: { q?: string; family?: string; version?: string; offset?: number; limit?: number }) => req<{ total: number; sections: SectionRow[]; specs: SpecInSet[] }>("GET", `/api/sets/${set}/sections${qs(f)}`),
   crossPlan: (set: number, b: CrossSelection) => req<{ units: CrossUnit[] }>("POST", `/api/sets/${set}/scenarios/cross/plan`, b),
   crossGenerate: (set: number, b: CrossSelection & { focus?: string; max_per_section?: number }) => req<{ job: number }>("POST", `/api/sets/${set}/scenarios/cross`, b),
 

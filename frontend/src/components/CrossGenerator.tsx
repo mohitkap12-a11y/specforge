@@ -12,16 +12,16 @@ const PAGE = 60;
 
 function Picker({ title, hint, picked, setPicked, specs, search }: {
   title: string; hint: string; picked: Picked; setPicked: (p: Picked) => void; specs: SpecInSet[];
-  search: (q: string, family: string, limit: number, offset: number) => Promise<{ rows: Row[]; total: number }>;
+  search: (q: string, spec: { family?: string; version?: string }, limit: number, offset: number) => Promise<{ rows: Row[]; total: number }>;
 }) {
   const [q, setQ] = useState("");
-  const [family, setFamily] = useState("");
+  const [spec, setSpec] = useState("");          // "family@version", unambiguous when a set holds two revisions of a family
   const dq = useDebounced(q);
   // pages are fetched by offset and appended, so a set larger than the endpoints' row cap is still reachable
   const res = useInfiniteQuery({
-    queryKey: ["cross-pick", title, dq, family],
+    queryKey: ["cross-pick", title, dq, spec],
     initialPageParam: 0,
-    queryFn: ({ pageParam }) => search(dq, family, PAGE, pageParam),
+    queryFn: ({ pageParam }) => { const [family, version] = spec ? spec.split("@") : [undefined, undefined]; return search(dq, { family, version }, PAGE, pageParam); },
     getNextPageParam: (last, all) => { const seen = all.reduce((n, p) => n + p.rows.length, 0); return seen < last.total && last.rows.length > 0 ? seen : undefined; },
     staleTime: 30_000,
   });
@@ -36,9 +36,9 @@ function Picker({ title, hint, picked, setPicked, specs, search }: {
       <div className="row" style={{ margin: "6px 0", gap: 6 }}>
         <input className="grow" placeholder={`Search ${title.toLowerCase()}…`} value={q} onChange={(e) => setQ(e.target.value)} aria-label={`Search ${title}`} />
         {specs.length > 1 && (
-          <select value={family} onChange={(e) => setFamily(e.target.value)} aria-label={`${title}: spec`}>
+          <select value={spec} onChange={(e) => setSpec(e.target.value)} aria-label={`${title}: spec`}>
             <option value="">All specs</option>
-            {specs.map((s) => <option key={s.family} value={s.family}>{s.family} {s.version}</option>)}
+            {specs.map((s) => <option key={`${s.family}@${s.version}`} value={`${s.family}@${s.version}`}>{s.family} {s.version}</option>)}
           </select>
         )}
       </div>
@@ -90,9 +90,9 @@ export default function CrossGenerator({ setId }: { setId: number }) {
       </p>
       <div className="row" style={{ alignItems: "flex-start", gap: 16, flexWrap: "wrap" }}>
         <Picker title="Commands" hint="select several (up to 24): they are tested together; each uses its own section" picked={commands} setPicked={setCommands} specs={specs}
-          search={async (q, family, limit, offset) => { const r = await api.catalog(setId, { kind: "command", q, family, limit, offset }); return { total: r.total, rows: r.items.map((i) => ({ key: i.key, label: i.label, sub: i.attrs.family })) }; }} />
+          search={async (q, { family, version }, limit, offset) => { const r = await api.catalog(setId, { kind: "command", q, family, version, limit, offset }); return { total: r.total, rows: r.items.map((i) => ({ key: i.key, label: i.label, sub: `${i.attrs.family} ${i.attrs.version}` })) }; }} />
         <Picker title="Sections" hint="any section of any spec in the set" picked={sections} setPicked={setSections} specs={specs}
-          search={async (q, family, limit, offset) => { const r = await api.sections(setId, { q, family, limit, offset }); return { total: r.total, rows: r.sections.map((s) => ({ key: s.key, label: `§${s.number} ${s.title}`, sub: `${s.family} ${s.version}` })) }; }} />
+          search={async (q, { family, version }, limit, offset) => { const r = await api.sections(setId, { q, family, version, limit, offset }); return { total: r.total, rows: r.sections.map((s) => ({ key: s.key, label: `§${s.number} ${s.title}`, sub: `${s.family} ${s.version}` })) }; }} />
       </div>
       <div className="row" style={{ margin: "12px 0", gap: 12, flexWrap: "wrap" }}>
         <input className="grow" placeholder="Optional focus, e.g. “resource creation and deletion order”" value={focus} onChange={(e) => setFocus(e.target.value)} aria-label="Focus" />

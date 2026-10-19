@@ -346,11 +346,14 @@ def create_app() -> FastAPI:
 
     @app.get("/api/sets/{set_id}/catalog")
     def get_catalog(set_id: int, kind: str | None = None, command: str | None = None, q: str | None = None,
-                    observability: str | None = None, family: str | None = None, limit: int = 500, offset: int = 0):
+                    observability: str | None = None, family: str | None = None, version: str | None = None, limit: int = 500, offset: int = 0):
         sql, args = "SELECT * FROM catalog_item WHERE set_id=?", [set_id]
         if family:          # commands and requirements carry the spec family they came from
             sql += " AND json_extract(attrs_json, '$.family')=?"
             args.append(family)
+        if version:         # a set may hold several revisions of one family
+            sql += " AND json_extract(attrs_json, '$.version')=?"
+            args.append(version)
         for col, val in (("kind", kind), ("observability", observability)):
             if val:
                 sql += f" AND {col}=?"
@@ -506,9 +509,9 @@ def create_app() -> FastAPI:
         return out[0], out[1]
 
     @app.get("/api/sets/{set_id}/sections")
-    def sections(set_id: int, q: str | None = None, limit: int = 400, family: str | None = None, offset: int = 0):
+    def sections(set_id: int, q: str | None = None, limit: int = 400, family: str | None = None, offset: int = 0, version: str | None = None):
         try:
-            return crossgen.list_sections(conn(), set_id, q, min(max(limit, 1), 2000), family or None, max(offset, 0))
+            return crossgen.list_sections(conn(), set_id, q, min(max(limit, 1), 2000), family or None, max(offset, 0), version or None)
         except ValueError as e:
             raise HTTPException(409, str(e))
 

@@ -232,8 +232,8 @@ def _section_block(ix: _Index, key: str, limit: int, with_tables: bool = True) -
 # ----------------------------------------------------------------------------- planning
 
 def list_sections(conn: sqlite3.Connection, set_id: int, q: str | None = None, limit: int = 400, family: str | None = None,
-                  offset: int = 0) -> dict[str, Any]:
-    """Sections of the set's documents for the picker, optionally of one spec family and paged; `commands` are the catalog commands
+                  offset: int = 0, version: str | None = None) -> dict[str, Any]:
+    """Sections of the set's documents for the picker, optionally of one spec (family, and version when a set holds several revisions) and paged; `commands` are the catalog commands
     defined inside each section and `specs` lists every document of the set (so a picker can offer a per-spec filter)."""
     ix = _Index(load_set_irs(conn, set_id))
     cmd_sec = {}
@@ -244,7 +244,7 @@ def list_sections(conn: sqlite3.Connection, set_id: int, q: str | None = None, l
     out = []
     needle = (q or "").lower()
     for ir in ix.irs:
-        if family and ir["family"] != family:
+        if (family and ir["family"] != family) or (version and ir["version"] != version):
             continue
         for n in ir["section_order"]:
             s = ir["sections"][n]

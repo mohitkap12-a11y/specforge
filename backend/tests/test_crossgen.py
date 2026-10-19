@@ -259,3 +259,42 @@ def test_an_oversized_selection_is_rejected_not_silently_truncated(conn, parsed_
     assert all(set(sel[:3]) <= set(u["commands"]) for u in units)
     with pytest.raises(ValueError, match="at most 3"):                          # commands of a selected section count too
         crossgen.build_units(conn, 1, command_keys=sel[:3], section_keys=[_sec(conn, "Get Log Page")])
+
+
+def test_two_revisions_of_one_family_can_be_told_apart(ws, tmp_path):
+    import time
+
+    from specforge.api.app import create_app
+    from specforge.devtools.synth import base_spec, write_pdf
+
+    def blocks(rev):
+        return [("title", "NVM Express® Base Specification", f"Revision {rev}"), *base_spec()[1:]]
+
+    with TestClient(create_app()) as client:
+        ids = []
+        for rev in ("2.3", "2.4"):
+            p = tmp_path / f"base-{rev}.pdf"
+            write_pdf(p, blocks(rev), header=rev)
+            ids.append(client.post("/api/specs/upload", files=[("files", (p.name, p.read_bytes(), "application/pdf"))]).json()[0]["id"])
+
+        def wait(j):
+            for _ in range(600):
+                r = client.get(f"/api/jobs/{j}").json()
+                if r["state"] in ("done", "error", "failed"):
+                    return r
+                time.sleep(0.1)
+        for d in ids:
+            wait(client.post(f"/api/specs/{d}/parse").json()["job"])
+        sid = client.post("/api/sets", json={"name": "revs", "document_ids": ids}).json()["id"]
+        wait(client.post(f"/api/sets/{sid}/catalog/build").json()["job"])
+        both = client.get(f"/api/sets/{sid}/sections", params={"family": "nvme-base", "limit": 2000}).json()
+        assert {(s["family"], s["version"]) for s in both["specs"]} == {("nvme-base", "2.3"), ("nvme-base", "2.4")}
+        assert {s["version"] for s in both["sections"]} == {"2.3", "2.4"}               # family alone cannot tell the revisions apart
+        only = client.get(f"/api/sets/{sid}/sections", params={"family": "nvme-base", "version": "2.3", "limit": 2000}).json()
+        assert only["sections"] and {s["version"] for s in only["sections"]} == {"2.3"} and only["total"] < both["total"]
+        by_version = {v: client.get(f"/api/sets/{sid}/catalog", params={"kind": "command", "family": "nvme-base", "version": v, "limit": 2000}).json()
+                      for v in ("2.3", "2.4")}
+        allc = client.get(f"/api/sets/{sid}/catalog", params={"kind": "command", "family": "nvme-base", "limit": 2000}).json()
+        assert allc["total"] > 0 and by_version["2.3"]["total"] + by_version["2.4"]["total"] == allc["total"]      # the version filter partitions the family
+        for v, r in by_version.items():
+            assert {i["attrs"]["version"] for i in r["items"]} <= {v}                                             # (the catalog keeps one command per opcode across revisions)
