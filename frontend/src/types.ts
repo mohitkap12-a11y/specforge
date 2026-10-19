@@ -69,3 +69,4 @@ export interface CrossUnit {
   section_key: string; title: string; family: string; version: string; primary_chars: number; own_commands: string[]; commands: string[];
   related: { key: string; title: string; why: string; chars: number }[];
 }
+export interface SpecInSet { family: string; version: string; sections: number }
