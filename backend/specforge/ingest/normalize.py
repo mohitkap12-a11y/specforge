@@ -146,8 +146,8 @@ def compact_table(header: list[str], rows: list[list[str]]) -> tuple[list[str], 
     """Undo merged-cell padding from PDF table extraction.
 
     One logical column often arrives as several physical ones, the extras empty in every data row.  Such columns are
-    dropped; the header is compacted separately (its cells sit over the merged span, not over the data) and padded to
-    the new width.  A table with no always-empty column is returned unchanged, so genuinely blank cells stay put.
+    dropped.  A header with a heading over every kept column loses the same columns; otherwise (its cells sit over the merged
+    span, not over the data) it is compacted separately and padded to the new width.  A table with no always-empty column is returned unchanged, so genuinely blank cells stay put.
     """
     width = max([len(header), *(len(r) for r in rows)] or [0])
     pad = lambda r: [*r, *[""] * (width - len(r))]  # noqa: E731
@@ -155,8 +155,10 @@ def compact_table(header: list[str], rows: list[list[str]]) -> tuple[list[str], 
     if not rows or len(keep) == width:
         return header, rows
     data = [[pad(r)[i] for i in keep] for r in rows]
-    head = [h for h in header if clean(h)]
-    return (head + [""] * (len(keep) - len(head)))[:max(len(keep), 0)] if len(head) <= len(keep) else head[:len(keep)], data
+    if len(header) == width and all(clean(header[i]) for i in keep):
+        return [header[i] for i in keep], data         # every kept column has its own heading: drop the same columns
+    head = [h for h in header if clean(h)]              # header cells sit over merged spans: compact them on their own
+    return (head + [""] * (len(keep) - len(head)))[:len(keep)], data
 
 
 def find_col(header: list[str], *needles: str) -> int | None:
