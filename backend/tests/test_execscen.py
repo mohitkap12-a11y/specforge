@@ -278,3 +278,15 @@ def test_describe_rejects_ids_the_model_never_saw(conn, parsed_set, tmp_path, mo
     reply = json.dumps({"title": "t", "description": "d", "requirements": [{"id": "R1"}]})
     stats = execscen.describe_scenarios(conn, 1, src, LLMService(conn, settings(), Fake([reply])))
     assert stats["proposed"] == 0 and stats["dropped_ids"] == 1
+
+
+def test_a_script_group_never_merges_with_a_test_of_the_same_name(conn, parsed_set, tmp_path):
+    path = tmp_path / "x.db"
+    path.unlink(missing_ok=True)
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE commands(id INTEGER PRIMARY KEY, test_name TEXT, script TEXT, seq INTEGER, interface TEXT, queue TEXT, sqe BLOB)")
+    con.executemany("INSERT INTO commands(test_name,script,seq,interface,queue,sqe) VALUES(?,?,?,'pcie','admin',?)",
+                    [(None, "t", 1, IDENT(0)[1]), ("t", "other.py", 1, IDENT(1)[1])])
+    con.commit(); con.close()
+    src = load(conn, str(path))
+    assert execscen.analyze_execution(conn, 1, src)["tests"] == 2

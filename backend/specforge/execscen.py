@@ -241,8 +241,11 @@ def _description(n_tests: int, commands: int, steps: list[dict], truncated: bool
 
 # ----------------------------------------------------------------------------- analysis
 
-def _group_of(r: dict) -> str:
-    return r["test_id"] or r["script"] or "(all commands)"
+def _group_of(r: dict) -> tuple[str, str]:
+    """(kind, name): a test named 't' and a script named 't' in rows without a test name are different groups."""
+    if r["test_id"]:
+        return "test", r["test_id"]
+    return ("script", r["script"]) if r["script"] else ("all", "(all commands)")
 
 
 def analyze_execution(conn: sqlite3.Connection, set_id: int, source_id: int, progress=None) -> dict[str, Any]:
@@ -296,7 +299,7 @@ def analyze_execution(conn: sqlite3.Connection, set_id: int, source_id: int, pro
         g = _group_of(r)
         if g != cur_test:
             if t is not None:
-                finish(cur_test, t)
+                finish(cur_test[1], t)
             cur_test = g
             t = {"steps": [], "last": None, "open": False, "hash": hashlib.sha1(), "truncated": False, "n_steps": 0, "commands": 0,
                  "items": {}, "evidence": []}
@@ -324,7 +327,7 @@ def analyze_execution(conn: sqlite3.Connection, set_id: int, source_id: int, pro
         if t["open"]:
             _add_to_step(t["steps"][-1], d)
     if t is not None:
-        finish(cur_test, t)
+        finish(cur_test[1], t)
 
     res = _store(conn, set_id, source_id, cat, flows)
     by_kind: dict[str, int] = defaultdict(int)
