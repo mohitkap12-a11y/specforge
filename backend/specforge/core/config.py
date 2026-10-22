@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-PARSER_VERSION = "2"  # bump when parsing output changes; flags existing runs as "reparse available"
+PARSER_VERSION = "3"  # bump when parsing output changes; flags existing runs as "reparse available"
 CATALOG_VERSION = "2"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
