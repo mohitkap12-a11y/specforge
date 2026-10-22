@@ -46,7 +46,7 @@ export interface ScenarioLink {
 }
 export interface ExecAnalysis {
   source_id: number; created: string; tests: number; commands: number; unknown_commands: number; scenarios: number;
-  new?: number; updated?: number; removed?: number;
+  new?: number; updated?: number; removed?: number; links_reopened?: number;
   observed: Record<string, { observed: number; total: number }>;
   unknown: { interface: string; queue: string; opcode: number; commands: number }[];
 }

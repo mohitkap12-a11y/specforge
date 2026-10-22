@@ -369,7 +369,7 @@ def _observability(cat: _Catalog, items: dict[str, int]) -> str:
 def _store(conn: sqlite3.Connection, set_id: int, source_id: int, cat: _Catalog, flows: dict[str, dict]) -> dict[str, int]:
     old = {r["sid"]: r for r in rows(conn, "SELECT id,sid,title,description,provenance_json FROM scenario WHERE set_id=? AND origin='exec' AND source_id=?",
                                      (set_id, source_id))}
-    new = updated = 0
+    new = updated = reopened = 0
     keep = set()
     for fp, f in flows.items():
         sid = f"exec:{source_id}:{fp}"
@@ -397,6 +397,11 @@ def _store(conn: sqlite3.Connection, set_id: int, source_id: int, cat: _Catalog,
             described = "ai" in prov or "edited" in prov
             conn.execute("UPDATE scenario SET title=?, description=?, observability=?, predicate_json=?, provenance_json=? WHERE id=?",
                          (o["title"] if described else title, o["description"] if described else desc, obs, json.dumps(pred), json.dumps(prov), scen_id))
+            before = {r[0] for r in conn.execute("SELECT item_key FROM scenario_item WHERE scenario_id=? AND state='observed'", (scen_id,))}
+            if before - set(f["items"]):
+                # the flow is the same but no longer exercises everything it did (other numeric values): approved requirement links were
+                # judged against the old evidence, so they go back to review. A flow that only gains items keeps its reviews.
+                reopened += conn.execute("UPDATE scenario_item SET state='proposed' WHERE scenario_id=? AND state='approved'", (scen_id,)).rowcount
             conn.execute("DELETE FROM scenario_item WHERE scenario_id=? AND state='observed'", (scen_id,))
             updated += 1
         conn.executemany("INSERT OR REPLACE INTO scenario_item(scenario_id,item_key,state,detail_json) VALUES(?,?,'observed',?)",
@@ -404,7 +409,7 @@ def _store(conn: sqlite3.Connection, set_id: int, source_id: int, cat: _Catalog,
     gone = [o["id"] for s, o in old.items() if s not in keep]
     conn.executemany("DELETE FROM scenario WHERE id=?", [(i,) for i in gone])
     conn.commit()
-    return {"new": new, "updated": updated, "removed": len(gone)}
+    return {"new": new, "updated": updated, "removed": len(gone), "links_reopened": reopened}
 
 
 def analysis(conn: sqlite3.Connection, set_id: int, source_id: int) -> dict | None:

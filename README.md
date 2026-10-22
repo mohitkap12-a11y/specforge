@@ -126,7 +126,7 @@ Mapping values are a column name or `{"const": "..."}`. Set `cs` (command set, d
 * tests whose steps are the same (same commands, same enumerated values, same order) are **one scenario** listing all of them;
 * the catalog items the scenario exercised are linked as *observed*: commands, values, min/max boundaries, reserved bits set to non-zero, Admin commands tunnelled over NVMe-MI. They count toward coverage as they are.
 
-Re-analysing keeps a flow's id, its AI or edited description and the review of its requirement links. Every coverage run re-analyses first, so results always match the current catalog and dump.
+Re-analysing keeps a flow's id, its AI or edited description and the review of its requirement links; if the flow no longer exercises everything it did (other numeric values), its approved requirement links go back to *proposed*. Every coverage run re-analyses first, so results always match the current catalog and dump.
 
 Requirements cannot be seen in a log of submissions. `POST /api/sets/{id}/exec/describe` (UI: *Describe with AI*) asks the model for a readable title / description per flow and which of the observable requirements of its commands the flow exercises. Those links are *proposed*; they count only after approval (`PUT /api/scenarios/{id}/links`, or in bulk `POST /api/scenarios/links/bulk`). In a coverage run an item is *covered* when a test exercised it, *not covered* when the analysed tests never did, *needs review* when only proposed links exist.
 
@@ -145,7 +145,7 @@ Requirements cannot be seen in a log of submissions. `POST /api/sets/{id}/exec/d
 ## Tests and CI
 
 ```bash
-make test     # 227 tests, ~2.5 min
+make test     # 228 tests, ~2.5 min
 make lint
 ```
 

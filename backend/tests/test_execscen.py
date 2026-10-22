@@ -290,3 +290,21 @@ def test_a_script_group_never_merges_with_a_test_of_the_same_name(conn, parsed_s
     con.commit(); con.close()
     src = load(conn, str(path))
     assert execscen.analyze_execution(conn, 1, src)["tests"] == 2
+
+
+def test_approved_links_return_to_review_when_a_flow_loses_evidence(conn, parsed_set, tmp_path):
+    path = make_db(tmp_path / "x.db", {"t": [READ(0, 0xFFFF)]})            # NLB at its maximum
+    src = load(conn, path)
+    execscen.analyze_execution(conn, 1, src)
+    sid = exec_scen(conn, src)[0]["id"]
+    conn.execute("INSERT INTO scenario_item(scenario_id,item_key,state) VALUES(?, 'req:x', 'approved')", (sid,))
+    conn.commit()
+    make_db(tmp_path / "x.db", {"t": [READ(0, 0xFFFF)], "u": [READ(8, 7)]})     # more tests, same flow: only gains items
+    cmddb.import_source(conn, src)
+    assert execscen.analyze_execution(conn, 1, src)["links_reopened"] == 0
+    assert exec_scen(conn, src)[0]["links"]["req:x"] == "approved"
+    make_db(tmp_path / "x.db", {"t": [READ(0, 7)]})                          # same flow, the maximum is no longer exercised
+    cmddb.import_source(conn, src)
+    res = execscen.analyze_execution(conn, 1, src)
+    s = exec_scen(conn, src)[0]
+    assert s["id"] == sid and res["links_reopened"] == 1 and s["links"]["req:x"] == "proposed"

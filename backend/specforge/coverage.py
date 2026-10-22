@@ -270,7 +270,7 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
                        by_key[k]["attrs_json"]) for k, v in item_res.items()])
     summary = summarize_run(conn, run_id, set_id, source_id, items, item_res, sigs_by)
     if execution is not None:
-        summary["execution"] = {k: v for k, v in execution.items() if k not in ("new", "updated", "removed")}
+        summary["execution"] = {k: v for k, v in execution.items() if k not in ("new", "updated", "removed", "links_reopened")}
     conn.execute("UPDATE coverage_run SET summary_json=? WHERE id=?", (json.dumps(summary), run_id))
     conn.commit()
     o = summary["overall"]
