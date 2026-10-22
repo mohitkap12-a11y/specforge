@@ -453,8 +453,8 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
                 is_cont = False
                 hdr, body = _split_header(rows)
                 if last_table is not None and nested_parent is None:
-                    same_cols = len(hdr) == len(last_table.header) if rows and last_table.header else False
-                    hdr_repeat = same_cols and _same_header(hdr, last_table.header)
+                    same_cols = len(rows[0]) == len(last_table.header) if rows and last_table.header else False
+                    hdr_repeat = same_cols and _header_lines(rows, last_table.header) > 0
                     if cap is not None and cap["cont"] and cap["label"] == last_table.label.split("#")[0]:
                         is_cont = True
                     elif cap is not None and hdr_repeat and last_table_page == pg - 1 and cap["label"] == last_table.label.split("#")[0] \
@@ -545,26 +545,38 @@ def _same_header(a: list[str], b: list[str]) -> bool:
     return [norm_title(c) for c in a] == [norm_title(c) for c in b]
 
 
+def _join_lines(lines: list[list[str]]) -> list[str]:
+    header = list(lines[0])
+    for r in lines[1:]:
+        header = [clean(f"{h} {r[j]}") if j < len(r) else h for j, h in enumerate(header)]
+    return header
+
+
 def _split_header(rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
     """(header, body). A heading wrapped over several lines arrives as the first row plus short rows with an empty first cell
     (before any row that has a key); those lines belong to the header, joined column by column."""
     if not rows:
         return [], []
-    header = list(rows[0])
     n = 1
-    while (n < len(rows) and n <= MAX_HEADER_LINES and header[0].strip() and not rows[n][0].strip()
+    while (n < len(rows) and n < MAX_HEADER_LINES and rows[0][0].strip() and not rows[n][0].strip()
            and any(c.strip() for c in rows[n]) and all(len(c) <= MAX_HEADER_CELL for c in rows[n])):
         n += 1
-    for r in rows[1:n]:
-        header = [clean(f"{h} {r[j]}") if j < len(r) else h for j, h in enumerate(header)]
-    return header, rows[n:]
+    return _join_lines(rows[:n]), rows[n:]
+
+
+def _header_lines(rows: list[list[str]], header: list[str]) -> int:
+    """How many leading rows are a repeat of `header` (0 if none). Tried line by line, because a fragment of the row that
+    was split across the page break can follow the repeated heading."""
+    for k in range(1, min(len(rows), MAX_HEADER_LINES) + 1):
+        if _same_header(_join_lines(rows[:k]), header):
+            return k
+    return 0
 
 
 def _merge_continuation(prev: Table, rows: list[list[str]], page: int) -> None:
     if not rows:
         return
-    header, split = _split_header(rows)
-    body = split if prev.header and _same_header(header, prev.header) else rows
+    body = rows[_header_lines(rows, prev.header):] if prev.header else rows
     if body and prev.rows and not body[0][0].strip() and any(c.strip() for c in body[0][1:]):
         # row split across the page break: first cell empty -> glue onto the previous row
         last = prev.rows[-1]

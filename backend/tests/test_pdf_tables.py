@@ -28,3 +28,16 @@ def test_the_repeated_wrapped_heading_of_a_continuation_page_is_dropped():
     t = Table(label="466", caption="Set Features", header=first_header, rows=first_body, page_from=1, page_to=1)
     _merge_continuation(t, [HEAD, *WRAP, ["04h", "No", "", "", "Controller"]], 2)
     assert [r[0] for r in t.rows] == ["00h", "04h"] and t.page_to == 2
+
+
+def test_a_heading_is_limited_to_the_configured_number_of_lines():
+    rows = [["Name", "Info"], *[["", f"line {i}"] for i in range(1, 7)]]
+    header, body = _split_header(rows)
+    assert header[1] == "Info line 1 line 2 line 3 line 4" and len(body) == 2
+
+
+def test_a_row_fragment_after_the_repeated_heading_is_glued_to_the_previous_row():
+    first_header, first_body = _split_header([HEAD, *WRAP, ["00h", "Reserved", "", "", "Contr"]])
+    t = Table(label="466", caption="Set Features", header=first_header, rows=first_body, page_from=1, page_to=1)
+    _merge_continuation(t, [HEAD, *WRAP, ["", "", "", "", "oller"], ["04h", "No", "", "", "Controller"]], 2)
+    assert [r[0] for r in t.rows] == ["00h", "04h"] and t.rows[0][4] == "Contr oller"
