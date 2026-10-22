@@ -309,6 +309,7 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
     cur = front
     last_table: Table | None = None
     last_table_page = 0
+    last_table_kind = ""        # 'Figure' / 'Table' of the caption the last table was bound to
     carry_caption: dict | None = None  # caption left at a page bottom whose table starts on the next page
     last_table_end = (0.0, 1.0)         # (y1 of the last table segment, page height): continued tables run to the page bottom
     table_count_on_page: Counter = Counter()
@@ -458,7 +459,7 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
                     if cap is not None and cap["cont"] and cap["label"] == last_table.label.split("#")[0]:
                         is_cont = True
                     elif cap is not None and hdr_repeat and last_table_page == pg - 1 and cap["label"] == last_table.label.split("#")[0] \
-                            and norm_title(cap["title"]) == norm_title(last_table.caption):
+                            and cap["kind"] == last_table_kind and norm_title(cap["title"]) == norm_title(last_table.caption):
                         is_cont = True      # the caption is repeated on the next page without saying "continued"
                     elif cap is None and last_table_page == pg - 1 and not seen_body_on_page and same_cols and \
                             (hdr_repeat or last_table_end[0] >= 0.75 * last_table_end[1]):
@@ -499,6 +500,7 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
                 tinfo[k]["label"] = lbl
                 if nested_parent is None:
                     last_table, last_table_page = tb, pg
+                    last_table_kind = cap["kind"] if cap is not None else ""
                     last_table_end = (t["bbox"][3], p["height"])
                 seen_body_on_page = True
         if pending_caption is not None:
@@ -548,8 +550,13 @@ def _same_header(a: list[str], b: list[str]) -> bool:
 def _join_lines(lines: list[list[str]]) -> list[str]:
     header = list(lines[0])
     for r in lines[1:]:
+        header += [""] * (len(r) - len(header))
         header = [clean(f"{h} {r[j]}") if j < len(r) else h for j, h in enumerate(header)]
     return header
+
+
+def _key(row: list[str]) -> str:
+    return row[0].strip() if row else ""
 
 
 def _split_header(rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
@@ -558,7 +565,7 @@ def _split_header(rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
     if not rows:
         return [], []
     n = 1
-    while (n < len(rows) and n < MAX_HEADER_LINES and rows[0][0].strip() and not rows[n][0].strip()
+    while (n < len(rows) and n < MAX_HEADER_LINES and _key(rows[0]) and not _key(rows[n])
            and any(c.strip() for c in rows[n]) and all(len(c) <= MAX_HEADER_CELL for c in rows[n])):
         n += 1
     return _join_lines(rows[:n]), rows[n:]
@@ -577,7 +584,7 @@ def _merge_continuation(prev: Table, rows: list[list[str]], page: int) -> None:
     if not rows:
         return
     body = rows[_header_lines(rows, prev.header):] if prev.header else rows
-    if body and prev.rows and not body[0][0].strip() and any(c.strip() for c in body[0][1:]):
+    if body and prev.rows and not _key(body[0]) and any(c.strip() for c in body[0][1:]):
         # row split across the page break: first cell empty -> glue onto the previous row
         last = prev.rows[-1]
         for j, c in enumerate(body[0]):
