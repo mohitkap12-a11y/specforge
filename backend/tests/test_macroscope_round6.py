@@ -56,7 +56,7 @@ def test_report_and_evidence_come_from_the_run_not_from_live_tables(ws, conn, pa
                  "VALUES(1,'D:1','ai','requirement','a draft','submission','{}','draft')")
     conn.commit()
     src = cmddb.register_source(conn, str(demo_dir / "cmds-a.db")); cmddb.import_source(conn, src)
-    run = coverage.run_coverage(conn, 1, src)
+    run = coverage.run_coverage(conn, 1, src, analyze=False)      # spec-driven scenarios only (executed ones: test_execscen.py)
     before = reports.build_dataset(conn, run)
     # now change everything the report used to read live
     conn.execute("UPDATE scenario SET title='CHANGED', state='rejected', predicate_json='{}'")

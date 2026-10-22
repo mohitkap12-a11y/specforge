@@ -13,7 +13,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import __version__, catalog, cmddb, coverage, crossgen, eventlog, jobs, refs, reports, scenarios
+from .. import __version__, catalog, cmddb, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
 from ..crossgen import generate_cross_scenarios
 from ..core import config
 from ..core.db import get_conn, jloads, row, rows
@@ -23,6 +23,8 @@ from ..llm.service import LLMService, make_provider
 
 
 SCENARIO_STATES = {"draft", "approved", "rejected"}
+LINK_STATES = {"proposed", "approved", "rejected"}
+EXEC_READONLY = "executed scenarios are read from the command DB: they have no review state and their steps cannot be edited; review their requirement links instead"
 OBSERVABILITY = {"submission", "stimulus", "unobservable"}
 
 
@@ -267,6 +269,10 @@ def create_app() -> FastAPI:
             s["scenarios"] = conn().execute("SELECT COUNT(*) FROM scenario WHERE set_id=?", (s["id"],)).fetchone()[0]
             s["scenarios_approved"] = conn().execute("SELECT COUNT(*) FROM scenario WHERE set_id=? AND state='approved'", (s["id"],)).fetchone()[0]
             s["scenarios_draft"] = conn().execute("SELECT COUNT(*) FROM scenario WHERE set_id=? AND state='draft'", (s["id"],)).fetchone()[0]
+            s["scenarios_executed"] = conn().execute("SELECT COUNT(*) FROM scenario WHERE set_id=? AND origin='exec'", (s["id"],)).fetchone()[0]
+            s["links_proposed"] = conn().execute("SELECT COUNT(*) FROM scenario_item si JOIN scenario c ON c.id=si.scenario_id "
+                                                 "WHERE c.set_id=? AND si.state='proposed'", (s["id"],)).fetchone()[0]
+            s["analyses"] = conn().execute("SELECT COUNT(*) FROM exec_analysis WHERE set_id=?", (s["id"],)).fetchone()[0]
         return out
 
     @app.post("/api/sets")
@@ -386,14 +392,18 @@ def create_app() -> FastAPI:
 
     @app.get("/api/sets/{set_id}/scenarios")
     def list_scenarios(set_id: int, origin: str | None = None, state: str | None = None, q: str | None = None,
-                       item: str | None = None, limit: int = 500, offset: int = 0):
+                       item: str | None = None, source_id: int | None = None, links: str | None = None, limit: int = 500, offset: int = 0):
         sql, args = "SELECT s.* FROM scenario s WHERE s.set_id=?", [set_id]
         if origin:
             sql += " AND s.origin=?"; args.append(origin)
+        if source_id is not None:
+            sql += " AND s.source_id=?"; args.append(source_id)
+        if links:          # executed scenarios with requirement links in this review state
+            sql += " AND s.id IN (SELECT scenario_id FROM scenario_item WHERE state=?)"; args.append(links)
         if state:
             sql += " AND s.state=?"; args.append(state)
-        if q:
-            sql += " AND (s.title LIKE ? OR s.sid LIKE ?)"; args += [f"%{q}%"] * 2
+        if q:      # an executed scenario is also found by any of its tests or commands
+            sql += " AND (s.title LIKE ? OR s.sid LIKE ? OR (s.origin='exec' AND s.predicate_json LIKE ?))"; args += [f"%{q}%"] * 3
         if item:
             sql += " AND s.id IN (SELECT scenario_id FROM scenario_item WHERE item_key=?)"; args.append(item)
         total = conn().execute(sql.replace("SELECT s.*", "SELECT COUNT(*)"), args).fetchone()[0]
@@ -401,14 +411,68 @@ def create_app() -> FastAPI:
         for s in out:
             s["predicate"] = jloads(s.pop("predicate_json"))
             s["provenance"] = jloads(s.pop("provenance_json"), {})
-            s["items"] = [r[0] for r in conn().execute("SELECT item_key FROM scenario_item WHERE scenario_id=?", (s["id"],))]
+            lk = conn().execute("SELECT item_key,state FROM scenario_item WHERE scenario_id=?", (s["id"],)).fetchall()
+            s["items"] = [r[0] for r in lk]
+            s["link_counts"] = {}
+            for r in lk:
+                if r[1]:
+                    s["link_counts"][r[1]] = s["link_counts"].get(r[1], 0) + 1
         return {"total": total, "scenarios": out}
+
+    @app.get("/api/scenarios/{sid}/links")
+    def scenario_links(sid: int):
+        try:
+            return execscen.links(conn(), sid)
+        except KeyError:
+            raise HTTPException(404)
+
+    @app.put("/api/scenarios/{sid}/links")
+    def review_link(sid: int, body: dict = Body(...)):
+        need(body, "item_key", "state")
+        if not (isinstance(body["item_key"], str) and isinstance(body["state"], str) and body["state"] in LINK_STATES):
+            raise HTTPException(422, f"item_key must be a string and state one of {sorted(LINK_STATES)}")
+        try:
+            execscen.set_link(conn(), sid, body["item_key"], body["state"])
+        except KeyError:
+            raise HTTPException(404, "no such link")
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        audit(f"Requirement link {body['item_key']} of scenario #{sid} set to {body['state']}", scenario_id=sid, item_key=body["item_key"], state=body["state"])
+        return {"ok": True}
+
+    @app.post("/api/scenarios/links/bulk")
+    def review_links_bulk(body: dict = Body(...)):
+        """Set every requirement link of the given executed scenarios that is in state `from` (default 'proposed') to `state`."""
+        need(body, "ids", "state")
+        ids, new_state, frm = body["ids"], body["state"], body.get("from", "proposed")
+        if not isinstance(ids, list) or any(not isinstance(i, int) or isinstance(i, bool) for i in ids):
+            raise HTTPException(422, "ids must be a list of integers")
+        if not (isinstance(new_state, str) and new_state in LINK_STATES and isinstance(frm, str) and frm in LINK_STATES):
+            raise HTTPException(422, f"state and from must be one of {sorted(LINK_STATES)}")
+        c = conn()
+        n = 0
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            n += c.execute(f"UPDATE scenario_item SET state=? WHERE state=? AND scenario_id IN ({','.join('?' * len(part))})", [new_state, frm, *part]).rowcount
+        c.commit()
+        audit(f"Bulk link review: {n} requirement link(s) {frm} \u2192 {new_state}", scenarios=len(ids), links=n, state=new_state)
+        return {"ok": True, "updated": n}
 
     @app.patch("/api/scenarios/{sid}")
     def patch_scenario(sid: int, body: dict = Body(...)):
         s = row(conn(), "SELECT * FROM scenario WHERE id=?", (sid,))
         if not s:
             raise HTTPException(404)
+        if s["origin"] == "exec":
+            if set(body) - {"title", "description"}:
+                raise HTTPException(422, EXEC_READONLY)
+            if any(not isinstance(body[k], str) for k in body):
+                raise HTTPException(422, "title and description must be strings")
+            prov = {**jloads(s["provenance_json"], {}), "edited": True}         # kept when the command DB is analysed again
+            upd = {**body, "provenance_json": json.dumps(prov)}
+            conn().execute(f"UPDATE scenario SET {', '.join(k + '=?' for k in upd)} WHERE id=?", [*upd.values(), sid])
+            conn().commit()
+            return {"ok": True, "state": s["state"]}
         # ---- validate everything first; nothing is written until the whole request is known to be good
         for col in ("title", "description"):
             if col in body and not isinstance(body[col], str):
@@ -471,6 +535,9 @@ def create_app() -> FastAPI:
             s = row(conn(), "SELECT id,set_id,origin,predicate_json FROM scenario WHERE id=?", (sid,))
             if not s:
                 refused.append({"id": sid, "errors": ["scenario not found"]})
+                continue
+            if s["origin"] == "exec":
+                refused.append({"id": sid, "errors": [EXEC_READONLY]})
                 continue
             if new_state == "approved":     # same rule as PATCH: only valid predicates can be approved
                 if s["set_id"] not in ctx:
@@ -548,6 +615,56 @@ def create_app() -> FastAPI:
             return generate_cross_scenarios(c, set_id, LLMService(c, st), secs, cmds, focus, mx, progress=lambda a, b: prog("cross-command scenarios", a, b), passes=passes)
         audit(f"Cross-command scenario generation requested for set #{set_id}", set_id=set_id, sections=len(secs), commands=len(cmds), passes=passes, focus=focus or None)
         return {"job": jobs.submit(conn(), "cross-scenarios", work, {"set_id": set_id}, DB)}
+
+    # ------------------------------------------------------------------ executed scenarios (derived from a command DB)
+    def _exec_source(set_id: int, body: dict) -> int:
+        need(body, "source_id")
+        src = body["source_id"]
+        if not isinstance(src, int) or isinstance(src, bool):
+            raise HTTPException(422, "source_id must be an integer")
+        s = row(conn(), "SELECT status FROM cmd_source WHERE id=?", (src,))
+        if not s:
+            raise HTTPException(404, "command DB not found")
+        if s["status"] != "imported":
+            raise HTTPException(409, "import the command DB first")
+        if not row(conn(), "SELECT 1 AS x FROM catalog_item WHERE set_id=? LIMIT 1", (set_id,)):
+            raise HTTPException(409, "build the catalog of this spec set first")
+        return src
+
+    @app.get("/api/sets/{set_id}/exec")
+    def exec_analyses(set_id: int, source_id: int | None = None):
+        """The last analysis of each command DB against this set (or of one)."""
+        sql, args = "SELECT source_id FROM exec_analysis WHERE set_id=?", [set_id]
+        if source_id is not None:
+            sql += " AND source_id=?"; args.append(source_id)
+        return [{"source_id": r["source_id"], **(execscen.analysis(conn(), set_id, r["source_id"]) or {})} for r in rows(conn(), sql, args)]
+
+    @app.post("/api/sets/{set_id}/exec/analyze")
+    def exec_analyze(set_id: int, body: dict = Body(...)):
+        src = _exec_source(set_id, body)
+
+        def work(c, prog):
+            return execscen.analyze_execution(c, set_id, src, progress=lambda a, b: prog("analysing executed commands", a, b))
+        audit(f"Execution analysis requested (set #{set_id}, command DB #{src})", set_id=set_id, source_id=src)
+        return {"job": jobs.submit(conn(), "exec-analyze", work, {"set_id": set_id, "source_id": src}, DB)}
+
+    @app.post("/api/sets/{set_id}/exec/describe")
+    def exec_describe(set_id: int, body: dict = Body(...)):
+        src = _exec_source(set_id, body)
+        ids, redo = body.get("scenario_ids") or None, body.get("redo", False)
+        if ids is not None and (not isinstance(ids, list) or any(not isinstance(i, int) or isinstance(i, bool) for i in ids)):
+            raise HTTPException(422, "scenario_ids must be a list of integers")
+        if not isinstance(redo, bool):
+            raise HTTPException(422, "redo must be true or false")
+        if not row(conn(), "SELECT 1 AS x FROM scenario WHERE set_id=? AND origin='exec' AND source_id=? LIMIT 1", (set_id, src)):
+            raise HTTPException(409, "analyse the command DB first")
+        st = settings()
+
+        def work(c, prog):
+            return execscen.describe_scenarios(c, set_id, src, LLMService(c, st), ids, redo, progress=lambda a, b: prog("describing executed scenarios", a, b))
+        audit(f"AI description of executed scenarios requested (set #{set_id}, command DB #{src})", set_id=set_id, source_id=src,
+              scenarios=len(ids) if ids else "all undescribed" if not redo else "all")
+        return {"job": jobs.submit(conn(), "exec-describe", work, {"set_id": set_id, "source_id": src}, DB)}
 
     # ------------------------------------------------------------------ command DBs
     @app.get("/api/cmddb/suggest")

@@ -3,9 +3,12 @@
 ```
  spec PDF/DOCX ──► [L1 parse] ──► IR (versioned, stable keys) ──► audit ─┐
                                                                          ▼
- other spec versions ──► spec set ──► [L2 references] ──► [L3 catalog] ──► [L5 scenarios] ─┐
-                                                              (denominator)   AI cross-command drafts │
- command DB (SQLite) ──► [decode] ──► signatures ───────────────────────────────────────► [L6 coverage] ──► reports
+ other spec versions ──► spec set ──► [L2 references] ──► [L3 catalog] ─────────────┐ (denominator)
+                                                                                    ▼
+ command DB (SQLite) ──► [decode] ──► signatures + ordered rows ──► [L4 execution analysis] ──► executed scenarios ─┐
+                                                                    (one per test case, observed links;           │
+                                                                     AI: description + proposed requirement links)  ▼
+                                               [L5 gap suggestions: AI cross-command drafts] ─────────────► [L6 coverage] ──► reports
 ```
 
 Every layer has its own cache key and can be re-run alone.
@@ -17,7 +20,8 @@ Every layer has its own cache key and can be re-run alone.
 | L3 catalog | `catalog.py` | IR + refs | items: command, field, value, reserved, boundary, mi_tunnel, requirement | yes |
 | L5 scenarios | `scenarios.py`, `crossgen.py`, `ai.py` | catalog | predicates (AI drafts per section) | AI cached |
 | decode | `cmddb.py` | SQLite dump + mapping | signatures + ordered rows | yes |
-| L6 coverage | `coverage.py` | approved scenarios + signatures | item states + evidence | yes |
+| L4 execution | `execscen.py` | catalog + decoded rows | executed scenarios, observed links (+ AI descriptions, proposed links) | yes (AI part cached) |
+| L6 coverage | `coverage.py` | executed scenarios + reviewed links + approved suggestions + signatures | item states + evidence | yes |
 
 ## Parsing
 
@@ -37,7 +41,15 @@ Every layer has its own cache key and can be re-run alone.
 
 Command-level items come from opcode tables. Field tables are linked by caption (`Identify – Command Dword 10`, `... NMD0`) with section ancestry as fallback; value tables via the figure referenced in the field description. Each item is `submission` (checkable from the submitted entry), `stimulus` (only the triggering submission is visible) or `unobservable` (listed as N/A, excluded from the percentage). Reviewers can override with `PUT /api/sets/{id}/catalog/override`.
 
-## Cross-command scenarios (section-driven)
+## Executed scenarios (L4, the main flow)
+
+Scenarios describe what the test scripts actually did. Decoded rows are read per test case in submission order; each distinct signature is decoded once against the catalog (command key from interface / queue / command set / opcode; every described field read from its dword and bit range; CID and data pointers skipped). A run of consecutive commands of one command with equal enumerated / flag values is a step; numeric fields are summarised as min / max / distinct values. The flow identity is a hash of the step keys (command, enumerated values, reserved bits set, MI tunnelling), so tests that differ only in addresses, lengths or repeat counts merge into one scenario. Scenario ids derive from that hash (`exec:<source>:<hash>`), so re-analysis keeps descriptions and reviews.
+
+Links: `scenario_item.state` is `observed` for items read from the log (command, value, boundary, reserved, mi_tunnel, and the field itself), `proposed` / `approved` / `rejected` for requirement links the AI suggested. Coverage counts observed and approved links; proposed links make an item `needs_review`; after an analysis, observable items no test exercised are `not_covered` (not `no_scenario`). Executed scenarios belong to their command DB: another DB's never count in a run.
+
+The AI describer sees the flow (steps, values with their meanings) and at most 40 observable requirements of the flow's commands, ranked by the fields it set; it may only cite those (ids are checked) and never changes a step or an observed link.
+
+## Gap suggestions: cross-command scenarios (section-driven)
 
 The tool's scenarios are cross-command: behaviour that needs several commands (set up, exercise, observe; create before use, release after). They are generated per selected command or section (`crossgen.py`, API `/api/sets/{id}/scenarios/cross`, UI Scenarios page), never for a whole spec in one go. Nothing in it is specific to one specification family: it works from the parsed structure, the reference graph and the catalog.
 

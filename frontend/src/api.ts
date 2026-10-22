@@ -1,4 +1,4 @@
-import type { LogEvent, CatalogItem, CmdSource, DecodedCommand, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { LogEvent, CatalogItem, CmdSource, DecodedCommand, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -68,8 +68,16 @@ export const api = {
     req<DecodedCommand[]>("GET", `/api/cmddb/${id}/commands${qs(f)}`),
   buildCatalog: (id: number) => req<{ job: number }>("POST", `/api/sets/${id}/catalog/build`),
 
-  scenarios: (set: number, f: { origin?: string; state?: string; q?: string; offset?: number; limit?: number }) =>
+  scenarios: (set: number, f: { origin?: string; state?: string; q?: string; source_id?: number; links?: string; offset?: number; limit?: number }) =>
     req<{ total: number; scenarios: Scenario[] }>("GET", `/api/sets/${set}/scenarios${qs(f)}`),
+  scenarioLinks: (id: number) => req<ScenarioLink[]>("GET", `/api/scenarios/${id}/links`),
+  reviewLink: (id: number, item_key: string, state: Exclude<LinkState, "observed">) => req<{ ok: boolean }>("PUT", `/api/scenarios/${id}/links`, { item_key, state }),
+  reviewLinksBulk: (ids: number[], state: Exclude<LinkState, "observed">, from: Exclude<LinkState, "observed"> = "proposed") =>
+    req<{ ok: boolean; updated: number }>("POST", "/api/scenarios/links/bulk", { ids, state, from }),
+  execAnalyses: (set: number, source_id?: number) => req<ExecAnalysis[]>("GET", `/api/sets/${set}/exec${qs({ source_id })}`),
+  execAnalyze: (set: number, source_id: number) => req<{ job: number }>("POST", `/api/sets/${set}/exec/analyze`, { source_id }),
+  execDescribe: (set: number, source_id: number, scenario_ids?: number[], redo = false) =>
+    req<{ job: number }>("POST", `/api/sets/${set}/exec/describe`, { source_id, scenario_ids, redo }),
   patchScenario: (id: number, b: Record<string, unknown>) => req<{ ok: boolean; state: string }>("PATCH", `/api/scenarios/${id}`, b),
   bulkScenarios: (ids: number[], state: string) => req<{ ok: boolean; updated: number[]; refused: { id: number; errors: string[] }[] }>("POST", "/api/scenarios/bulk", { ids, state }),
   validate: (set_id: number, predicate: unknown) => req<{ errors: string[] }>("POST", "/api/scenarios/validate", { set_id, predicate }),

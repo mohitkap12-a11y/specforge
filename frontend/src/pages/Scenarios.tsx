@@ -5,7 +5,8 @@ import { FlaskConical } from "lucide-react";
 import { Badge, Empty, ErrorNote, Loading, Pager, PageHeader } from "../components/ui";
 import { SetPicker, useSelectedSet } from "../components/SetPicker";
 import CrossGenerator from "../components/CrossGenerator";
-import { useDebounced } from "../hooks";
+import ExecScenarios from "../components/ExecScenarios";
+import { useDebounced, useStoredState } from "../hooks";
 import type { Scenario } from "../types";
 
 const LIMIT = 100;
@@ -64,22 +65,21 @@ function Drawer({ s, setId, onClose }: { s: Scenario; setId: number; onClose: ()
   );
 }
 
-export default function ScenariosPage() {
-  const sel = useSelectedSet();
+/** Spec-driven scenarios: drafted by AI from selected sections, for areas the executed tests do not reach yet. */
+function GapSuggestions({ setId }: { setId: number }) {
   const qc = useQueryClient();
-  const [origin, setOrigin] = useState("");
+  const origin = "cross";
   const [state, setState] = useState("");
   const [q, setQ] = useState("");
   const dq = useDebounced(q);
   const [offset, setOffset] = useState(0);
   const [checked, setChecked] = useState<Set<number>>(new Set());
   const [open, setOpen] = useState<number | null>(null);
-  useEffect(() => { setOffset(0); setChecked(new Set()); }, [sel.setId, origin, state, dq]);
+  useEffect(() => { setOffset(0); setChecked(new Set()); }, [setId, state, dq]);
 
   const list = useQuery({
-    queryKey: ["scenarios", sel.setId, origin, state, dq, offset],
-    enabled: sel.setId !== null,
-    queryFn: () => api.scenarios(sel.setId!, { origin, state, q: dq, offset, limit: LIMIT }),
+    queryKey: ["scenarios", setId, origin, state, dq, offset],
+    queryFn: () => api.scenarios(setId, { origin, state, q: dq, offset, limit: LIMIT }),
   });
   const total = list.data?.total;
   useEffect(() => {   // a review action can shrink a filtered list below the current page; return to the last valid page
@@ -96,21 +96,17 @@ export default function ScenariosPage() {
 
   return (
     <>
-      <PageHeader title="Scenarios" description="Cross-command scenarios are drafted from selected spec sections and stay drafts until you approve them; only approved scenarios count toward coverage." />
+      <p className="muted small">For areas the executed tests do not reach yet: a local model drafts cross-command scenarios from selected spec sections. Drafts do not count; approved ones are matched against the command DB when coverage runs.</p>
       <div className="row" style={{ marginBottom: 12 }}>
-        <SetPicker sel={sel} />
-        <select value={origin} onChange={(e) => setOrigin(e.target.value)} aria-label="Origin">
-          <option value="">All origins</option><option value="cross">Cross-command</option>
-        </select>
         <select value={state} onChange={(e) => setState(e.target.value)} aria-label="State">
           <option value="">All states</option><option value="draft">Draft</option><option value="approved">Approved</option><option value="rejected">Rejected</option>
         </select>
         <input placeholder="Search title or id…" value={q} onChange={(e) => setQ(e.target.value)} />
         <span className="grow" />
-        <button className={showGen ? "" : "primary"} disabled={sel.setId === null} onClick={() => setShowGen((v) => !v)}>{showGen ? "Hide generator" : "Generate cross-command scenarios"}</button>
+        <button className={showGen ? "" : "primary"} onClick={() => setShowGen((v) => !v)}>{showGen ? "Hide generator" : "Suggest scenarios from the spec"}</button>
       </div>
-      <ErrorNote error={sel.error ?? list.error} />
-      {showGen && sel.setId !== null && <CrossGenerator setId={sel.setId} />}
+      <ErrorNote error={list.error} />
+      {showGen && <CrossGenerator setId={setId} />}
       {checked.size > 0 && (
         <div className="card row">
           <strong>{checked.size} selected</strong>
@@ -127,8 +123,8 @@ export default function ScenariosPage() {
           {bulk.data.refused.slice(0, 8).map((r) => <div key={r.id}>#{r.id}: {r.errors.join("; ")}</div>)}
         </div>
       )}
-      {sel.setId !== null && <Loading q={list} />}
-      {list.data && rows.length === 0 && <Empty icon={FlaskConical} title="No scenarios match">Use “Generate cross-command scenarios” to draft some from the spec sections, or change the filters.</Empty>}
+      <Loading q={list} />
+      {list.data && rows.length === 0 && <Empty icon={FlaskConical} title="No suggestions match">Use “Suggest scenarios from the spec” to draft some for sections your tests do not cover, or change the filters.</Empty>}
       {rows.length > 0 && (
         <div className="card">
           <div className="scroll">
@@ -149,7 +145,24 @@ export default function ScenariosPage() {
           <Pager total={list.data?.total ?? 0} offset={offset} limit={LIMIT} onChange={setOffset} />
         </div>
       )}
-      {current && sel.setId !== null && <Drawer s={current} setId={sel.setId} onClose={() => setOpen(null)} />}
+      {current && <Drawer s={current} setId={setId} onClose={() => setOpen(null)} />}
+    </>
+  );
+}
+
+export default function ScenariosPage() {
+  const sel = useSelectedSet();
+  const [tab, setTab] = useStoredState<"executed" | "gaps">("specforge.scenarios.tab", "executed");
+  return (
+    <>
+      <PageHeader title="Scenarios" description="What your test scripts actually executed, read from a command DB: one scenario per test case, named from the catalog. Spec-driven suggestions cover what the tests do not reach." />
+      <div className="row" style={{ marginBottom: 12 }}><SetPicker sel={sel} /></div>
+      <ErrorNote error={sel.error} />
+      <div className="tabs">
+        <button className={tab === "executed" ? "active" : ""} onClick={() => setTab("executed")}>Executed (from command DB)</button>
+        <button className={tab === "gaps" ? "active" : ""} onClick={() => setTab("gaps")}>Gap suggestions (from spec)</button>
+      </div>
+      {sel.setId !== null && (tab === "gaps" ? <GapSuggestions setId={sel.setId} /> : <ExecScenarios setId={sel.setId} />)}
     </>
   );
 }

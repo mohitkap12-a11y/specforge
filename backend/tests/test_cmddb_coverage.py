@@ -170,5 +170,7 @@ def test_draft_scenarios_never_count(conn, parsed_set, demo_dir):
     sid = cmddb.register_source(conn, str(demo_dir / "cmds-a.db")); cmddb.import_source(conn, sid)
     conn.execute("UPDATE scenario SET state='draft' WHERE sid=?", ("T:cmd:admin:06",))
     conn.commit()
-    run = coverage.run_coverage(conn, 1, sid)
+    run = coverage.run_coverage(conn, 1, sid, analyze=False)       # spec-driven scenarios only
     assert state(conn, run, "cmd:admin:06") == "needs_review"
+    run = coverage.run_coverage(conn, 1, sid)                      # the log itself shows Identify was executed
+    assert state(conn, run, "cmd:admin:06") == "covered"

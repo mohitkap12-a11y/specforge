@@ -1,7 +1,9 @@
 import { Fragment, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
-import { Database } from "lucide-react";
+import { ArrowRight, Database } from "lucide-react";
+import { rememberSource } from "../components/ExecScenarios";
 import { Badge, Empty, ErrorNote, Loading, PageHeader } from "../components/ui";
 import { useJobs } from "../components/jobs";
 import { useStoredState } from "../hooks";
@@ -131,7 +133,7 @@ export default function CommandDBsPage() {
   const src = list.find((s) => s.id === id) ?? list[0];
   return (
     <>
-      <PageHeader title="Command DBs" description="SQLite dumps of the commands your tests submitted. Review the column mapping, import, and browse what was decoded." />
+      <PageHeader title="Command DBs" description="SQLite dumps of the commands your test scripts submitted. Review the column mapping, import, browse what was decoded, then analyse it on the Scenarios page: one scenario per test case." />
       <Add />
       <Loading q={sources} />
       {sources.data && list.length === 0 && <Empty icon={Database} title="No command databases yet">Add the path to a SQLite file above.</Empty>}
@@ -145,6 +147,8 @@ export default function CommandDBsPage() {
             </label>
             <Badge value={src.status === "imported" ? "ok" : "warning"} label={src.status} />
             <span className="muted small">{src.decoded_count} of {src.row_count} rows decoded{src.imported_at ? ` · imported ${src.imported_at}` : ""}</span>
+            <span className="grow" />
+            {src.status === "imported" && <Link to="/scenarios" onClick={() => rememberSource(src.id)}><button className="primary sm">See what these tests executed <ArrowRight size={13} /></button></Link>}
           </div>
           <div className="mono small muted" style={{ marginBottom: 8, wordBreak: "break-all" }}>{src.path}</div>
           <div className="tabs">

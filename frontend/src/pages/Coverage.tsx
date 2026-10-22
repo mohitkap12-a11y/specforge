@@ -25,7 +25,8 @@ function Evidence({ run, item, onClose }: { run: number; item: CovItem; onClose:
       {q.data?.map((s) => (
         <div key={s.id} className="card">
           <div className="row"><strong className="grow">{s.title}</strong><Badge value={s.result} label={s.result} /></div>
-          <div className="small muted">{s.sid} · review: {s.state} · {s.match_count} matching command{s.match_count === 1 ? "" : "s"}</div>
+          <div className="small muted">{s.state === "observed" ? `executed by the tests below · ${s.match_count} command${s.match_count === 1 ? "" : "s"} in the flow`
+            : `${s.sid} · review: ${s.state} · ${s.match_count} matching command${s.match_count === 1 ? "" : "s"}`}</div>
           {s.evidence.length > 0 && (
             <div className="scroll" style={{ maxHeight: 220 }}>
               <table className="t"><thead><tr><th>Test</th><th>Row</th><th>Detail</th></tr></thead>
@@ -58,6 +59,8 @@ function RunView({ runId, prevId }: { runId: number; prevId: number | null }) {
   if (sum.isLoading || sum.error || !sum.data) return <Loading q={sum} />;
   const s = sum.data.summary;
   const o = s.overall;
+  const kinds = s.by_kind_all ?? s.by_kind;
+  const ex = s.execution;
   const cmds = Object.entries(s.by_command).sort((a, b) => (a[1].pct_covered ?? -1) - (b[1].pct_covered ?? -1));
   return (
     <>
@@ -65,15 +68,16 @@ function RunView({ runId, prevId }: { runId: number; prevId: number | null }) {
         <div className="card"><div className="muted small">Covered</div><div className="big"><Pct v={o.pct_covered} /></div><div className="small muted">of {o.denominator} observable items</div></div>
         <div className="card"><div className="muted small">Incl. stimulus-only</div><div className="big"><Pct v={o.pct_incl_stimulus} /></div></div>
         <div className="card"><div className="muted small">Gaps</div><div className="big">{o.not_covered + o.partial + o.no_scenario + o.needs_review}</div>
-          <div className="small muted">{o.no_scenario} without scenario · {o.needs_review} awaiting review</div></div>
-        <div className="card"><div className="muted small">Scenario errors</div><div className="big">{s.scenario_errors}</div></div>
+          <div className="small muted">{o.not_covered} not covered · {o.no_scenario} without scenario · {o.needs_review} awaiting review</div></div>
+        {ex ? <div className="card"><div className="muted small">Executed</div><div className="big">{ex.tests}</div><div className="small muted">tests · {ex.scenarios} distinct flows · {ex.commands} commands</div></div>
+          : <div className="card"><div className="muted small">Scenario errors</div><div className="big">{s.scenario_errors}</div></div>}
       </div>
       <div className="card"><StateBar c={o} /><Legend c={o} /></div>
 
       <div className="card">
-        <h2>By kind</h2>
+        <h2>By kind <span className="muted small">(the overall figure counts commands and requirements; click to filter)</span></h2>
         <table className="t"><thead><tr><th>Kind</th><th style={{ width: "40%" }}>Coverage</th><th>Covered</th><th>Items</th></tr></thead>
-          <tbody>{Object.entries(s.by_kind).map(([k, c]) => (
+          <tbody>{Object.entries(kinds).map(([k, c]) => (
             <tr key={k} className="click" onClick={() => setKind(kind === k ? "" : k)}><td>{k}{kind === k && " ✓"}</td><td><StateBar c={c} /></td><td><Pct v={c.pct_covered} /></td><td>{c.total}</td></tr>
           ))}</tbody></table>
       </div>
@@ -110,7 +114,7 @@ function RunView({ runId, prevId }: { runId: number; prevId: number | null }) {
             <option value="">All states</option>{STATE_ORDER.map((st) => <option key={st} value={st}>{stateLabel(st)}</option>)}
           </select>
           <select value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Kind">
-            <option value="">All kinds</option>{Object.keys(s.by_kind).map((k) => <option key={k} value={k}>{k}</option>)}
+            <option value="">All kinds</option>{Object.keys(kinds).map((k) => <option key={k} value={k}>{k}</option>)}
           </select>
           {command && <button onClick={() => setCommand("")}>Command: {command.split("/").pop()} ×</button>}
           <input placeholder="Search…" value={q} onChange={(e) => setQ(e.target.value)} />
@@ -154,7 +158,7 @@ export default function CoveragePage() {
   });
   return (
     <>
-      <PageHeader title="Coverage" description="Match approved scenarios against submitted commands. Every verdict links to its evidence." />
+      <PageHeader title="Coverage" description="Each run reads what the tests in the command DB executed (one scenario per test case) and judges every catalog item against it, with the tests as evidence. Approved requirement links and approved spec suggestions count too." />
       <div className="card row">
         <SetPicker sel={sel} />
         <label>Command DB{" "}
@@ -173,7 +177,7 @@ export default function CoveragePage() {
       </div>
       <ErrorNote error={sel.error ?? sources.error ?? runs.error ?? run.error} />
       {sources.data && !imported.length && (
-        <Empty icon={Database} title="No command database imported" action={<Link to="/cmddb"><button className="primary">Add a command DB</button></Link>}>Coverage compares scenarios with the commands your tests actually sent.</Empty>
+        <Empty icon={Database} title="No command database imported" action={<Link to="/cmddb"><button className="primary">Add a command DB</button></Link>}>Coverage is read from the commands your tests actually sent.</Empty>
       )}
       {sel.setId !== null && runs.data && list.length === 0 && imported.length > 0 && <Empty icon={Gauge} title="No coverage runs for this set yet">Choose a command database and click “Run coverage”.</Empty>}
       {runId !== null && <RunView runId={runId} prevId={prevId} />}

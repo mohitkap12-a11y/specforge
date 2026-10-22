@@ -23,7 +23,7 @@ def test_predicate_edits_keep_links_valid_and_reset_approval(ws, conn, parsed_se
     conn.execute("INSERT INTO scenario(set_id,sid,origin,title,observability,predicate_json,state) VALUES(1,'M:e','manual','t','submission',?, 'approved')",
                  (json.dumps({"scope": "global", "order": "strict", "steps": [_step_for("cmd:admin:06", 6)]}),))
     sid = conn.execute("SELECT id FROM scenario WHERE sid='M:e'").fetchone()[0]
-    conn.execute("INSERT INTO scenario_item VALUES(?, 'cmd:admin:06/dw10[07:00]=01h')", (sid,))
+    conn.execute("INSERT INTO scenario_item(scenario_id,item_key) VALUES(?, 'cmd:admin:06/dw10[07:00]=01h')", (sid,))
     conn.commit()
     with TestClient(create_app()) as client:
         patch = lambda body: client.patch(f"/api/scenarios/{sid}", json=body)           # noqa: E731

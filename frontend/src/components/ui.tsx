@@ -14,6 +14,7 @@ const TONE: Record<string, string> = {
   covered: "ok", stimulus_covered: "ok", approved: "ok", done: "ok", ok: "ok", active: "ok",
   partial: "warn", draft: "warn", running: "info", queued: "info", needs_review: "info", warning: "warn",
   not_covered: "bad", no_scenario: "bad", rejected: "bad", failed: "bad", error: "bad",
+  observed: "ok", proposed: "info",
 };
 export function Badge({ value, label }: { value: string; label?: string }) {
   return <span className={`badge ${TONE[value] ?? ""}`}>{label ?? stateLabel(value)}</span>;

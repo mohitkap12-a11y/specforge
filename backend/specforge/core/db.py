@@ -84,13 +84,25 @@ CREATE TABLE IF NOT EXISTS scenario(
   id INTEGER PRIMARY KEY AUTOINCREMENT, set_id INTEGER NOT NULL REFERENCES spec_set(id) ON DELETE CASCADE,
   sid TEXT NOT NULL, origin TEXT NOT NULL, kind TEXT, title TEXT, description TEXT,
   observability TEXT NOT NULL, predicate_json TEXT NOT NULL, state TEXT NOT NULL,
-  provenance_json TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP, UNIQUE(set_id, sid)
+  provenance_json TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP,
+  source_id INTEGER REFERENCES cmd_source(id) ON DELETE CASCADE,     -- set for scenarios derived from a command DB (origin 'exec')
+  UNIQUE(set_id, sid)
 );
+-- state: NULL for links of spec-driven scenarios (judged by the scenario's own review state); for scenarios derived from a
+-- command DB: 'observed' (read from the log), or 'proposed' / 'approved' / 'rejected' (an AI-proposed requirement link and its review)
 CREATE TABLE IF NOT EXISTS scenario_item(
   scenario_id INTEGER NOT NULL REFERENCES scenario(id) ON DELETE CASCADE, item_key TEXT NOT NULL,
+  state TEXT, detail_json TEXT,
   PRIMARY KEY(scenario_id, item_key)
 );
 CREATE INDEX IF NOT EXISTS ix_si_item ON scenario_item(item_key);
+
+-- The last analysis of a command DB against a spec set (scenarios derived from what the test scripts executed)
+CREATE TABLE IF NOT EXISTS exec_analysis(
+  set_id INTEGER NOT NULL REFERENCES spec_set(id) ON DELETE CASCADE,
+  source_id INTEGER NOT NULL REFERENCES cmd_source(id) ON DELETE CASCADE,
+  stats_json TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(set_id, source_id)
+);
 
 CREATE TABLE IF NOT EXISTS llm_cache(
   key TEXT PRIMARY KEY, provider TEXT, model TEXT, response TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP
@@ -152,7 +164,23 @@ CREATE TABLE IF NOT EXISTS job(
 );
 """
 
+# Columns added after the first release: (table, column, declaration).  CREATE TABLE IF NOT EXISTS leaves an existing table as it
+# was, so a workspace created by an older version gets them here.
+MIGRATIONS = [
+    ("scenario", "source_id", "INTEGER REFERENCES cmd_source(id) ON DELETE CASCADE"),
+    ("scenario_item", "state", "TEXT"),
+    ("scenario_item", "detail_json", "TEXT"),
+]
+
 _local = threading.local()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, col, decl in MIGRATIONS:
+        if col not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_scenario_source ON scenario(set_id, source_id)")
+    conn.commit()
 
 
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
@@ -163,6 +191,7 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     return conn
 
 

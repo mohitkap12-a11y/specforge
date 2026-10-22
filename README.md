@@ -4,11 +4,12 @@ Scenario and command **coverage for the NVMe / NVMe-MI specifications**, fully o
 
 1. Parse spec PDFs / DOCX (Base, NVM Command Set, MI, ...) into a versioned, cross-referenced model.
 2. Build the list of everything that can be covered (commands, fields, values, reserved bits, boundaries, normative statements).
-3. Generate cross-command scenarios per selected command or section, drafted by AI (Ollama or OpenCode) from the section plus every connected passage in the spec set; grounded, validated and human-approved.
-4. Match scenarios against a SQLite dump of submitted commands and report **covered / partial / not covered / N/A**, with evidence.
-5. Export Excel / HTML / CSV / JSON reports.
+3. Import a SQLite dump of the commands your test scripts submitted.
+4. **Derive the scenarios from execution:** every test case in the dump becomes one scenario (the commands it sent, in order, named from the catalog with their field values; tests that ran the same flow are merged). Optionally, AI (Ollama or OpenCode) describes each flow and proposes the spec requirements it exercises, for review.
+5. Report every catalog item as **covered / partial / not covered / N/A**, with the tests as evidence. For areas the tests do not reach, AI can still draft spec-driven cross-command scenarios (gap suggestions).
+6. Export Excel / HTML / CSV / JSON reports.
 
-> **Design rule:** code decides *what exists* and *what is covered*; AI only drafts scenarios and never changes a coverage verdict on its own.
+> **Design rule:** code decides *what exists*, *what was executed* and *what is covered*; AI only describes, proposes and drafts, and never changes a coverage verdict on its own.
 > See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md).
 
 ## Status
@@ -19,6 +20,7 @@ Scenario and command **coverage for the NVMe / NVMe-MI specifications**, fully o
 | Cross-spec references and spec sets | implemented, tested |
 | Catalog (coverage denominator) | implemented, tested |
 | Command DB import (SQE + MI decoding) and coverage engine (single step, sequences, variables) | implemented, tested |
+| Scenarios derived from execution (one per test case), AI descriptions and requirement links with review | implemented, tested on the synthetic command DB; not yet run on a real command log |
 | Ollama / OpenCode providers, AI scenario generation with grounding and validation | implemented, tested against a mock Ollama server and a stub `opencode` binary |
 | REST API, CLI, Excel/HTML/CSV/JSON reports | implemented, tested |
 | React UI (all pages: Dashboard, Specs, Explorer, Sets, Catalog, Scenarios, Command DBs, Coverage, Reports, Jobs, Settings) | implemented in `frontend/`; checked in a browser against the synthetic demo. Not yet exercised on real specs |
@@ -75,6 +77,7 @@ The **About** button in the top bar opens `/about.html`, a self-contained animat
 specforge make-demo ./demo            # synthetic Base / NVM CS / MI specs (PDF + DOCX) and a command DB
 specforge ingest demo/nvme-base-2.4.pdf demo/nvme-nvm-cs-1.3.pdf demo/nvme-mi-2.0.pdf --set demo
 specforge catalog 1                   # build the catalog for spec set #1
+specforge analyze 1 demo/demo-commands.db               # one scenario per executed test case
 specforge coverage 1 demo/demo-commands.db --out ./reports --format xlsx
 make ui                               # build the web UI once (needs Node 18+); FastAPI serves frontend/dist
 specforge serve                       # UI + API on http://127.0.0.1:8000  (API docs at /docs)
@@ -110,7 +113,22 @@ Any SQLite file with one row per submitted command. The tool opens it **read-onl
 * **Layout A:** a 64-byte `sqe` BLOB and/or an `mi_msg` BLOB, plus `test_name`, `seq`, `interface` (`pcie`|`mi`), `queue` (`admin`|`io`).
 * **Layout B:** integer columns `cdw0 ... cdw15`.
 
+Map `test` (the test-case name) whenever the dump has one: scenarios are built per test case (falling back to `script`, then to the whole log as one test).
+
 Mapping values are a column name or `{"const": "..."}`. Set `cs` (command set, default `nvm`) when your I/O commands are not NVM-set commands. No completions are needed. Items that need a completion to verify are reported as *stimulus-only* and never counted as fully covered; controller-internal requirements are *N/A* and excluded from the percentage (listed in the report).
+
+## Scenarios from execution
+
+`POST /api/sets/{id}/exec/analyze {"source_id": N}` (UI: Scenarios → Executed → *Analyse executed tests*; CLI: `specforge analyze`). For each test case of an imported command DB:
+
+* every command is named from the catalog (`cmd:admin:06` = Identify) and its described fields are decoded; opcodes the catalog does not know are listed;
+* consecutive commands of the same command with the same enumerated / flag values are one **step** (×count); numeric fields (SLBA, NLB, ...) are shown as the min..max range used;
+* tests whose steps are the same (same commands, same enumerated values, same order) are **one scenario** listing all of them;
+* the catalog items the scenario exercised are linked as *observed*: commands, values, min/max boundaries, reserved bits set to non-zero, Admin commands tunnelled over NVMe-MI. They count toward coverage as they are.
+
+Re-analysing keeps a flow's id, its AI or edited description and the review of its requirement links. Every coverage run re-analyses first, so results always match the current catalog and dump.
+
+Requirements cannot be seen in a log of submissions. `POST /api/sets/{id}/exec/describe` (UI: *Describe with AI*) asks the model for a readable title / description per flow and which of the observable requirements of its commands the flow exercises. Those links are *proposed*; they count only after approval (`PUT /api/scenarios/{id}/links`, or in bulk `POST /api/scenarios/links/bulk`). In a coverage run an item is *covered* when a test exercised it, *not covered* when the analysed tests never did, *needs review* when only proposed links exist.
 
 ## LLM providers (Settings -> `PUT /api/settings`)
 
@@ -122,12 +140,12 @@ Mapping values are a column name or `{"const": "..."}`. Set `cs` (command set, d
 
 * `specforge models` lists what Ollama (`/api/tags`) and OpenCode (`opencode models`) offer on this machine.
 * OpenCode runs headless in an empty temp directory with an inline config that denies edit / bash / webfetch.
-* Generate drafts: `POST /api/sets/{id}/scenarios/ai`. Drafts have no effect on coverage until approved (`PATCH /api/scenarios/{id}` with `{"state":"approved"}`, which re-validates the predicate).
+* Gap suggestions (spec-driven drafts): `POST /api/sets/{id}/scenarios/cross`. Drafts have no effect on coverage until approved (`PATCH /api/scenarios/{id}` with `{"state":"approved"}`, which re-validates the predicate).
 
 ## Tests and CI
 
 ```bash
-make test     # 53 tests, ~25 s
+make test     # 224 tests, ~2.5 min
 make lint
 ```
 
@@ -138,7 +156,7 @@ CI (`.github/workflows/ci.yml`) runs lint and the test suite on Python 3.11 and 
 ```
 backend/specforge/
   ingest/    pdf.py docx.py normalize.py semantics.py audit.py store.py ir.py
-  refs.py catalog.py scenarios.py cmddb.py coverage.py reports.py ai.py jobs.py cli.py
+  refs.py catalog.py scenarios.py crossgen.py cmddb.py execscen.py coverage.py reports.py jobs.py cli.py
   llm/       base.py ollama.py opencode.py service.py
   api/app.py REST + SSE
   devtools/synth.py synthetic spec and command-DB generator
@@ -152,7 +170,8 @@ docs/            ARCHITECTURE.md, IMPLEMENTATION_PLAN.md
 * PDF captions are expected *above* their table (carried over page breaks).
 * DOCX cross-references use text patterns; native `REF` fields are not resolved yet.
 * Cross-version section drift (a MI 2.0 reference to Base section numbers from another revision) is handled by user choice, not by title matching.
-* Scenario coverage for prose requirements needs approved AI or manual scenarios; until then they show as `no_scenario`.
+* Requirements are covered only through reviewed requirement links (or approved gap suggestions); until then they show as `no_scenario` / `needs_review`.
+* Only submissions are read: a test that sent a command is evidence the command was exercised, not that the device behaved correctly.
 
 ## Web UI development
 
@@ -164,7 +183,7 @@ cd frontend && npm test    # unit tests; npm run build also type-checks
 
 The sidebar collapses to an icon rail (chevron on its edge, or `Ctrl/⌘ B`; the choice is remembered) and `Ctrl/⌘ K` opens a launcher to jump anywhere. Light and dark themes follow the OS or can be set in Settings.
 
-Pages: **Overview** (a welcome screen with a guided checklist on first run; afterwards coverage per set, trend, top uncovered commands, recent activity), **Specs** (upload, parse, reparse/activate/diff), **Explorer** (section tree, text, normative statements, tables with a correction editor, references, parse issues, jump to PDF page), **Sets** (membership, reference resolution with an ambiguity picker, build catalog), **Catalog** (filter, override observability / N/A reason), **Scenarios** (filter, bulk approve/reject, detail drawer with live predicate validation, AI generation), **Command DBs** (add, edit column mapping, import, decoded command browser, undecoded rows), **Coverage** (run, summaries, item list with evidence drill-down, run comparison), **Reports** (xlsx / html / json / csv), **Activity** (live log and jobs) and **Settings** (AI providers with connection test, per-task models, parser, logging, NVMe-MI layout overrides, theme).
+Pages: **Overview** (a welcome screen with a guided checklist on first run; afterwards coverage per set, trend, top uncovered commands, recent activity), **Specs** (upload, parse, reparse/activate/diff), **Explorer** (section tree, text, normative statements, tables with a correction editor, references, parse issues, jump to PDF page), **Sets** (membership, reference resolution with an ambiguity picker, build catalog), **Catalog** (filter, override observability / N/A reason), **Scenarios** (Executed: analyse a command DB, one scenario per test case with steps, tests and exercised items, AI descriptions, requirement-link review; Gap suggestions: spec-driven AI drafts with bulk approve/reject and live predicate validation), **Command DBs** (add, edit column mapping, import, decoded command browser, undecoded rows), **Coverage** (run, summaries, item list with evidence drill-down, run comparison), **Reports** (xlsx / html / json / csv), **Activity** (live log and jobs) and **Settings** (AI providers with connection test, per-task models, parser, logging, NVMe-MI layout overrides, theme).
 
 ### Activity log: what the system and the AI agents are doing
 
