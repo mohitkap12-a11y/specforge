@@ -210,6 +210,10 @@ export default function ExecScenarios({ setId }: { setId: number }) {
     mutationFn: (state: "approved" | "rejected") => api.reviewLinksBulk([...checked], state),
     onSuccess: () => { setChecked(new Set()); qc.invalidateQueries({ queryKey: ["scenarios"] }); qc.invalidateQueries({ queryKey: ["scenario-links"] }); qc.invalidateQueries({ queryKey: ["sets"] }); },
   });
+  const total = list.data?.total;
+  useEffect(() => {   // a review or re-analysis can shrink the list below the current page; return to the last valid page
+    if (total !== undefined && offset > 0 && offset >= total) setOffset(Math.max(0, Math.floor((total - 1) / LIMIT) * LIMIT));
+  }, [total, offset]);
   const a = analysis.data?.[0];
   const rows = list.data?.scenarios ?? [];
   const current = rows.find((s) => s.id === open);

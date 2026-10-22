@@ -145,8 +145,8 @@ def _decode_signature(cat: _Catalog, sig: dict) -> dict:
 
 
 def _step_key(d: dict) -> tuple:
-    who = d["command"] or f"?{d['interface']}:{d['queue']}:{d['opcode']}"
-    return (who, d["tunnel"], tuple((x["key"], x["value"]) for x in d["discrete"]), tuple(x["key"] for x in d["reserved_set"]))
+    who = d["command"] or f"?{d['interface']}:{d['queue']}:{d['cs']}:{d['opcode']}"
+    return (who, d["tunnel"], tuple((x["key"], x["value"]) for x in d["discrete"]), tuple((x["key"], x["value"]) for x in d["reserved_set"]))
 
 
 def _new_step(d: dict, r: dict) -> dict:
@@ -162,10 +162,11 @@ def _new_step(d: dict, r: dict) -> dict:
 def _add_to_step(st: dict, d: dict) -> None:
     st["count"] += 1
     for x in d["numeric"]:
-        rg = st["ranges"].get(x["key"])
-        if rg is None:
-            continue
         v = x["value"]
+        rg = st["ranges"].get(x["key"])
+        if rg is None:       # the dword was absent (not recorded) in the step's first command
+            st["ranges"][x["key"]] = {"key": x["key"], "name": x["name"], "dw": x["dw"], "hi": x["hi"], "lo": x["lo"], "min": v, "max": v, "values": [v]}
+            continue
         rg["min"], rg["max"] = min(rg["min"], v), max(rg["max"], v)
         if isinstance(rg["values"], list) and v not in rg["values"]:
             rg["values"] = rg["values"] + [v] if len(rg["values"]) < MAX_DISTINCT else f">{MAX_DISTINCT}"
@@ -178,6 +179,7 @@ def _merge_steps(into: list[dict], other: list[dict]) -> None:
         for k, rb in b["ranges"].items():
             ra = a["ranges"].get(k)
             if ra is None:
+                a["ranges"][k] = json.loads(json.dumps(rb))
                 continue
             ra["min"], ra["max"] = min(ra["min"], rb["min"]), max(ra["max"], rb["max"])
             if isinstance(ra["values"], list) and isinstance(rb["values"], list):
@@ -286,7 +288,7 @@ def analyze_execution(conn: sqlite3.Connection, set_id: int, source_id: int, pro
     cur_test, t = None, None
     n = 0
     for r in conn.execute("SELECT id,src_row_id,test_id,script,seq,signature FROM decoded_command WHERE source_id=? "
-                          "ORDER BY test_id,script,seq,id", (source_id,)):
+                          "ORDER BY test_id, CASE WHEN test_id='' THEN script ELSE '' END, seq, id", (source_id,)):   # a test may span scripts
         r = dict(r)
         n += 1
         if progress and n % PROGRESS_EVERY == 0:
@@ -371,7 +373,7 @@ def _store(conn: sqlite3.Connection, set_id: int, source_id: int, cat: _Catalog,
         keep.add(sid)
         steps = [{**st, "ranges": list(st["ranges"].values())} for st in f["steps"]]
         # what was executed, kept with the scenario so a coverage run's snapshot (and its report) shows the tests too
-        pred = {"observed": True, "tests": f["tests"], "test_count": f["n_tests"], "commands": f["commands"], "truncated": f["truncated"], "steps": steps}
+        pred = {"observed": True, "tests": f["tests"], "test_count": f["n_tests"], "commands": f["commands"], "truncated": f["truncated"], "n_steps": f["n_steps"], "steps": steps}
         title, desc = _title(f["tests"], f["n_tests"], f["steps"]), _description(f["n_tests"], f["commands"], f["steps"], f["truncated"])
         prov = {"tests": f["tests"], "test_count": f["n_tests"], "commands": f["commands"], "steps": f["n_steps"], "truncated": f["truncated"],
                 "fingerprint": fp, "evidence": f["evidence"], "auto_title": title, "auto_description": desc}
@@ -505,7 +507,8 @@ def _candidates(conn: sqlite3.Connection, set_id: int, scen_id: int, steps: list
     return out[:MAX_CANDIDATES]
 
 
-def _req_text(cands: list[dict]) -> str:
+def _req_text(cands: list[dict]) -> tuple[str, int]:
+    """The numbered requirements that fit the prompt budget, and how many of the candidates that is."""
     out, used = [], 0
     for i, c in enumerate(cands, 1):
         ln = f"[R{i}] {c['text'][:400]}"
@@ -513,7 +516,7 @@ def _req_text(cands: list[dict]) -> str:
             break
         out.append(ln)
         used += len(ln) + 1
-    return "\n".join(out) or "(none)"
+    return "\n".join(out) or "(none)", len(out)
 
 
 def describe_scenarios(conn: sqlite3.Connection, set_id: int, source_id: int, svc: LLMService, scenario_ids: list[int] | None = None,
@@ -537,8 +540,9 @@ def describe_scenarios(conn: sqlite3.Connection, set_id: int, source_id: int, sv
         prov = jloads(s["provenance_json"], {})
         steps = pred.get("steps", [])
         cands = _candidates(conn, set_id, s["id"], steps)
+        req_text, shown = _req_text(cands)
         user = (f"FLOW ({prov.get('test_count', 1)} test(s), e.g. {', '.join(prov.get('tests', [])[:3])}):\n{_flow_text(steps, prov.get('truncated', False))}\n\n"
-                f"REQUIREMENTS:\n{_req_text(cands)}")
+                f"REQUIREMENTS:\n{req_text}")
         tag = f"[{n + 1}/{len(scen)}] {s['title'][:70]}"
         try:
             out, meta = svc.generate_model("generate", [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}], AIDescription, PROMPT_VERSION)
@@ -546,7 +550,7 @@ def describe_scenarios(conn: sqlite3.Connection, set_id: int, source_id: int, sv
             stats["failed"] += 1
             eventlog.emit("error", "agent", f"{tag}: model failed: {str(e)[:200]}", scenario_id=s["id"], error=str(e))
             continue
-        by_id = {f"R{i}": c for i, c in enumerate(cands, 1)}
+        by_id = {f"R{i}": c for i, c in enumerate(cands[:shown], 1)}       # only ids the model actually saw may be cited
         picked = []
         for ln in out.requirements:
             c = by_id.get(ln.id.strip().upper())

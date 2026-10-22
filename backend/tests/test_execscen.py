@@ -246,3 +246,35 @@ def test_an_older_workspace_is_migrated(tmp_path):
     assert {"state", "detail_json"} <= {r[1] for r in c.execute("PRAGMA table_info(scenario_item)")}
     assert [tuple(r) for r in c.execute("SELECT item_key, state FROM scenario_item")] == [("cmd:admin:06", None)]
     c.close()
+
+
+def test_review_round_fixes(conn, parsed_set, tmp_path, monkeypatch):
+    from specforge import cli
+
+    # reserved values are part of a step; a test spanning scripts keeps its submission order
+    path = tmp_path / "x.db"
+    path.unlink(missing_ok=True)
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE commands(id INTEGER PRIMARY KEY, test_name TEXT, script TEXT, seq INTEGER, interface TEXT, queue TEXT, sqe BLOB)")
+    rowsin = [("t", "b.py", 1, IDENT(2)[1]), ("t", "a.py", 2, IDENT(1, rsvd=1)[1]), ("t", "a.py", 3, IDENT(1, rsvd=3)[1])]
+    con.executemany("INSERT INTO commands(test_name,script,seq,interface,queue,sqe) VALUES(?,?,?,'pcie','admin',?)", rowsin)
+    con.commit(); con.close()
+    src = load(conn, str(path))
+    execscen.analyze_execution(conn, 1, src)
+    steps = exec_scen(conn, src)[0]["pred"]["steps"]
+    assert [st["fields"][0]["value"] for st in steps] == [2, 1, 1]                      # b.py's seq 1 first, not sorted by script
+    assert [st["reserved_set"][0]["value"] for st in steps[1:]] == [1, 3]              # two reserved values, two steps
+    assert exec_scen(conn, src)[0]["pred"]["n_steps"] == 3
+
+    # the CLI reuses the source registered for the same file
+    monkeypatch.setattr(cli, "_conn", lambda: conn)
+    assert cli._import(conn, str(path)) == src
+
+
+def test_describe_rejects_ids_the_model_never_saw(conn, parsed_set, tmp_path, monkeypatch):
+    monkeypatch.setattr(execscen, "REQ_CHARS", 1)          # nothing fits: no candidate is shown
+    src = load(conn, make_db(tmp_path / "x.db", {"t1": [IDENT(1, rsvd=3)]}))
+    execscen.analyze_execution(conn, 1, src)
+    reply = json.dumps({"title": "t", "description": "d", "requirements": [{"id": "R1"}]})
+    stats = execscen.describe_scenarios(conn, 1, src, LLMService(conn, settings(), Fake([reply])))
+    assert stats["proposed"] == 0 and stats["dropped_ids"] == 1

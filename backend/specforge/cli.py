@@ -70,7 +70,10 @@ def cmd_catalog(a):
 
 
 def _import(conn, path: str) -> int:
-    sid = cmddb.register_source(conn, path, None)
+    """Re-import the source already registered for this file, so `analyze` and `coverage` share its executed scenarios and reviews."""
+    want = Path(path).resolve()
+    known = [r["id"] for r in rows(conn, "SELECT id,path FROM cmd_source ORDER BY id DESC") if Path(r["path"]).resolve() == want]
+    sid = known[0] if known else cmddb.register_source(conn, path, None)
     print("import:", {k: v for k, v in cmddb.import_source(conn, sid, config.load_settings(conn).get("mi_layout")).items() if k != "errors"})
     return sid
 

@@ -42,7 +42,8 @@ def build_dataset(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
             continue
         p = jloads(s["predicate_json"], {})
         executed.append({"sid": s["sid"], "title": s["title"], "test_count": p.get("test_count", 0), "tests": p.get("tests", []),
-                         "commands": p.get("commands", 0), "steps": len(p.get("steps", [])), "flow": flow_summary(p.get("steps", []), 400)})
+                         "commands": p.get("commands", 0), "steps": p.get("n_steps", len(p.get("steps", []))),
+                         "flow": flow_summary(p.get("steps", []), 400) + (" → … (log continues)" if p.get("truncated") else "")})
     return {"header": header, "summary": summary, "specs": specs, "items": items, "scenarios": scen, "executed": executed, "issues": issues}
 
 

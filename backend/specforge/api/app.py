@@ -651,9 +651,9 @@ def create_app() -> FastAPI:
     @app.post("/api/sets/{set_id}/exec/describe")
     def exec_describe(set_id: int, body: dict = Body(...)):
         src = _exec_source(set_id, body)
-        ids, redo = body.get("scenario_ids") or None, body.get("redo", False)
-        if ids is not None and (not isinstance(ids, list) or any(not isinstance(i, int) or isinstance(i, bool) for i in ids)):
-            raise HTTPException(422, "scenario_ids must be a list of integers")
+        ids, redo = body.get("scenario_ids"), body.get("redo", False)
+        if ids is not None and (not isinstance(ids, list) or not ids or any(not isinstance(i, int) or isinstance(i, bool) for i in ids)):
+            raise HTTPException(422, "scenario_ids must be a non-empty list of integers (leave it out for all scenarios)")
         if not isinstance(redo, bool):
             raise HTTPException(422, "redo must be true or false")
         if not row(conn(), "SELECT 1 AS x FROM scenario WHERE set_id=? AND origin='exec' AND source_id=? LIMIT 1", (set_id, src)):
