@@ -19,7 +19,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "parser": {"workers": 0, "table_strategy": "auto"},  # workers=0 -> cpu_count-1
     "llm": {"max_concurrency": 2, "max_retries": 2},
-    "logging": {"min_level": "info", "capture_prompts": True, "preview_chars": 4000},  # capture_prompts: keep LLM prompts/replies in the activity log
+    # capture_prompts: keep LLM prompts/replies (shortened to preview_chars) in the activity log;
+    # print_prompts: write every full prompt and reply to the server console and to <workspace>/logs/llm-prompts.log
+    "logging": {"min_level": "info", "capture_prompts": True, "preview_chars": 4000, "print_prompts": True},
     "mi_layout": {},  # overrides for the NVMe-MI header layout, see cmddb.MI_DEFAULT_LAYOUT
 }
 

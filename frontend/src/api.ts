@@ -68,15 +68,15 @@ export const api = {
     req<DecodedCommand[]>("GET", `/api/cmddb/${id}/commands${qs(f)}`),
   buildCatalog: (id: number) => req<{ job: number }>("POST", `/api/sets/${id}/catalog/build`),
 
-  scenarios: (set: number, f: { origin?: string; state?: string; q?: string; offset?: number; limit?: number }) =>
+  scenarios: (set: number, f: { origin?: string; kind?: string; state?: string; q?: string; offset?: number; limit?: number }) =>
     req<{ total: number; scenarios: Scenario[] }>("GET", `/api/sets/${set}/scenarios${qs(f)}`),
   patchScenario: (id: number, b: Record<string, unknown>) => req<{ ok: boolean; state: string }>("PATCH", `/api/scenarios/${id}`, b),
   bulkScenarios: (ids: number[], state: string) => req<{ ok: boolean; updated: number[]; refused: { id: number; errors: string[] }[] }>("POST", "/api/scenarios/bulk", { ids, state }),
   validate: (set_id: number, predicate: unknown) => req<{ errors: string[] }>("POST", "/api/scenarios/validate", { set_id, predicate }),
   sections: (set: number, f: { q?: string; family?: string; version?: string; offset?: number; limit?: number }) => req<{ total: number; sections: SectionRow[]; specs: SpecInSet[] }>("GET", `/api/sets/${set}/sections${qs(f)}`),
   crossPlan: (set: number, b: CrossSelection) => req<{ units: CrossUnit[] }>("POST", `/api/sets/${set}/scenarios/cross/plan`, b),
-  crossAngles: () => req<{ default: number; angles: { id: string; title: string; focus: string }[] }>("GET", "/api/cross/angles"),
-  crossGenerate: (set: number, b: CrossSelection & { focus?: string; max_per_section?: number; passes?: number }) => req<{ job: number }>("POST", `/api/sets/${set}/scenarios/cross`, b),
+  crossAngles: () => req<{ categories: { id: string; title: string }[]; default: string[]; angles: { id: string; category: string; title: string; focus: string }[] }>("GET", "/api/cross/angles"),
+  crossGenerate: (set: number, b: CrossSelection & { focus?: string; max_per_section?: number; categories?: string[]; variants?: boolean }) => req<{ job: number }>("POST", `/api/sets/${set}/scenarios/cross`, b),
 
   sources: () => req<CmdSource[]>("GET", "/api/cmddb"),
   suggestMapping: (path: string) => req<Record<string, any>>("GET", `/api/cmddb/suggest${qs({ path })}`),

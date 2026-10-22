@@ -12,6 +12,7 @@ from pydantic import BaseModel, ValidationError
 from .. import eventlog
 from ..core.hashing import sha256_text
 from .base import LLMError, LLMProvider
+from . import promptlog
 from .ollama import OllamaProvider
 from .opencode import OpenCodeProvider
 
@@ -97,6 +98,7 @@ class LLMService:
             base = {"task": task, "provider": prov.name, "model": cfg["model"], "attempt": attempt + 1, "prompt_chars": prompt_chars}
             if eventlog.capture_prompts():
                 base["prompt"] = [{"role": m.get("role"), "content": eventlog.clip(m.get("content", ""))} for m in msgs]
+            promptlog.prompt(task, prov.name, cfg["model"], attempt + 1, msgs, schema, cached)
             t0 = time.monotonic()
             if cached:
                 eventlog.emit("debug", "llm", f"{task}: cache hit ({prov.name}/{cfg['model']})", **base)
@@ -109,6 +111,7 @@ class LLMService:
                     eventlog.emit("error", "llm", f"{task}: provider error: {e}", seconds=round(time.monotonic() - t0, 2), **{k: v for k, v in base.items() if k != "prompt"})
                     raise
             secs = round(time.monotonic() - t0, 2)
+            promptlog.reply(task, prov.name, cfg["model"], attempt + 1, text, secs, cached)
             reply = {"seconds": secs, "response_chars": len(text), "cached": cached}
             if eventlog.capture_prompts():
                 reply["response"] = eventlog.clip(text)

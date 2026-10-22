@@ -81,8 +81,9 @@ def create_app() -> FastAPI:
                 raise HTTPException(422, "logging must be an object")
             if "min_level" in lg and not (isinstance(lg["min_level"], str) and lg["min_level"] in eventlog.LEVELS):
                 raise HTTPException(422, f"logging.min_level must be one of {sorted(eventlog.LEVELS)}")
-            if "capture_prompts" in lg and not isinstance(lg["capture_prompts"], bool):
-                raise HTTPException(422, "logging.capture_prompts must be true or false")
+            for flag in ("capture_prompts", "print_prompts"):
+                if flag in lg and not isinstance(lg[flag], bool):
+                    raise HTTPException(422, f"logging.{flag} must be true or false")
             pc = lg.get("preview_chars", 4000)
             if not (isinstance(pc, int) and not isinstance(pc, bool) and 200 <= pc <= 50_000):
                 raise HTTPException(422, "logging.preview_chars must be a whole number between 200 and 50000")
@@ -386,10 +387,12 @@ def create_app() -> FastAPI:
 
     @app.get("/api/sets/{set_id}/scenarios")
     def list_scenarios(set_id: int, origin: str | None = None, state: str | None = None, q: str | None = None,
-                       item: str | None = None, limit: int = 500, offset: int = 0):
+                       item: str | None = None, kind: str | None = None, limit: int = 500, offset: int = 0):
         sql, args = "SELECT s.* FROM scenario s WHERE s.set_id=?", [set_id]
         if origin:
             sql += " AND s.origin=?"; args.append(origin)
+        if kind:                # category: functional / cross / negative
+            sql += " AND s.kind=?"; args.append(kind)
         if state:
             sql += " AND s.state=?"; args.append(state)
         if q:
@@ -525,28 +528,30 @@ def create_app() -> FastAPI:
 
     @app.get("/api/cross/angles")
     def cross_angles():
-        """The kinds of scenario each pass over a section looks for, in order; `passes` N runs the first N."""
-        return {"default": crossgen.DEFAULT_PASSES, "angles": [{"id": a["id"], "title": a["title"], "focus": a["focus"]} for a in crossgen.ANGLES]}
+        """The scenario categories, and the kind of scenario each pass over a section looks for (in order, with its category)."""
+        return {"categories": [{"id": k, "title": v} for k, v in crossgen.CATEGORIES.items()], "default": list(crossgen.DEFAULT_CATEGORIES),
+                "angles": [{"id": a["id"], "category": a["category"], "title": a["title"], "focus": a["focus"]} for a in crossgen.ANGLES]}
 
     @app.post("/api/sets/{set_id}/scenarios/cross")
     def cross_generate(set_id: int, body: dict = Body(...)):
         secs, cmds = _selection(body)
-        focus, mx, passes = body.get("focus", ""), body.get("max_per_section", 6), body.get("passes", crossgen.DEFAULT_PASSES)
+        focus, mx = body.get("focus", ""), body.get("max_per_section", 6)
+        cats, variants = body.get("categories", list(crossgen.DEFAULT_CATEGORIES)), body.get("variants", False)
         if not isinstance(focus, str):
             raise HTTPException(422, "focus must be a string")
         if not isinstance(mx, int) or isinstance(mx, bool) or not 1 <= mx <= 20:
             raise HTTPException(422, "max_per_section must be an integer from 1 to 20")
-        if not isinstance(passes, int) or isinstance(passes, bool) or not 1 <= passes <= len(crossgen.ANGLES):
-            raise HTTPException(422, f"passes must be an integer from 1 to {len(crossgen.ANGLES)}")
         try:
+            crossgen.angles_for(cats, variants)
             crossgen.build_units(conn(), set_id, secs, cmds)       # reject a bad selection now, not inside the job
         except ValueError as e:
             raise HTTPException(422, str(e))
         st = settings()
 
         def work(c, prog):
-            return generate_cross_scenarios(c, set_id, LLMService(c, st), secs, cmds, focus, mx, progress=lambda a, b: prog("cross-command scenarios", a, b), passes=passes)
-        audit(f"Cross-command scenario generation requested for set #{set_id}", set_id=set_id, sections=len(secs), commands=len(cmds), passes=passes, focus=focus or None)
+            return generate_cross_scenarios(c, set_id, LLMService(c, st), secs, cmds, focus, mx, progress=lambda a, b: prog("scenarios", a, b),
+                                            categories=cats, variants=variants)
+        audit(f"Scenario generation requested for set #{set_id}", set_id=set_id, sections=len(secs), commands=len(cmds), categories=cats, variants=variants, focus=focus or None)
         return {"job": jobs.submit(conn(), "cross-scenarios", work, {"set_id": set_id}, DB)}
 
     # ------------------------------------------------------------------ command DBs

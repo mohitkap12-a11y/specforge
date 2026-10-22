@@ -1,8 +1,9 @@
-"""Cross-command scenario generation, driven by the specification text itself.
+"""Scenario generation (functional, cross-command and negative), driven by the specification text itself.
 
-The user selects commands and/or sections.  Each selected section is one *unit* and one model call: the model is shown
-the section (with its sub-sections, tables and normative statements) plus every passage elsewhere in the spec set that
-is connected to it, and drafts scenarios that need SEVERAL commands to reach the behaviour the section describes.
+The user selects commands and/or sections.  Each selected section is one *unit*, and one model call per pass: the model is
+shown the section (with its sub-sections, tables and normative statements) plus every passage elsewhere in the spec set that
+is connected to it, and drafts scenarios of the pass's category (see CATEGORIES / ANGLES): functional use of the section's
+commands, flows that need SEVERAL commands, and negative cases.
 
 Connected passages are found structurally, never by protocol knowledge:
   * references written in the section ("see section 5.2", "Figure 103", "defined in <other spec>") that resolved to a target;
@@ -12,7 +13,7 @@ Connected passages are found structurally, never by protocol knowledge:
 Opcodes, bit ranges and values come only from the catalog, so nothing here is specific to one specification family.
 
 Every draft is schema-checked, grounded (quotes must occur verbatim in the text the model was shown), validated against
-the catalog slice it was shown, required to involve at least two distinct commands, de-duplicated, and stored as a draft
+the catalog slice it was shown, required to involve at least two distinct commands when it is cross-command, de-duplicated, and stored as a draft
 for human approval.  Drafts never count toward coverage.
 """
 from __future__ import annotations
@@ -32,7 +33,7 @@ from .llm.service import LLMService
 from .refs import load_set_irs, resolve_references
 from .scenarios import catalog_context, validate_predicate
 
-PROMPT_VERSION = "cross-v3"
+PROMPT_VERSION = "cross-v4"
 PRIMARY_CHARS = 10_000       # budget for the selected section (its sub-sections and tables)
 RELATED_CHARS = 8_000        # budget for all connected passages together
 PASSAGE_CHARS = 2_000        # budget for one connected passage
@@ -82,47 +83,61 @@ class AIOutput(BaseModel):
     scenarios: list[AIScenario] = []
 
 
-# Each pass over a section looks for a different kind of scenario.  Spec text rarely states a multi-command flow outright, so a
-# single "what does the text say" pass yields one or two; the later passes walk the field descriptions, the preconditions and
-# the value space, which is where a test developer finds most scenarios.
+# Scenarios come in three categories, and each pass over a section looks for one kind of scenario within a category.  Spec text
+# rarely states a whole test flow outright, so a single "what does the text say" pass yields one or two; the other passes walk the
+# field descriptions, the preconditions and the value space, which is where a test developer finds most scenarios.
+CATEGORIES = {
+    "functional": "Functional: the command(s) of the section used as the text intends, field by field and value by value",
+    "cross": "Cross-command: flows that need several commands (setup, the behaviour, then an observing or dependent command)",
+    "negative": "Negative: invalid or reserved values, skipped preconditions, broken orderings and exceeded limits",
+}
+DEFAULT_CATEGORIES = ("functional", "cross", "negative")
 ANGLES = [
-    {"id": "explicit", "title": "Flows the text states",
-     "focus": "Multi-command flows, orderings, preconditions and dependencies that the SECTION or RELATED text states."},
-    {"id": "fields", "title": "Field behaviours across commands",
+    {"id": "functional", "category": "functional", "min_commands": 1, "title": "Functional behaviour of the section's commands",
+     "focus": "Exercise each command defined in the SECTION the way the text intends. Walk its fields one by one: every field the tables "
+              "define, every enumerated value, flags set and cleared, identifiers and counts in their valid range. One scenario per field or "
+              "behaviour the text describes; a scenario may be the command alone, or add setup / follow-up steps from CATALOG where the text "
+              "needs them (e.g. the resource the command acts on must exist first)."},
+    {"id": "explicit", "category": "cross", "min_commands": 2, "title": "Flows the text states",
+     "focus": "Multi-command flows, orderings, preconditions and dependencies that the SECTION or RELATED text states. Every scenario uses "
+              "at least two different commands from CATALOG."},
+    {"id": "fields", "category": "cross", "min_commands": 2, "title": "Field behaviours across commands",
      "focus": "Walk the fields in the SECTION's tables one by one. For each field whose description says what the device does with data, "
               "state, limits or ordering, write a scenario: the section's command submitted with that field set, then a partner command from "
               "CATALOG that observes or depends on the effect (reads back, verifies, compares, queries, releases, undoes). One scenario per field "
-              "that gives you something to check; use different partner commands where several fit."},
-    {"id": "negative", "title": "Misuse, preconditions and limits",
-     "focus": "What happens when a precondition is skipped or an ordering rule is broken (the dependent command before its setup, the release "
-              "before the dependent command, a limit exceeded, a reserved value used) and the error cases the text describes, each using two or "
-              "more commands."},
-    {"id": "variants", "title": "Value and boundary variants",
+              "that gives you something to check; use different partner commands where several fit. Every scenario uses at least two "
+              "different commands."},
+    {"id": "negative", "category": "negative", "min_commands": 1, "title": "Misuse, preconditions and limits",
+     "focus": "Error and misuse cases: a field set to a reserved or invalid value, a value or identifier out of its valid range (e.g. one "
+              "that refers to nothing that exists), a limit exceeded (several commands outstanding beyond a stated limit), a precondition "
+              "skipped or an ordering rule broken (the dependent command before its setup, the release before the dependent command), and "
+              "every error case or status code the text describes. A single command is enough when the error lies in its own fields; use "
+              "several when the error comes from the order or state. Mark these scenarios observability 'stimulus' unless the whole check is "
+              "visible in what is submitted."},
+    {"id": "variants", "category": "functional", "min_commands": 1, "title": "Value and boundary variants",
      "focus": "The flows above repeated across the values of the fields the text defines: flags set and cleared, each enumerated value, size "
               "minimum / maximum. Mark such a field condition with \"vary\": true instead of listing the variants."},
 ]
-DEFAULT_PASSES = 3
 MAX_VARIANTS = 8                # values tried per varied field
-MAX_PER_SECTION = 60            # drafts kept per section across all passes and variants
+MAX_PER_SECTION = 90            # drafts kept per section across all passes and variants
 
-SYSTEM = """You write functional test scenarios for a device specification, the way a test-script developer does.
-A scenario is an ordered sequence of SEVERAL commands; it is checked against a log of SUBMITTED commands only
+SYSTEM = """You write test scenarios for a device specification, the way a test-script developer does.
+A scenario is an ordered sequence of one or more commands; it is checked against a log of SUBMITTED commands only
 (no completions or responses are logged).
 
 You are given SECTION (the part of the specification the scenarios are about) and RELATED passages from elsewhere in the
 specification, both as numbered sentences like [S12]; CATALOG (the only commands, bit ranges and values you may use);
-and an ANGLE: the kind of scenario to write in this pass.
+and an ANGLE: the category and kind of scenario to write in this pass, and how many different commands each one needs.
 
 Rules:
-- Every scenario MUST use at least two different commands from CATALOG. A scenario about one command alone is useless here.
-  Typical shapes: set something up, exercise the behaviour the SECTION describes, then observe it with another command;
-  create a resource before using it and release it afterwards; write, then read back or verify.
+- Follow the ANGLE. When it asks for at least two different commands, a scenario about one command alone is rejected.
+  Typical multi-command shapes: set something up, exercise the behaviour the SECTION describes, then observe it with another
+  command; create a resource before using it and release it afterwards; write, then read back or verify.
 - Mine the text. The SECTION's tables define each field and what it does. A field description that says what the device does
-  with data, state, limits or ordering is enough for a scenario even when the text names no second command: pair the command
-  with a partner from CATALOG that can observe or depend on the effect. Do not invent behaviour the text does not support.
-- Write as many DISTINCT scenarios as the text supports for the ANGLE, up to the stated limit. A different field, precondition,
-  partner command or ordering is a different scenario; the same flow with cosmetic changes is not. Do not stop at one when more
-  fit. Reply testable=false only when the text gives nothing at all for this ANGLE.
+  with data, state, limits or ordering is enough for a scenario. Do not invent behaviour the text does not support.
+- Write as many DISTINCT scenarios as the text supports for the ANGLE, up to the stated limit. A different field, value,
+  precondition, partner command or ordering is a different scenario; the same flow with cosmetic changes is not. Do not stop at
+  one when more fit. Reply testable=false only when the text gives nothing at all for this ANGLE.
 - Never invent opcodes, commands or bit positions. Use only CATALOG. Field values are decimal integers; operators are
   'eq','ne','in' (list),'range' ({"lo","hi"}) or 'mask' ({"mask","value"}).
 - When a scenario should be repeated for the values of one field (a flag, an enumerated value, a size boundary), put
@@ -130,14 +145,24 @@ Rules:
 - Link steps through values: in an earlier step add "capture": {"name": {"dw":..,"hi":..,"lo":..}} and in a later step's
   field use "value": {"var": "name"} with op 'eq' or 'ne' (for example the identifier chosen in one command is the
   identifier used by the next). A captured value is a single integer.
-- Give every step a short 'note' naming its role (setup, stimulus, follow-up check).
+- Give every step a short 'note' naming its role (setup, stimulus, follow-up check, expected error).
 - order 'strict' when the text requires an order, otherwise 'any'. scope 'test' keeps all steps in one test.
 - observability 'submission' = the whole flow is visible in what was submitted; 'stimulus' = only the commands that drive the
-  behaviour are visible, the device's response cannot be verified.
+  behaviour are visible, the device's response (e.g. an error status) cannot be verified.
 - Cite the sentences that justify each scenario in "evidence": ["S12", "S40"], copying the ids exactly. Every scenario needs
   at least one id. Do not quote text.
 - Leave "within" out unless the text states a window; when present it is a positive integer (a count of commands), never 0.
 - Reply with one JSON object only."""
+
+
+def angles_for(categories: list[str] | tuple[str, ...] | None = None, variants: bool = False) -> list[dict]:
+    """The passes to run, in ANGLES order: those of the selected categories, plus the value-variants pass when asked for."""
+    cats = list(DEFAULT_CATEGORIES if categories is None else categories)
+    if not isinstance(categories, (list, tuple, type(None))) or not cats or any(not isinstance(c, str) or c not in CATEGORIES for c in cats):
+        raise ValueError(f"categories must be a non-empty list of {sorted(CATEGORIES)}")
+    if not isinstance(variants, bool):
+        raise ValueError("variants must be true or false")
+    return [a for a in ANGLES if (a["id"] == "variants" and variants) or (a["id"] != "variants" and a["category"] in cats)]
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -485,7 +510,8 @@ def _messages(conn: sqlite3.Connection, set_id: int, u: dict, focus: str, limit:
             + (f"SELECTED TOGETHER: the user chose these commands to be tested as a group, so scenarios should combine them where the text supports it: "
                f"{', '.join(group)}.\n\n" if group and len(group) > 1 else "")
             + (f"FOCUS requested by the user: {focus}\n\n" if focus.strip() else "")
-            + (f"ANGLE for this pass - {angle['title']}: {angle['focus']}\n\n" if angle else "")
+            + (f"ANGLE for this pass - {angle['title']}: {angle['focus']}\nCATEGORY: {CATEGORIES[angle['category']]}. Each scenario uses "
+               + ("at least two different commands" if angle["min_commands"] > 1 else "one command or more") + ".\n\n" if angle else "")
             + f"Write up to {limit} scenarios; reach that number when the text supports it.")
     corpus = u["primary"] + "\n" + "\n".join(r["text"] for r in u["related"])
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}], corpus, ev
@@ -539,20 +565,19 @@ def _variants(conn: sqlite3.Connection, set_id: int, sc: AIScenario, pred: dict,
 
 def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMService, section_keys: list[str] | None = None,
                              command_keys: list[str] | None = None, focus: str = "", max_per_section: int = 6, progress=None,
-                             passes: int = DEFAULT_PASSES) -> dict[str, int]:
-    """One model call per section per pass (`passes` of ANGLES, in order); `max_per_section` is the limit asked of each call."""
+                             categories: list[str] | None = None, variants: bool = False) -> dict[str, int]:
+    """One model call per section per pass: the ANGLES of the selected `categories` (default: all three), plus the value-variants
+    pass when `variants`; `max_per_section` is the limit asked of each call."""
     if not isinstance(max_per_section, int) or isinstance(max_per_section, bool) or not 1 <= max_per_section <= 20:
         raise ValueError("max_per_section must be an integer from 1 to 20")
-    if not isinstance(passes, int) or isinstance(passes, bool) or not 1 <= passes <= len(ANGLES):
-        raise ValueError(f"passes must be an integer from 1 to {len(ANGLES)}")
+    angles = angles_for(categories, variants)
     units = build_units(conn, set_id, section_keys, command_keys)
     cmds, fields = catalog_context(conn, set_id)
-    angles = ANGLES[:passes]
     group = [cmds[k]["name"] for k in dict.fromkeys([*(command_keys or []), *(c for u in units for c in u["own_commands"])]) if k in cmds]
     req_text = {r["key"]: norm_text(jloads(r["attrs_json"], {}).get("text", "")) for r in rows(conn, "SELECT key,attrs_json FROM catalog_item WHERE set_id=? AND kind='requirement'", (set_id,))}
-    stats = {"sections": len(units), "created": 0, "variants": 0, "not_testable": 0, "rejected": 0, "failed": 0, "duplicates": 0}
+    stats = {"sections": len(units), "created": 0, **{c: 0 for c in CATEGORIES}, "variants": 0, "not_testable": 0, "rejected": 0, "failed": 0, "duplicates": 0}
     cfg = svc.task_cfg("generate")
-    eventlog.emit("info", "agent", f"Cross-command agent starting: {len(units)} section(s) x {len(angles)} pass(es), model {cfg['provider']}/{cfg['model'] or '(unset)'}",
+    eventlog.emit("info", "agent", f"Scenario agent starting: {len(units)} section(s) x {len(angles)} pass(es) ({', '.join(a['id'] for a in angles)}), model {cfg['provider']}/{cfg['model'] or '(unset)'}",
                   sections=[u["section_key"] for u in units], passes=[a["id"] for a in angles], provider=cfg["provider"], model=cfg["model"], focus=focus or None)
     step = 0
     for n, u in enumerate(units):
@@ -581,8 +606,11 @@ def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMServ
                 eventlog.emit("info", "agent", f"{tag}: nothing for this angle: {(out.reason or 'no reason given')[:200]}", section=u["section_key"])
                 _record(conn, set_id, u["section_key"], svc, "not_testable", out.model_dump(), out.reason, meta, task=task)
                 continue
-            if not cleared:      # a successful answer replaces this section's earlier unreviewed drafts; approved / rejected ones are never touched
-                conn.execute("DELETE FROM scenario WHERE set_id=? AND origin='cross' AND state='draft' AND sid LIKE ? ESCAPE '\\'", (set_id, _like(u["section_key"]) + "#%"))
+            if not cleared:      # a successful answer replaces this section's earlier unreviewed drafts of the categories being generated;
+                # approved / rejected ones are never touched
+                cats = sorted({a["category"] for a in angles})
+                conn.execute(f"DELETE FROM scenario WHERE set_id=? AND origin='cross' AND state='draft' AND kind IN ({','.join('?' * len(cats))}) "
+                             "AND sid LIKE ? ESCAPE '\\'", (set_id, *cats, _like(u["section_key"]) + "#%"))
                 cleared = True
             existing = {r["predicate_json"] for r in rows(conn, "SELECT predicate_json FROM scenario WHERE set_id=?", (set_id,))}
             created, problems = 0, []
@@ -600,13 +628,14 @@ def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMServ
                 sid = f"{u['section_key']}#{max(taken, default=0) + 1}"          # never collides with an approved / rejected scenario of the section
                 cur = conn.execute("INSERT OR IGNORE INTO scenario(set_id,sid,origin,kind,title,description,observability,predicate_json,state,provenance_json)"
                                    " VALUES(?,?,?,?,?,?,?,?,?,?)",
-                                   (set_id, sid, "cross", "cross", title, desc, obs, pj, "draft",
-                                    json.dumps({**meta, "prompt_version": PROMPT_VERSION, "angle": angle["id"], "quotes": evidence, "section": u["section_key"],
+                                   (set_id, sid, "cross", angle["category"], title, desc, obs, pj, "draft",
+                                    json.dumps({**meta, "prompt_version": PROMPT_VERSION, "angle": angle["id"], "category": angle["category"], "quotes": evidence, "section": u["section_key"],
                                                 "related": [r["key"] for r in u["related"]], "focus": focus or None, **extra})))
                 if not cur.rowcount:
                     return False
                 existing.add(pj)
                 kept += 1
+                stats[angle["category"]] += 1
                 # linked to the commands it drives and to the statements it cites: those items are judged by it
                 links = set(steps)
                 for q in evidence:
@@ -619,7 +648,7 @@ def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMServ
             for sc in out.scenarios[:max_per_section]:
                 evidence = _evidence(sc, ev, corpus)
                 errs: list[str] = []
-                if len({s_.command for s_ in sc.steps}) < 2:
+                if len({s_.command for s_ in sc.steps}) < angle["min_commands"]:
                     errs.append("not cross-command: needs at least two different commands")
                 try:
                     pred = to_predicate(sc, scoped_cmds)
@@ -645,5 +674,5 @@ def generate_cross_scenarios(conn: sqlite3.Connection, set_id: int, svc: LLMServ
                         stats["variants"] += 1
             _record(conn, set_id, u["section_key"], svc, "ok" if created else "needs_review", out.model_dump(), "; ".join(problems) or None, meta, task=task)
             conn.commit()
-    eventlog.emit("info" if not stats["failed"] else "warn", "agent", "Cross-command agent finished: " + ", ".join(f"{v} {k}" for k, v in stats.items()), **stats)
+    eventlog.emit("info" if not stats["failed"] else "warn", "agent", "Scenario agent finished: " + ", ".join(f"{v} {k}" for k, v in stats.items()), **stats)
     return stats

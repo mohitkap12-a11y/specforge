@@ -33,7 +33,7 @@ _lock = threading.Lock()
 _writer: threading.Thread | None = None
 _enq = 0                  # events accepted by emit()
 _done = 0                 # events written, or given up on (dropped / database gone)
-_cfg = {"min_level": "info", "capture_prompts": True, "preview_chars": 4000}
+_cfg = {"min_level": "info", "capture_prompts": True, "preview_chars": 4000, "print_prompts": True}
 
 
 def configure(settings: dict | None) -> None:
@@ -43,6 +43,7 @@ def configure(settings: dict | None) -> None:
     lvl = s.get("min_level", "info")
     _cfg["min_level"] = lvl if isinstance(lvl, str) and lvl in LEVELS else "info"
     _cfg["capture_prompts"] = bool(s.get("capture_prompts", True))
+    _cfg["print_prompts"] = bool(s.get("print_prompts", True))
     try:
         _cfg["preview_chars"] = max(200, min(int(s.get("preview_chars", 4000)), 50_000))
     except (TypeError, ValueError, OverflowError):
@@ -51,6 +52,10 @@ def configure(settings: dict | None) -> None:
 
 def capture_prompts() -> bool:
     return bool(_cfg["capture_prompts"])
+
+
+def print_prompts() -> bool:
+    return bool(_cfg["print_prompts"])
 
 
 def clip(text: Any, n: int | None = None) -> str:

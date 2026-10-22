@@ -4,7 +4,7 @@ Scenario and command **coverage for the NVMe / NVMe-MI specifications**, fully o
 
 1. Parse spec PDFs / DOCX (Base, NVM Command Set, MI, ...) into a versioned, cross-referenced model.
 2. Build the list of everything that can be covered (commands, fields, values, reserved bits, boundaries, normative statements).
-3. Generate cross-command scenarios per selected command or section, drafted by AI (Ollama or OpenCode) from the section plus every connected passage in the spec set; grounded, validated and human-approved.
+3. Generate functional, cross-command and negative scenarios per selected command or section, drafted by AI (Ollama or OpenCode) from the section plus every connected passage in the spec set; grounded, validated and human-approved.
 4. Match scenarios against a SQLite dump of submitted commands and report **covered / partial / not covered / N/A**, with evidence.
 5. Export Excel / HTML / CSV / JSON reports.
 
@@ -176,4 +176,4 @@ GET    /api/logs/stream?after_id=...      # server-sent events, same filters
 DELETE /api/logs
 ```
 
-Settings → Logging sets the minimum level (debug adds cache hits and progress heartbeats) and whether prompts and replies are kept (they can contain spec text and stay in the local workspace database). Logging never blocks work: events are queued and written by a separate thread, and the newest 100,000 are kept.
+Settings → Logging sets the minimum level (debug adds cache hits and progress heartbeats) and whether prompts and replies are kept (they can contain spec text and stay in the local workspace database). The Activity view keeps a preview of each prompt (Settings → "Prompt/reply preview length"); the **full** prompt sent to the model and its full reply are also printed in the terminal running `specforge serve` and appended to `~/.specforge/logs/llm-prompts.log` (rotated at 20 MB), unless "Print full prompts to the server log" is switched off. Logging never blocks work: events are queued and written by a separate thread, and the newest 100,000 are kept.

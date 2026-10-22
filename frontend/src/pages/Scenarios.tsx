@@ -9,6 +9,7 @@ import { useDebounced } from "../hooks";
 import type { Scenario } from "../types";
 
 const LIMIT = 100;
+const CATEGORY: Record<string, string> = { functional: "Functional", cross: "Cross-command", negative: "Negative" };
 
 function Drawer({ s, setId, onClose }: { s: Scenario; setId: number; onClose: () => void }) {
   const qc = useQueryClient();
@@ -40,7 +41,7 @@ function Drawer({ s, setId, onClose }: { s: Scenario; setId: number; onClose: ()
   return (
     <aside className="drawer" aria-label="Scenario detail">
       <div className="row"><h2 className="grow">{s.sid}</h2><button onClick={onClose}>Close</button></div>
-      <div className="row"><Badge value={s.state} label={s.state} /><span className="badge">{s.origin}</span><span className="badge">{s.observability}</span></div>
+      <div className="row"><Badge value={s.state} label={s.state} /><span className="badge">{CATEGORY[s.kind ?? ""] ?? s.kind ?? s.origin}</span><span className="badge">{s.observability}</span></div>
             <label>Title<input style={{ width: "100%" }} value={title} onChange={(e) => setTitle(e.target.value)} /></label>
       <label>Description<textarea rows={3} value={desc} onChange={(e) => setDesc(e.target.value)} /></label>
       <h3>Predicate</h3>
@@ -67,19 +68,19 @@ function Drawer({ s, setId, onClose }: { s: Scenario; setId: number; onClose: ()
 export default function ScenariosPage() {
   const sel = useSelectedSet();
   const qc = useQueryClient();
-  const [origin, setOrigin] = useState("");
+  const [kind, setKind] = useState("");
   const [state, setState] = useState("");
   const [q, setQ] = useState("");
   const dq = useDebounced(q);
   const [offset, setOffset] = useState(0);
   const [checked, setChecked] = useState<Set<number>>(new Set());
   const [open, setOpen] = useState<number | null>(null);
-  useEffect(() => { setOffset(0); setChecked(new Set()); }, [sel.setId, origin, state, dq]);
+  useEffect(() => { setOffset(0); setChecked(new Set()); }, [sel.setId, kind, state, dq]);
 
   const list = useQuery({
-    queryKey: ["scenarios", sel.setId, origin, state, dq, offset],
+    queryKey: ["scenarios", sel.setId, kind, state, dq, offset],
     enabled: sel.setId !== null,
-    queryFn: () => api.scenarios(sel.setId!, { origin, state, q: dq, offset, limit: LIMIT }),
+    queryFn: () => api.scenarios(sel.setId!, { kind, state, q: dq, offset, limit: LIMIT }),
   });
   const total = list.data?.total;
   useEffect(() => {   // a review action can shrink a filtered list below the current page; return to the last valid page
@@ -96,18 +97,19 @@ export default function ScenariosPage() {
 
   return (
     <>
-      <PageHeader title="Scenarios" description="Cross-command scenarios are drafted from selected spec sections and stay drafts until you approve them; only approved scenarios count toward coverage." />
+      <PageHeader title="Scenarios" description="Functional, cross-command and negative scenarios are drafted from selected spec sections and stay drafts until you approve them; only approved scenarios count toward coverage." />
       <div className="row" style={{ marginBottom: 12 }}>
         <SetPicker sel={sel} />
-        <select value={origin} onChange={(e) => setOrigin(e.target.value)} aria-label="Origin">
-          <option value="">All origins</option><option value="cross">Cross-command</option>
+        <select value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Category">
+          <option value="">All categories</option>
+          {Object.entries(CATEGORY).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
         </select>
         <select value={state} onChange={(e) => setState(e.target.value)} aria-label="State">
           <option value="">All states</option><option value="draft">Draft</option><option value="approved">Approved</option><option value="rejected">Rejected</option>
         </select>
         <input placeholder="Search title or id…" value={q} onChange={(e) => setQ(e.target.value)} />
         <span className="grow" />
-        <button className={showGen ? "" : "primary"} disabled={sel.setId === null} onClick={() => setShowGen((v) => !v)}>{showGen ? "Hide generator" : "Generate cross-command scenarios"}</button>
+        <button className={showGen ? "" : "primary"} disabled={sel.setId === null} onClick={() => setShowGen((v) => !v)}>{showGen ? "Hide generator" : "Generate scenarios"}</button>
       </div>
       <ErrorNote error={sel.error ?? list.error} />
       {showGen && sel.setId !== null && <CrossGenerator setId={sel.setId} />}
@@ -128,7 +130,7 @@ export default function ScenariosPage() {
         </div>
       )}
       {sel.setId !== null && <Loading q={list} />}
-      {list.data && rows.length === 0 && <Empty icon={FlaskConical} title="No scenarios match">Use “Generate cross-command scenarios” to draft some from the spec sections, or change the filters.</Empty>}
+      {list.data && rows.length === 0 && <Empty icon={FlaskConical} title="No scenarios match">Use “Generate scenarios” to draft some from the spec sections, or change the filters.</Empty>}
       {rows.length > 0 && (
         <div className="card">
           <div className="scroll">
@@ -136,11 +138,11 @@ export default function ScenariosPage() {
               <thead><tr>
                 <th><input type="checkbox" aria-label="Select all" checked={rows.length > 0 && rows.every((s) => checked.has(s.id))}
                   onChange={(e) => setChecked(e.target.checked ? new Set(rows.map((s) => s.id)) : new Set())} /></th>
-                <th>ID</th><th>Title</th><th>Origin</th><th>State</th><th>Observability</th><th>Items</th></tr></thead>
+                <th>ID</th><th>Title</th><th>Category</th><th>State</th><th>Observability</th><th>Items</th></tr></thead>
               <tbody>{rows.map((s) => (
                 <tr key={s.id} className={`click ${open === s.id ? "sel" : ""}`} onClick={() => setOpen(s.id)}>
                   <td onClick={(e) => e.stopPropagation()}><input type="checkbox" aria-label={`Select ${s.sid}`} checked={checked.has(s.id)} onChange={() => toggle(s.id)} /></td>
-                  <td className="mono small">{s.sid}</td><td>{s.title}</td><td>{s.origin}</td><td><Badge value={s.state} label={s.state} /></td>
+                  <td className="mono small">{s.sid}</td><td>{s.title}</td><td>{CATEGORY[s.kind ?? ""] ?? s.kind ?? s.origin}</td><td><Badge value={s.state} label={s.state} /></td>
                   <td className="small">{s.observability}</td><td>{s.items.length}</td>
                 </tr>
               ))}</tbody>

@@ -137,6 +137,10 @@ export default function SettingsPage() {
               <Switch label="Record prompts and model replies" checked={s.logging?.capture_prompts ?? true} onChange={(v) => set(["logging", "capture_prompts"], v)} />
               <div><strong>Record prompts and model replies</strong><div className="muted small">Lets you see exactly what each AI call was asked and what it answered. They can contain spec text; they stay in your local workspace database.</div></div>
             </div>
+            <div className="row" style={{ marginTop: 16, flexWrap: "nowrap", alignItems: "flex-start" }}>
+              <Switch label="Print full prompts to the server log" checked={s.logging?.print_prompts ?? true} onChange={(v) => set(["logging", "print_prompts"], v)} />
+              <div><strong>Print full prompts to the server log</strong><div className="muted small">Every prompt sent to a model and every reply, in full (not shortened), is printed in the terminal running <code>specforge serve</code> and appended to <code>logs/llm-prompts.log</code> in the workspace.</div></div>
+            </div>
           </Section>
 
           <Section id="mi" title="NVMe-MI message layout" description={<>Overrides merged over the built-in default used to decode NVMe-MI messages in command databases. <strong>Verify against the MI revision under test</strong>, then re-import the command DB. Only the keys you list are overridden, e.g. <code>{`{"mi": {"opcode_byte": 4}}`}</code>.</>}>

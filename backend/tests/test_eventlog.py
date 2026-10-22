@@ -236,12 +236,12 @@ def test_stream_delivers_new_events(ws):
 
 
 # ---------------------------------------------------------------- review fixes
-@pytest.mark.parametrize("bad", [{"min_level": []}, {"min_level": "loud"}, {"min_level": 3}, {"capture_prompts": "yes"},
+@pytest.mark.parametrize("bad", [{"min_level": []}, {"min_level": "loud"}, {"min_level": 3}, {"capture_prompts": "yes"}, {"print_prompts": 1},
                                  {"preview_chars": 10}, {"preview_chars": "big"}, {"preview_chars": True}, None, 5])
 def test_invalid_logging_settings_are_rejected_and_not_stored(client, bad):
     r = client.put("/api/settings", json={"logging": bad})
     assert r.status_code == 422
-    assert client.get("/api/settings").json()["logging"] == {"min_level": "info", "capture_prompts": True, "preview_chars": 4000}
+    assert client.get("/api/settings").json()["logging"] == {"min_level": "info", "capture_prompts": True, "preview_chars": 4000, "print_prompts": True}
 
 
 def test_settings_must_be_an_object(client):
