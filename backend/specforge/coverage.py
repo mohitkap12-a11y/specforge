@@ -1,7 +1,10 @@
 """L6: deterministic coverage engine.
 
-For every approved scenario the predicate is evaluated against the decoded command signatures of one
-command source.  Item states are rolled up from scenario results; nothing here calls an LLM.
+The command source is first analysed (execscen.analyze_execution): every test case becomes an executed scenario linked to
+the catalog items it exercised.  Those links are observations and count as they are; requirement links an AI proposed for
+an executed scenario count once a reviewer approves them.  Spec-driven scenarios (the gap suggestions of crossgen) count when
+approved: their predicate is evaluated against the decoded command signatures.  Item states are rolled up from both;
+nothing here calls an LLM.
 """
 from __future__ import annotations
 
@@ -188,12 +191,19 @@ def eval_sequence(conn: sqlite3.Connection, source_id: int, pred: dict, sigs_by:
 
 # ----------------------------------------------------------------------------- run
 
-def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress=None) -> int:
+def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress=None, analyze: bool = True) -> int:
+    """`analyze` (re)derives the executed scenarios of the source first, so they always match the current catalog and log."""
+    from .execscen import analysis, analyze_execution
+
     src = row(conn, "SELECT * FROM cmd_source WHERE id=?", (source_id,))
     if not src or src["status"] != "imported":
         raise ValueError("command source must be imported before running coverage")
+    if analyze:
+        analyze_execution(conn, set_id, source_id)
+    execution = analysis(conn, set_id, source_id)
     sigs_by = _load_sigs(conn, source_id)
-    scen = rows(conn, "SELECT * FROM scenario WHERE set_id=?", (set_id,))
+    # executed scenarios belong to the command DB they were read from; another DB's never count here
+    scen = rows(conn, "SELECT * FROM scenario WHERE set_id=? AND (origin<>'exec' OR source_id=?)", (set_id, source_id))
     by_review = {}
     for s_ in scen:
         by_review[s_["state"]] = by_review.get(s_["state"], 0) + 1
@@ -206,6 +216,11 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
     batch = []
     for n, s in enumerate(scen):
         snap = (s["sid"], s["origin"], s["kind"], s["title"], s["observability"], s["state"], s["predicate_json"])
+        if s["origin"] == "exec":         # read from this very log: matched by construction, the evidence is the commands that ran it
+            prov = jloads(s["provenance_json"], {})
+            results[s["id"]] = {"state": "matched", "count": prov.get("commands", 0)}
+            batch.append((run_id, s["id"], "matched", prov.get("commands", 0), json.dumps(prov.get("evidence", [])), *snap))
+            continue
         if s["state"] != "approved":      # drafts / rejected scenarios never count, but the run still records that they existed
             batch.append((run_id, s["id"], "not_evaluated", 0, "[]", *snap))
             continue
@@ -226,15 +241,18 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
                      " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", batch)
 
     items = rows(conn, "SELECT * FROM catalog_item WHERE set_id=?", (set_id,))
-    links: dict[str, list[int]] = defaultdict(list)
-    for r in conn.execute("SELECT si.item_key, si.scenario_id FROM scenario_item si JOIN scenario s ON s.id=si.scenario_id WHERE s.set_id=?", (set_id,)):
-        links[r[0]].append(r[1])
+    links: dict[str, list[tuple[int, str | None]]] = defaultdict(list)
+    for r in conn.execute("SELECT si.item_key, si.scenario_id, si.state FROM scenario_item si JOIN scenario s ON s.id=si.scenario_id "
+                          "WHERE s.set_id=? AND (s.origin<>'exec' OR s.source_id=?)", (set_id, source_id)):
+        links[r[0]].append((r[1], r[2]))
     scen_state = {s["id"]: s["state"] for s in scen}
     item_res: dict[str, dict] = {}
     for it in items:
-        item_res[it["key"]] = _item_state(it, links.get(it["key"], []), scen_state, results)
-        if links.get(it["key"]):          # which scenarios this item was judged by, as of this run
-            item_res[it["key"]].setdefault("detail", {})["scenario_ids"] = sorted(links[it["key"]])
+        lk = links.get(it["key"], [])
+        item_res[it["key"]] = _item_state(it, lk, scen_state, results, execution is not None)
+        shown = sorted({sid for sid, st in lk if st != "rejected"})
+        if shown:                         # which scenarios this item was judged by, as of this run
+            item_res[it["key"]].setdefault("detail", {})["scenario_ids"] = shown
     # aggregate fields from their children
     children: dict[str, list[dict]] = defaultdict(list)
     for it in items:
@@ -251,6 +269,8 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
                        by_key[k]["kind"], by_key[k]["parent_key"], by_key[k]["label"], by_key[k]["observability"], by_key[k]["na_reason"],
                        by_key[k]["attrs_json"]) for k, v in item_res.items()])
     summary = summarize_run(conn, run_id, set_id, source_id, items, item_res, sigs_by)
+    if execution is not None:
+        summary["execution"] = {k: v for k, v in execution.items() if k not in ("new", "updated", "removed", "links_reopened")}
     conn.execute("UPDATE coverage_run SET summary_json=? WHERE id=?", (json.dumps(summary), run_id))
     conn.commit()
     o = summary["overall"]
@@ -278,17 +298,35 @@ def _run_meta(conn: sqlite3.Connection, set_id: int, src: dict, scen: list[dict]
             "spec_set": sset["name"] if sset else "", "specs": specs, "issues": issues, "ai_models": models}
 
 
-def _item_state(it: dict, scen_ids: list[int], scen_state: dict[int, str], results: dict[int, dict]) -> dict:
+OBSERVED_KINDS = ("command", "field", "value", "boundary", "reserved", "mi_tunnel")   # what a log of submissions shows directly
+
+
+def _item_state(it: dict, links: list[tuple[int, str | None]], scen_state: dict[int, str], results: dict[int, dict], analysed: bool = False) -> dict:
+    """links: (scenario id, link state).  A link without a state belongs to a spec-driven scenario and counts when that scenario is
+    approved; 'observed' links (read from the log) and 'approved' requirement links count; 'proposed' ones wait for review."""
     if it["observability"] == "unobservable":
         return {"state": "na", "covered": 0, "total": 0, "detail": {"reason": it.get("na_reason") or "not observable at submission level"}}
-    if not scen_ids:
+    counted, pending, executed = [], 0, False
+    for sid, st in links:
+        if st is None:
+            if scen_state.get(sid) == "approved":
+                counted.append(sid)
+            else:
+                pending += 1
+        elif st in ("observed", "approved"):
+            counted.append(sid)
+            executed = True
+        elif st == "proposed":
+            pending += 1
+    if not counted:
+        if pending:
+            return {"state": "needs_review", "covered": 0, "total": 1, "detail": {"scenarios": pending}}
+        if analysed and it["kind"] in OBSERVED_KINDS:
+            return {"state": "not_covered", "covered": 0, "total": 1, "detail": {"reason": "not exercised by any test in the command DB"}}
         return {"state": "no_scenario", "covered": 0, "total": 1}
-    approved = [s for s in scen_ids if scen_state.get(s) == "approved"]
-    if not approved:
-        return {"state": "needs_review", "covered": 0, "total": 1, "detail": {"scenarios": len(scen_ids)}}
-    hit = sum(1 for s in approved if results[s]["state"] == "matched")
-    detail = {"scenarios": len(approved), "matched": hit}
-    if hit == len(approved):
+    hit = sum(1 for s in counted if results.get(s, {}).get("state") == "matched")
+    detail = {"scenarios": len(counted), "matched": hit, **({"executed": True} if executed else {})}
+    if hit == len(counted) or executed:      # an executed test is direct evidence; an unmatched spec suggestion does not undo it
         return {"state": "covered" if it["observability"] == "submission" else "stimulus_covered", "covered": 1, "total": 1, "detail": detail}
     return {"state": "partial" if hit else "not_covered", "covered": 1 if hit else 0, "total": 1, "detail": detail}
 
@@ -356,8 +394,12 @@ def summarize_run(conn, run_id, set_id, source_id, items, item_res, sigs_by) -> 
         if iface == "mi" and queue == "admin" and ("pcie", "admin", opc) in known:
             continue
         unknown.append({"interface": iface, "queue": queue, "opcode": opc, "commands": sum(s["count"] for s in sl)})
+    every_kind: dict[str, list[str]] = defaultdict(list)
+    for i in items:
+        every_kind[i["kind"]].append(item_res[i["key"]]["state"])
     return {"overall": _counts([item_res[i["key"]]["state"] for i in direct]),
             "by_kind": {k: _counts(v) for k, v in by_kind.items()},
+            "by_kind_all": {k: _counts(v) for k, v in every_kind.items()},
             "by_command": {k: _counts(v) for k, v in by_cmd.items()},
             "by_family": {k: _counts(v) for k, v in by_family.items()},
             "unknown_commands": sorted(unknown, key=lambda u: -u["commands"]),

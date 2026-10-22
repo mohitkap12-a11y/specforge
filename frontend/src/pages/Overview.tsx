@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
-import { ArrowRight, Bot, Check, FileUp, Layers, ShieldCheck, Sparkles } from "lucide-react";
+import { ArrowRight, Bot, Check, FileUp, Layers, PlayCircle, ShieldCheck, Sparkles } from "lucide-react";
 import { api } from "../api";
 import { Badge, ErrorNote, Legend, Loading, PageHeader, Pct, StateBar } from "../components/ui";
 import { rememberSet } from "../hooks";
@@ -33,7 +33,7 @@ function SetTile({ set }: { set: SpecSet }) {
   const o = summary.data?.summary.overall;
   return (
     <div className="card">
-      <div className="card-head"><h2 className="grow" style={{ margin: 0 }}>{set.name}</h2><span className="muted small">{set.catalog_items} catalog items · {set.scenarios} scenarios</span></div>
+      <div className="card-head"><h2 className="grow" style={{ margin: 0 }}>{set.name}</h2><span className="muted small">{set.catalog_items} catalog items · {set.scenarios_executed} executed scenarios</span></div>
       <Loading q={runs} />
       {latest && <ErrorNote error={summary.error ?? gaps.error} />}
       {runs.data && !latest && <div className="muted">No coverage run yet. <Link to="/coverage" onClick={() => rememberSet(set.id)}>Run coverage →</Link></div>}
@@ -87,8 +87,8 @@ function AiCheck() {
   const q = useQuery({ queryKey: ["models", provider, "overview"], queryFn: () => api.providerModels(provider), enabled: go, staleTime: 0 });
   return (
     <div className="card">
-      <div className="card-head"><Bot size={16} /><h2 style={{ margin: 0 }}>AI scenario drafting</h2></div>
-      <p className="muted">Optional. A local model drafts scenarios from normative statements; nothing counts until you approve it.</p>
+      <div className="card-head"><Bot size={16} /><h2 style={{ margin: 0 }}>AI descriptions and suggestions</h2></div>
+      <p className="muted">Optional. A local model describes each executed flow, proposes the spec requirements it exercises and suggests scenarios for gaps; nothing it says counts until you approve it.</p>
       <div className="row small" style={{ marginBottom: 10 }}>
         <span className="muted">Provider</span><strong>{provider}</strong>
         <span className="muted">Model</span>{model ? <strong>{model}</strong> : <Badge value="warning" label="not selected" />}
@@ -123,10 +123,12 @@ export default function OverviewPage() {
     { icon: Sparkles, title: "Parse them", body: "Extract sections, tables, bit fields and normative statements, with an audit of what was found.", done: docs.some((d) => d.runs.some((r) => r.status === "done")), to: "/specs", cta: "Parse", detail: `${docs.filter((d) => d.runs.some((r) => r.status === "done")).length} of ${docs.length} parsed` },
     { icon: Layers, title: "Create a spec set", body: "Group the spec versions that reference each other and resolve cross-references.", done: setList.length > 0, to: "/sets", cta: "Create set", detail: `${setList.length} set(s)` },
     { icon: Check, title: "Build the catalog", body: "List every command, field, value and reserved bit. This is the coverage denominator.", done: setList.some((s) => s.catalog_items > 0), to: "/sets", cta: "Build catalog", detail: `${setList.reduce((n, s) => n + s.catalog_items, 0)} items` },
-    { icon: Bot, title: "Review scenarios", body: "Pick commands or sections and generate cross-command scenarios with a local model, then approve the ones you trust; drafts do not count until approved.", done: setList.some((s) => s.scenarios_approved > 0) && setList.every((s) => s.scenarios_draft === 0), to: "/scenarios", cta: "Review scenarios",
-      detail: `${setList.reduce((n, s) => n + s.scenarios_approved, 0)} approved` + (setList.some((s) => s.scenarios_draft > 0) ? `, ${setList.reduce((n, s) => n + s.scenarios_draft, 0)} awaiting review` : "") },
-    { icon: FileUp, title: "Import a command database", body: "Point at the SQLite dump of submitted commands and check the column mapping.", done: (sources.data ?? []).some((s) => s.status === "imported"), to: "/cmddb", cta: "Add database", detail: `${(sources.data ?? []).length} source(s)` },
-    { icon: ShieldCheck, title: "Run coverage", body: "Match approved scenarios against the commands and see what is covered, partial or missing.", done: (covRuns.data ?? []).length > 0, to: "/coverage", cta: "Run coverage", detail: `${runCount} run(s)` },
+    { icon: FileUp, title: "Import a command database", body: "Point at the SQLite dump of the commands your test scripts submitted and check the column mapping.", done: (sources.data ?? []).some((s) => s.status === "imported"), to: "/cmddb", cta: "Add database", detail: `${(sources.data ?? []).length} source(s)` },
+    { icon: PlayCircle, title: "Analyse the executed tests", body: "Turn every test case in the database into a scenario: the commands it sent, in order, named from the catalog with their field values.", done: setList.some((s) => s.analyses > 0), to: "/scenarios", cta: "Analyse",
+      detail: `${setList.reduce((n, s) => n + s.scenarios_executed, 0)} executed scenario(s)` },
+    { icon: Bot, title: "Review requirement links (optional)", body: "A local model describes each flow and proposes the spec requirements it exercises; approve the ones you agree with. Unreviewed links do not count.", done: setList.some((s) => s.analyses > 0) && setList.every((s) => s.links_proposed === 0), to: "/scenarios", cta: "Review",
+      detail: setList.some((s) => s.links_proposed > 0) ? `${setList.reduce((n, s) => n + s.links_proposed, 0)} to review` : "nothing waiting for review" },
+    { icon: ShieldCheck, title: "Run coverage", body: "See which commands, fields, values and requirements the tests covered, partially covered or missed, with the tests as evidence.", done: (covRuns.data ?? []).length > 0, to: "/coverage", cta: "Run coverage", detail: `${runCount} run(s)` },
   ];
   const firstOpen = steps.findIndex((s) => !s.done);
   const doneCount = steps.filter((s) => s.done).length;
@@ -192,7 +194,7 @@ export default function OverviewPage() {
               </div>
             ))}
           </div>
-        ) : <div className="muted small">Every step is done. Re-run coverage after approving more scenarios or importing new command data.</div>}
+        ) : <div className="muted small">Every step is done. Re-run coverage after importing new command data or reviewing requirement links.</div>}
       </div>
 
       <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(150px, 100%), 1fr))", marginBottom: 16 }}>

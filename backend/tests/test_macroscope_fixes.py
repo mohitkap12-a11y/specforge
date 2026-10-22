@@ -84,7 +84,10 @@ def test_evidence_is_limited_to_the_runs_spec_set(ws, demo_dir):
         wait_job(client, client.post(f"/api/cmddb/{src}/import").json()["job"])
         run = wait_job(client, client.post("/api/coverage/run", json={"set_id": sets[0], "source_id": src}).json()["job"])["result"]["run_id"]
         ev = client.get(f"/api/coverage/{run}/evidence", params={"item": "cmd:admin:06"}).json()
-        assert len(ev) == 1 and ev[0]["result"] == "matched"             # the identical scenario of the other set is not returned
+        spec = [e for e in ev if e["sid"].startswith("T:")]
+        assert len(spec) == 1 and spec[0]["result"] == "matched"         # the identical scenario of the other set is not returned
+        own = {r["id"] for r in client.get(f"/api/sets/{sets[0]}/scenarios", params={"origin": "exec"}).json()["scenarios"]}
+        assert {e["id"] for e in ev if e["sid"].startswith("exec:")} <= own and own
 
 
 # ------------------------------------------------------------------ catalog.py

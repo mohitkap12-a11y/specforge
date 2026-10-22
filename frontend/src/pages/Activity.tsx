@@ -13,7 +13,7 @@ const MAX_ROWS = 4000;       // kept while following the live tail
 const HARD_MAX_ROWS = 20000; // ceiling while the user is reading history
 const LENSES = {
   all: { label: "All", sources: "" },
-  process: { label: "Processing", sources: "job,parser,catalog,scenarios,import,coverage" },
+  process: { label: "Processing", sources: "job,parser,catalog,scenarios,import,exec,coverage" },
   ai: { label: "AI agents", sources: "agent,llm" },
   app: { label: "App", sources: "api,system" },
 } as const;

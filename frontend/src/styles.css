@@ -270,7 +270,7 @@ table.t { width: 100%; border-collapse: collapse; }
 .logrow .ts { color: var(--muted); white-space: nowrap; } .logrow .msg { white-space: pre-wrap; word-break: break-word; font-family: var(--font); font-size: 13px; color: var(--text); }
 .logrow.lv-debug .msg { color: var(--muted); } .logrow.lv-warn .msg { color: var(--warn); } .logrow.lv-error .msg { color: var(--bad); font-weight: 500; }
 .logrow .src { font-size: 11px; padding: 0 7px; border-radius: 4px; background: var(--neutral-bg); color: var(--text-2); text-align: center; line-height: 18px; }
-.src.s-agent, .src.s-llm { background: var(--violet-bg); color: var(--violet); } .src.s-parser, .src.s-catalog, .src.s-scenarios, .src.s-import, .src.s-coverage { background: var(--info-bg); color: var(--info); }
+.src.s-agent, .src.s-llm { background: var(--violet-bg); color: var(--violet); } .src.s-parser, .src.s-catalog, .src.s-scenarios, .src.s-import, .src.s-exec, .src.s-coverage { background: var(--info-bg); color: var(--info); }
 .src.s-job { background: var(--ok-bg); color: var(--ok); } .src.s-api { background: var(--neutral-bg); } .src.s-system { background: var(--warn-bg); color: var(--warn); }
 .logrow .jobtag { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 6px; cursor: pointer; background: none; height: auto; }
 .logrow .jobtag:hover { color: var(--text); border-color: var(--border-strong); background: none; }

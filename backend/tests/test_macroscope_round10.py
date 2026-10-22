@@ -15,7 +15,7 @@ def _manual(conn):
                  (json.dumps({"scope": "global", "order": "strict", "steps": [{"command": "cmd:admin:06", "interface": "pcie", "queue": "admin",
                                                                                "cs": None, "opcode": 6, "fields": []}]}),))
     sid = conn.execute("SELECT id FROM scenario WHERE sid='M:p'").fetchone()[0]
-    conn.execute("INSERT INTO scenario_item VALUES(?, 'cmd:admin:06')", (sid,))
+    conn.execute("INSERT INTO scenario_item(scenario_id,item_key) VALUES(?, 'cmd:admin:06')", (sid,))
     conn.commit()
     return sid
 

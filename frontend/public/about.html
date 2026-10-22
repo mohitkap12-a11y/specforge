@@ -170,8 +170,8 @@
     <div class="node rv" style="--d:.05s"><span class="n">01</span><h3>Parse</h3><p>PDF / DOCX into a versioned, cross-referenced model with a self-audit.</p></div>
     <div class="node rv" style="--d:.15s"><span class="n">02</span><h3>Link</h3><p>Resolve references across Base, NVM Command Set and MI specs.</p></div>
     <div class="node rv" style="--d:.25s"><span class="n">03</span><h3>Catalog</h3><p>Commands, fields, values, reserved bits, boundaries, requirements.</p></div>
-    <div class="node rv" style="--d:.35s"><span class="n">04</span><h3>Scenarios</h3><p>Cross-command scenarios drafted per section, grounded and human-approved.</p></div>
-    <div class="node rv" style="--d:.45s"><span class="n">05</span><h3>Match</h3><p>Compare with a SQLite dump of submitted commands.</p></div>
+    <div class="node rv" style="--d:.35s"><span class="n">04</span><h3>Import</h3><p>Read a SQLite dump of the commands your test scripts submitted.</p></div>
+    <div class="node rv" style="--d:.45s"><span class="n">05</span><h3>Scenarios</h3><p>One scenario per test case: what it executed, named from the catalog.</p></div>
     <div class="node rv" style="--d:.55s"><span class="n">06</span><h3>Report</h3><p>Excel, HTML, CSV and JSON with drill-down evidence.</p></div>
   </div>
   <div class="flow"></div>
@@ -180,13 +180,13 @@
 <section id="trust" data-title="Trust">
   <div class="eyebrow rv">The design rule</div>
   <h2 class="rv">Code decides. <span class="grad">AI only drafts.</span></h2>
-  <p class="lead rv" style="--d:.1s">A coverage number you cannot reproduce is worthless. Verdicts come from deterministic code. AI is confined to suggesting scenarios, and nothing it writes counts until a person approves it.</p>
+  <p class="lead rv" style="--d:.1s">A coverage number you cannot reproduce is worthless. Scenarios are read from what your tests executed, and verdicts come from deterministic code. AI only describes flows, proposes the requirements they exercise and suggests scenarios for gaps; nothing it writes counts until a person approves it.</p>
   <div class="rule rv" style="--d:.2s">
     <div class="split">
       <div class="card"><b class="badge-code">Code (deterministic)</b><p>What exists<br />What is covered<br />Every verdict</p></div>
-      <div class="card"><b class="badge-ai">AI (assistive)</b><p>Drafts scenarios<br />Quotes the spec<br />Never scores</p></div>
+      <div class="card"><b class="badge-ai">AI (assistive)</b><p>Describes executed flows<br />Proposes requirement links<br />Never scores</p></div>
     </div>
-    <div class="shield">Drafts are schema-validated, grounded in verbatim spec quotes, de-duplicated, and have <b style="color:var(--text)">zero effect on coverage</b> until approved.</div>
+    <div class="shield">AI output is schema-validated, limited to requirements it was shown, and has <b style="color:var(--text)">zero effect on coverage</b> until approved.</div>
   </div>
 </section>
 

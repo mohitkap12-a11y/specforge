@@ -10,6 +10,7 @@ from typing import Any
 
 from . import __version__
 from .core.db import jloads, row, rows
+from .execscen import flow_summary
 
 GAP_STATES = ("not_covered", "partial", "no_scenario", "needs_review")
 
@@ -31,9 +32,19 @@ def build_dataset(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
     header = {"tool_version": __version__, "coverage_run": run_id, "created": run["created"], "spec_set": meta.get("spec_set", ""),
               "command_db": meta.get("command_db", ""), "command_db_sha256": meta.get("source_sha256", ""),
               "commands_imported": meta.get("commands_imported", 0), "ai_models": meta.get("ai_models", []),
+              "scenarios_executed": sum(1 for s in scen if s["origin"] == "exec"),
+              "tests_executed": summary.get("execution", {}).get("tests", 0),
               "scenarios_approved": sum(1 for s in scen if s["state"] == "approved"),
               "scenarios_draft": sum(1 for s in scen if s["state"] == "draft")}
-    return {"header": header, "summary": summary, "specs": specs, "items": items, "scenarios": scen, "issues": issues}
+    executed = []
+    for s in scen:
+        if s["origin"] != "exec":
+            continue
+        p = jloads(s["predicate_json"], {})
+        executed.append({"sid": s["sid"], "title": s["title"], "test_count": p.get("test_count", 0), "tests": p.get("tests", []),
+                         "commands": p.get("commands", 0), "steps": p.get("n_steps", len(p.get("steps", []))),
+                         "flow": flow_summary(p.get("steps", []), 400) + (" → … (log continues)" if p.get("truncated") else "")})
+    return {"header": header, "summary": summary, "specs": specs, "items": items, "scenarios": scen, "executed": executed, "issues": issues}
 
 
 def _pct(v):
@@ -68,6 +79,10 @@ def to_csv(ds, which: str = "gaps") -> bytes:
         w.writerow(["key", "kind", "command", "label", "observability", "state"])
         for i in _gap_rows(ds):
             w.writerow([i["key"], i["kind"], i["command"], i["label"], i["observability"], i["state"]])
+    elif which == "executed":
+        w.writerow(["sid", "title", "tests", "commands", "steps", "flow", "test names"])
+        for x in ds.get("executed", []):
+            w.writerow([x["sid"], x["title"], x["test_count"], x["commands"], x["steps"], x["flow"], "; ".join(x["tests"])])
     else:
         w.writerow(["key", "kind", "command", "label", "observability", "state", "na_reason"])
         for i in ds["items"]:
@@ -129,6 +144,12 @@ def to_xlsx(ds) -> bytes:
     sheet("Gaps", cols, [[i[c] for c in cols] for i in _gap_rows(ds)], state_col=5)
     sheet("Stimulus only", cols, [[i[c] for c in cols] for i in ds["items"] if i["state"] == "stimulus_covered"], state_col=5)
     sheet("N-A", cols + ["reason"], [[*[i[c] for c in cols], i["na_reason"] or "not observable at submission level"] for i in ds["items"] if i["state"] == "na"], state_col=5)
+    by_kind = ds["summary"].get("by_kind_all", {})
+    sheet("By kind", ["kind", "covered", "stimulus_covered", "partial", "not_covered", "no_scenario", "needs_review", "na", "% covered", "% incl. stimulus"],
+          [[k, v["covered"], v["stimulus_covered"], v["partial"], v["not_covered"], v["no_scenario"], v["needs_review"], v["na"],
+            _pct(v["pct_covered"]), _pct(v["pct_incl_stimulus"])] for k, v in by_kind.items()])
+    sheet("Executed scenarios", ["sid", "title", "tests", "commands", "steps", "flow", "test names"],
+          [[x["sid"], x["title"], x["test_count"], x["commands"], x["steps"], x["flow"], ", ".join(x["tests"][:50])] for x in ds.get("executed", [])])
     sheet("Scenarios", ["sid", "origin", "kind", "title", "observability", "review state", "result", "match_count"],
           [[s["sid"], s["origin"], s["kind"], s["title"], s["observability"], s["state"], s["result"] or "", s["match_count"] or 0] for s in ds["scenarios"]], state_col=None)
     ev = []
@@ -167,6 +188,10 @@ def to_html(ds) -> bytes:
     cmd_rows = "".join(
         f"<tr><td>{e(k)}</td><td>{e(names.get(k, ''))}</td><td>{v['covered']}/{v['denominator']}</td><td>{_pct(v['pct_covered'])}</td>"
         f"<td style='width:30%'>{bar(v)}</td></tr>" for k, v in sorted(ds["summary"].get("by_command", {}).items()))
+    kind_rows = "".join(f"<tr><td>{e(k)}</td><td>{v['covered']}/{v['denominator']}</td><td>{_pct(v['pct_covered'])}</td><td style='width:30%'>{bar(v)}</td></tr>"
+                        for k, v in ds["summary"].get("by_kind_all", {}).items())
+    exec_rows = "".join(f"<tr><td>{e(x['title'])}</td><td title='{e(', '.join(x['tests'][:30]))}'>{x['test_count']}</td><td>{x['commands']}</td>"
+                        f"<td>{e(x['flow'])}</td></tr>" for x in ds.get("executed", []))
     gap_rows = "".join(f"<tr><td>{e(i['command'])}</td><td>{e(i['kind'])}</td><td>{e(i['label'])}</td><td>{e(i['state'])}</td></tr>" for i in _gap_rows(ds))
     hdr = "".join(f"<tr><th>{e(k)}</th><td>{e(', '.join(v) if isinstance(v, list) else str(v))}</td></tr>" for k, v in ds["header"].items())
     legend = "".join(f'<span style="margin-right:12px"><i style="display:inline-block;width:10px;height:10px;background:{c}"></i> {k}</span>' for k, c in colors.items())
@@ -176,6 +201,8 @@ th{{background:#f3f4f6}}.big{{font-size:32px;font-weight:700}}@media print{{body
 <h1>SpecForge coverage report</h1><table>{hdr}</table>
 <p><span class="big">{_pct(o.get('pct_covered'))}</span> covered (submission-complete) &nbsp; <b>{_pct(o.get('pct_incl_stimulus'))}</b> including stimulus-only
  &nbsp; denominator {o.get('denominator', 0)} (N/A excluded: {o.get('na', 0)})</p><p>{legend}</p>
+<h2>By kind</h2><table><tr><th>kind</th><th>covered</th><th>%</th><th>distribution</th></tr>{kind_rows}</table>
+<h2>Executed scenarios ({len(ds.get('executed', []))})</h2><table><tr><th>scenario</th><th>tests</th><th>commands</th><th>flow</th></tr>{exec_rows}</table>
 <h2>By command</h2><table><tr><th>key</th><th>command</th><th>covered</th><th>%</th><th>distribution</th></tr>{cmd_rows}</table>
 <h2>Gaps</h2><table><tr><th>command</th><th>kind</th><th>item</th><th>state</th></tr>{gap_rows}</table></body></html>"""
     return doc.encode()

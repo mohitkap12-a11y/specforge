@@ -20,10 +20,35 @@ export interface SectionData {
   references: { raw: string; kind: string; target_family: string | null; target_label: string | null }[];
 }
 export interface Issue { id: number; severity: string; kind: string; node_key: string | null; page: number | null; message: string; state: string; note: string | null }
-export interface SpecSet { id: number; name: string; members: any[]; catalog_items: number; scenarios: number; scenarios_approved: number; scenarios_draft: number }
+export interface SpecSet {
+  id: number; name: string; members: any[]; catalog_items: number; scenarios: number; scenarios_approved: number; scenarios_draft: number;
+  scenarios_executed: number; links_proposed: number; analyses: number;
+}
 export interface Scenario {
-  id: number; sid: string; origin: string; state: "draft" | "approved" | "rejected"; title: string; description: string | null;
-  observability: string; predicate: any; provenance: Record<string, any>; items: string[];
+  id: number; sid: string; origin: string; state: "draft" | "approved" | "rejected" | "observed"; title: string; description: string | null;
+  observability: string; predicate: any; provenance: Record<string, any>; items: string[]; source_id: number | null;
+  link_counts: Partial<Record<LinkState, number>>;
+}
+export type LinkState = "observed" | "proposed" | "approved" | "rejected";
+/** One field of an executed step: a discrete value (enumerated / flag) as sent. */
+export interface ExecField { key: string; name: string; dw: number | string; hi: number; lo: number; value: number; meaning: string; unlisted?: boolean; flag?: boolean; reserved_value?: boolean }
+/** A numeric field over the commands of a step. `values` is the distinct values seen, or ">16" when there were more. */
+export interface ExecRange { key: string; name: string; dw: number | string; hi: number; lo: number; min: number; max: number; values: number[] | string }
+export interface ExecStep {
+  command: string | null; name: string; interface: string; queue: string; opcode: number; cs: string | null; tunnel: boolean; count: number;
+  first: { test: string; seq: number; row: number | null }; fields: ExecField[]; ranges: ExecRange[];
+  reserved_set: { key: string; dw: number | string; hi: number; lo: number; value: number }[];
+}
+export interface ExecPredicate { observed: true; tests: string[]; test_count: number; commands: number; truncated: boolean; steps: ExecStep[] }
+export interface ScenarioLink {
+  key: string; state: LinkState; detail: { commands?: number; why?: string; model?: string }; kind: string | null; label: string | null;
+  observability: string | null; text?: string; strength?: string;
+}
+export interface ExecAnalysis {
+  source_id: number; created: string; tests: number; commands: number; unknown_commands: number; scenarios: number;
+  new?: number; updated?: number; removed?: number; links_reopened?: number;
+  observed: Record<string, { observed: number; total: number }>;
+  unknown: { interface: string; queue: string; opcode: number; commands: number }[];
 }
 export interface Counts {
   covered: number; stimulus_covered: number; partial: number; not_covered: number; no_scenario: number; needs_review: number; na: number;
@@ -33,7 +58,8 @@ export interface CovSummary {
   run: { id: number; set_id: number; source_id: number; created: string };
   meta: Record<string, any>;
   summary: {
-    overall: Counts; by_kind: Record<string, Counts>; by_command: Record<string, Counts>; by_family: Record<string, Counts>;
+    overall: Counts; by_kind: Record<string, Counts>; by_kind_all?: Record<string, Counts>; by_command: Record<string, Counts>; by_family: Record<string, Counts>;
+    execution?: Omit<ExecAnalysis, "source_id" | "created">;
     unknown_commands: { interface: string; queue: string; opcode: number; commands: number }[];
     scenarios: { state: string; n: number }[]; scenario_errors: number;
   };

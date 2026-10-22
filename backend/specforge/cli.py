@@ -1,4 +1,4 @@
-"""specforge command line: serve the UI, ingest specs, build catalogs, run coverage, export reports."""
+"""specforge command line: serve the UI, ingest specs, build catalogs, analyse command DBs, run coverage, export reports."""
 from __future__ import annotations
 
 import argparse
@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import catalog, cmddb, coverage, refs, reports
+from . import catalog, cmddb, coverage, execscen, refs, reports
 from .core import config
 from .core.db import connect, row, rows
 from .ingest import store
@@ -69,11 +69,35 @@ def cmd_catalog(a):
     print("references:", refs.summarize(refs.resolve_references(conn, a.set_id)))
 
 
+def _import(conn, path: str) -> int:
+    """Re-import the source already registered for this file, so `analyze` and `coverage` share its executed scenarios and reviews."""
+    want = Path(path).resolve()
+    known = [r["id"] for r in rows(conn, "SELECT id,path FROM cmd_source ORDER BY id DESC") if Path(r["path"]).resolve() == want]
+    sid = known[0] if known else cmddb.register_source(conn, path, None)
+    print("import:", {k: v for k, v in cmddb.import_source(conn, sid, config.load_settings(conn).get("mi_layout")).items() if k != "errors"})
+    return sid
+
+
+def _print_analysis(res: dict) -> None:
+    print(f"executed: {res['tests']} test(s), {res['commands']} commands -> {res['scenarios']} scenario(s)"
+          + (f", {res['unknown_commands']} command(s) with opcodes not in the catalog" if res["unknown_commands"] else ""))
+    for k, v in res["observed"].items():
+        print(f"  {k:<10} {v['observed']:>6} / {v['total']:<6} exercised")
+
+
+def cmd_analyze(a):
+    conn = _conn()
+    sid = _import(conn, a.db)
+    _print_analysis(execscen.analyze_execution(conn, a.set_id, sid))
+    for s in rows(conn, "SELECT title,provenance_json FROM scenario WHERE set_id=? AND origin='exec' AND source_id=? ORDER BY id", (a.set_id, sid))[:a.show]:
+        print("  -", s["title"])
+
+
 def cmd_coverage(a):
     conn = _conn()
-    sid = cmddb.register_source(conn, a.db, None)
-    print("import:", {k: v for k, v in cmddb.import_source(conn, sid, config.load_settings(conn).get("mi_layout")).items() if k != "errors"})
-    rid = coverage.run_coverage(conn, a.set_id, sid)
+    sid = _import(conn, a.db)
+    _print_analysis(execscen.analyze_execution(conn, a.set_id, sid))
+    rid = coverage.run_coverage(conn, a.set_id, sid, analyze=False)
     o = json.loads(row(conn, "SELECT summary_json FROM coverage_run WHERE id=?", (rid,))["summary_json"])["overall"]
     print(f"coverage run {rid}: covered {o['covered']}/{o['denominator']} ({o['pct_covered']}%), stimulus-only {o['stimulus_covered']}, N/A {o['na']}")
     if a.out:
@@ -108,7 +132,9 @@ def main(argv=None):
     s = sub.add_parser("reparse", help="parse a registered document again"); s.add_argument("document_id", type=int); s.add_argument("--activate", action="store_true")
     s.add_argument("--previous", type=int, help="run id to diff against"); s.add_argument("--workers", type=int, default=None); s.set_defaults(fn=cmd_reparse)
     s = sub.add_parser("catalog", help="build the catalog for a spec set"); s.add_argument("set_id", type=int); s.set_defaults(fn=cmd_catalog)
-    s = sub.add_parser("coverage", help="import a command DB and run coverage"); s.add_argument("set_id", type=int); s.add_argument("db")
+    s = sub.add_parser("analyze", help="import a command DB and derive one scenario per executed test case"); s.add_argument("set_id", type=int)
+    s.add_argument("db"); s.add_argument("--show", type=int, default=50, help="list this many scenarios"); s.set_defaults(fn=cmd_analyze)
+    s = sub.add_parser("coverage", help="import a command DB, analyse what it executed and run coverage"); s.add_argument("set_id", type=int); s.add_argument("db")
     s.add_argument("--out", help="directory for the report"); s.add_argument("--format", default="xlsx", choices=sorted(reports.EXPORTS)); s.set_defaults(fn=cmd_coverage)
     s = sub.add_parser("models", help="list models from Ollama and OpenCode"); s.set_defaults(fn=cmd_models)
     a = p.parse_args(argv)
