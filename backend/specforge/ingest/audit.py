@@ -5,12 +5,28 @@ Every check yields zero or more issues {severity, kind, node_key, page, message}
 """
 from __future__ import annotations
 
+import re
 from collections import Counter
 
 from .ir import ParsedSpec
-from .normalize import classify_table, parse_bit_range, parse_byte_range, parse_value_range
+from .normalize import classify_table, clean, parse_bit_range, parse_byte_range, parse_value_range
 
 TEXT_ACCOUNTING_MIN = 0.995
+# a Bits/Bytes cell that is meant to be a number range; anything else is a group label ("Header"), an ellipsis, a symbolic
+# range ("((n*16)+15):(n*16)") or the empty cell under a row-spanning key, none of which name a field
+_NUMERIC_KEY = re.compile(r"^\s*(?:bits?|bytes?)?\s*\d[\d ]*(?:(?::|-|\u2013|to)\s*\d[\d ]*)?$", re.I)
+_OPCODE = re.compile(r"^(?:0x[0-9a-f]{1,2}|[0-9a-f]{1,2}h)(?:\s*(?:to|-|\u2013)\s*(?:0x[0-9a-f]{1,2}|[0-9a-f]{1,2}h))?$", re.I)
+
+
+def _keys(rows: list[list[str]]) -> list[str]:
+    return [r[0] for r in rows if r and _NUMERIC_KEY.match(clean(r[0]))]
+
+
+def _opcode_col(rows: list[list[str]]) -> int:
+    """The column holding the opcodes: binary "opcode by field" columns repeat, the combined opcode does not."""
+    width = max((len(r) for r in rows), default=1)
+    hits = [sum(1 for r in rows if i < len(r) and _OPCODE.match(clean(r[i]))) for i in range(width)]
+    return hits.index(max(hits)) if max(hits) else 0
 
 
 def audit_spec(spec: ParsedSpec) -> tuple[list[dict], dict]:
@@ -46,7 +62,7 @@ def audit_spec(spec: ParsedSpec) -> tuple[list[dict], dict]:
         kind = classify_table(t.header, t.caption)
         key = f"fig:{t.label}"
         if kind == "cdw":
-            rngs = [parse_bit_range(r[0]) for r in t.rows if r]
+            rngs = [parse_bit_range(k) for k in _keys(t.rows)]
             if any(x is None for x in rngs):
                 bad_tables += 1
                 issues.append({"severity": "error", "kind": "bit_range_unparsed", "node_key": key, "page": t.page_from,
@@ -66,7 +82,7 @@ def audit_spec(spec: ParsedSpec) -> tuple[list[dict], dict]:
                 issues.append({"severity": "warning", "kind": "bit_range_gap", "node_key": key, "page": t.page_from,
                                "message": f"Figure {t.label}: bits {gaps} are not described (expected reserved rows)"})
         elif kind == "bytes":
-            rngs = [parse_byte_range(r[0]) for r in t.rows if r]
+            rngs = [parse_byte_range(k) for k in _keys(t.rows)]
             if any(x is None for x in rngs):
                 bad_tables += 1
                 issues.append({"severity": "error", "kind": "byte_range_unparsed", "node_key": key, "page": t.page_from,
@@ -82,16 +98,24 @@ def audit_spec(spec: ParsedSpec) -> tuple[list[dict], dict]:
                                "message": f"Figure {t.label}: overlapping byte ranges"})
         elif kind in ("values", "opcode"):
             seen: Counter = Counter()
+            seen_groups: list[Counter] = []
+            col = _opcode_col(t.rows) if kind == "opcode" else 0
             for r in t.rows:
-                if r and r[0].strip():
-                    rg = parse_value_range(r[0])
-                    seen[rg if rg else r[0].strip().lower()] += 1
-            dup = [k for k, c in seen.items() if c > 1]
+                if sum(1 for c in r if c.strip()) == 1 and not (col < len(r) and r[col].strip()):
+                    seen_groups.append(seen)      # a band row ("32b Guard Protection Information") starts a new group
+                    seen = Counter()
+                    continue
+                if col < len(r) and r[col].strip():
+                    rg = parse_value_range(r[col])
+                    seen[rg if rg else r[col].strip().lower()] += 1
+            seen_groups.append(seen)
+            dup = [k for g in seen_groups for k, c in g.items() if c > 1]
             if dup:
                 bad_tables += 1
                 issues.append({"severity": "error", "kind": "duplicate_values", "node_key": key, "page": t.page_from,
                                "message": f"Figure {t.label}: duplicate value/opcode rows {dup[:5]}"})
-            if kind == "values" and seen and sum(1 for k in seen if isinstance(k, str)) > 0.5 * len(seen):
+            keys = [k for g in seen_groups for k in g]
+            if kind == "values" and keys and sum(1 for k in keys if isinstance(k, str)) > 0.5 * len(keys):
                 issues.append({"severity": "warning", "kind": "values_unparsed", "node_key": key, "page": t.page_from,
                                "message": f"Figure {t.label}: most value cells do not parse as numeric values"})
     checks["table_schema"] = {"pass": bad_tables == 0, "detail": f"{len(spec.tables)} tables checked, {bad_tables} with schema errors"}

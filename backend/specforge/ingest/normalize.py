@@ -38,6 +38,7 @@ def nospace_len(s: str) -> int:
 
 _BITS = re.compile(r"^\s*(?:bits?\s*)?(\d{1,3})\s*(?::|-|\u2013|to)\s*(\d{1,3})\s*$", re.I)
 _BIT1 = re.compile(r"^\s*(?:bit\s*)?(\d{1,3})\s*$", re.I)
+_WRAPPED_DIGITS = re.compile(r"(:\s*\d+) (\d+\s*)$")   # '1791:102 4': the low end wrapped inside its cell
 _BYTES = re.compile(r"^\s*(?:bytes?\s*)?(\d{1,5})\s*(?::|-|\u2013|to)\s*(\d{1,5})\s*$", re.I)
 
 
@@ -57,7 +58,7 @@ def parse_bit_range(cell: str) -> tuple[int, int] | None:
 
 def parse_byte_range(cell: str) -> tuple[int, int] | None:
     """'03:00' -> (3, 0); '1023' -> (1023, 1023). Returns (hi, lo)."""
-    c = clean(cell).translate(_DASHES)
+    c = _WRAPPED_DIGITS.sub(r"\1\2", clean(cell).translate(_DASHES))
     m = _BYTES.match(c)
     if m:
         a, b = int(m.group(1)), int(m.group(2))
@@ -247,7 +248,8 @@ _ALIAS_RE = re.compile(
 _LIST_SEP = r"(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"      # "1, 2", "1 and 2", "1, 2, and 3", "1, 2, or 3"
 _SEC_REF = re.compile(rf"\b(?:sections?|clauses?|subclauses?)\s+(\d+(?:\.\d+)*)(?:{_LIST_SEP}(\d+(?:\.\d+)*))*", re.I)
 _SEC_NUM = re.compile(r"\d+(?:\.\d+)*")
-_FIG_REF = re.compile(rf"\b(?:Figure|Table)s?\s+(\d+[A-Za-z]?)(?:{_LIST_SEP}(\d+[A-Za-z]?))*", re.I)
+# not followed by ":<digit>": "Figure 07:00 63" is a bit range a table extractor interleaved with "Figure 63"
+_FIG_REF = re.compile(rf"\b(?:Figure|Table)s?\s+(\d+[A-Za-z]?)(?!\d|:\d)(?:{_LIST_SEP}(\d+[A-Za-z]?))*", re.I)
 
 
 @dataclass
