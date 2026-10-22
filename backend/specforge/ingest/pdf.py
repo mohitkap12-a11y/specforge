@@ -33,6 +33,8 @@ from .semantics import build_semantics
 
 QUALITY_FALLBACK_THRESHOLD = 0.72
 MIN_RULING_SEGMENTS = 8   # drawn lines / rectangles on a page before we suspect a ruled table PyMuPDF missed
+MAX_HEADER_LINES = 5      # a heading wrapped over more lines than this is not treated as one
+MAX_HEADER_CELL = 40      # ... and each wrapped fragment is short
 _NUM_HEADING = re.compile(r"^((?:\d+(?:\.\d+)*)|(?:Annex\s+[A-Z](?:\.\d+)*)|(?:[A-Z](?:\.\d+)+))\s+(\S.*)$")
 _TOC_LEADER = re.compile(r"(\.{4,}|…{2,}|(?:\.\s){4,})\s*\d*\s*$")
 _PAGENUM = re.compile(r"^\s*(?:page\s+)?\d{1,4}(?:\s*(?:of|/)\s*\d{1,4})?\s*$", re.I)
@@ -307,6 +309,7 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
     cur = front
     last_table: Table | None = None
     last_table_page = 0
+    last_table_kind = ""        # 'Figure' / 'Table' of the caption the last table was bound to
     carry_caption: dict | None = None  # caption left at a page bottom whose table starts on the next page
     last_table_end = (0.0, 1.0)         # (y1 of the last table segment, page height): continued tables run to the page bottom
     table_count_on_page: Counter = Counter()
@@ -449,17 +452,20 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
                     nested_parent = tinfo[ti["parent"]]["label"]
 
                 is_cont = False
+                hdr, body = _split_header(rows)
                 if last_table is not None and nested_parent is None:
                     same_cols = len(rows[0]) == len(last_table.header) if rows and last_table.header else False
+                    hdr_repeat = same_cols and _header_lines(rows, last_table.header) > 0
                     if cap is not None and cap["cont"] and cap["label"] == last_table.label.split("#")[0]:
                         is_cont = True
+                    elif cap is not None and hdr_repeat and last_table_page == pg - 1 and cap["label"] == last_table.label.split("#")[0] \
+                            and cap["kind"] == last_table_kind and norm_title(cap["title"]) == norm_title(last_table.caption):
+                        is_cont = True      # the caption is repeated on the next page without saying "continued"
                     elif cap is None and last_table_page == pg - 1 and not seen_body_on_page and same_cols and \
-                            ([norm_title(c) for c in rows[0]] == [norm_title(c) for c in last_table.header]
-                             or last_table_end[0] >= 0.75 * last_table_end[1]):
+                            (hdr_repeat or last_table_end[0] >= 0.75 * last_table_end[1]):
                         # evidence required: the header repeats, or the previous table ran to the bottom of its page.
                         # An independent table that merely has the same number of columns is NOT merged.
                         is_cont = True
-                        hdr_repeat = [norm_title(c) for c in rows[0]] == [norm_title(c) for c in last_table.header]
                         notes.append({"severity": "info" if hdr_repeat else "warning", "kind": "continuation_inferred", "node_key": f"fig:{last_table.label}",
                                       "page": pg, "message": "Table without caption at page top treated as continuation "
                                                               f"of Figure {last_table.label}"})
@@ -481,8 +487,7 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
                     caption, captioned = "", False
                     notes.append({"severity": "warning", "kind": "uncaptioned_table", "node_key": f"fig:{lbl}", "page": pg,
                                   "message": "Table without a Figure/Table caption"})
-                header = rows[0] if rows else []
-                tb = Table(label=lbl, caption=caption, header=header, rows=rows[1:], page_from=pg, page_to=pg,
+                tb = Table(label=lbl, caption=caption, header=hdr, rows=body, page_from=pg, page_to=pg,
                            section=cur.number if cur.number != "front" else None, captioned=captioned,
                            parent_table=nested_parent, extractor=t["extractor"], quality=t["quality"], bbox=t["bbox"])
                 if t["quality"] < QUALITY_FALLBACK_THRESHOLD:
@@ -495,6 +500,7 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
                 tinfo[k]["label"] = lbl
                 if nested_parent is None:
                     last_table, last_table_page = tb, pg
+                    last_table_kind = cap["kind"] if cap is not None else ""
                     last_table_end = (t["bbox"][3], p["height"])
                 seen_body_on_page = True
         if pending_caption is not None:
@@ -537,13 +543,48 @@ def _unique_label(label: str, used: Counter, notes: list, page: int) -> str:
     return new
 
 
+def _same_header(a: list[str], b: list[str]) -> bool:
+    return [norm_title(c) for c in a] == [norm_title(c) for c in b]
+
+
+def _join_lines(lines: list[list[str]]) -> list[str]:
+    header = list(lines[0])
+    for r in lines[1:]:
+        header += [""] * (len(r) - len(header))
+        header = [clean(f"{h} {r[j]}") if j < len(r) else h for j, h in enumerate(header)]
+    return header
+
+
+def _key(row: list[str]) -> str:
+    return row[0].strip() if row else ""
+
+
+def _split_header(rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
+    """(header, body). A heading wrapped over several lines arrives as the first row plus short rows with an empty first cell
+    (before any row that has a key); those lines belong to the header, joined column by column."""
+    if not rows:
+        return [], []
+    n = 1
+    while (n < len(rows) and n < MAX_HEADER_LINES and _key(rows[0]) and not _key(rows[n])
+           and any(c.strip() for c in rows[n]) and all(len(c) <= MAX_HEADER_CELL for c in rows[n])):
+        n += 1
+    return _join_lines(rows[:n]), rows[n:]
+
+
+def _header_lines(rows: list[list[str]], header: list[str]) -> int:
+    """How many leading rows are a repeat of `header` (0 if none). Tried line by line, because a fragment of the row that
+    was split across the page break can follow the repeated heading."""
+    for k in range(1, min(len(rows), MAX_HEADER_LINES) + 1):
+        if _same_header(_join_lines(rows[:k]), header):
+            return k
+    return 0
+
+
 def _merge_continuation(prev: Table, rows: list[list[str]], page: int) -> None:
     if not rows:
         return
-    body = rows
-    if prev.header and [norm_title(c) for c in rows[0]] == [norm_title(c) for c in prev.header]:
-        body = rows[1:]
-    if body and prev.rows and not body[0][0].strip() and any(c.strip() for c in body[0][1:]):
+    body = rows[_header_lines(rows, prev.header):] if prev.header else rows
+    if body and prev.rows and not _key(body[0]) and any(c.strip() for c in body[0][1:]):
         # row split across the page break: first cell empty -> glue onto the previous row
         last = prev.rows[-1]
         for j, c in enumerate(body[0]):
