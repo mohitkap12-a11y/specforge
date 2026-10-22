@@ -102,10 +102,13 @@ def _extract_chunk(args: tuple[str, list[int], bool]) -> list[dict[str, Any]]:
                             if rows and q >= QUALITY_FALLBACK_THRESHOLD:     # a table PyMuPDF missed entirely
                                 tables.append({"bbox": bb, "rows": rows, "extractor": "pdfplumber", "quality": q})
                             continue
-                        for t in overlapping:
-                            if q > t["quality"]:
-                                tables.remove(t)
-                                tables.append({"bbox": bb, "rows": rows, "extractor": "pdfplumber", "quality": q})
+                        # only tables this one covers (the same table, or fragments of it): a table nested inside a
+                        # larger one must not replace the outer table
+                        worse = [t for t in overlapping if q > t["quality"] and _covered(t["bbox"], bb) > 0.6]
+                        for t in worse:
+                            tables.remove(t)
+                        if worse:       # once, even when it replaces several PyMuPDF fragments
+                            tables.append({"bbox": bb, "rows": rows, "extractor": "pdfplumber", "quality": q})
                 except Exception:  # pragma: no cover
                     pass
             tables.sort(key=lambda t: (t["bbox"][1], t["bbox"][0]))
@@ -140,6 +143,13 @@ def _overlap(a: list[float], b: list[float]) -> float:
     inter = ix * iy
     area = max(1e-6, min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1])))
     return inter / area
+
+
+def _covered(a: list[float], b: list[float]) -> float:
+    """Fraction of box a that lies inside box b."""
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    return ix * iy / max(1e-6, (a[2] - a[0]) * (a[3] - a[1]))
 
 
 def extract_pages(path: str, workers: int = 1, progress: Callable[[int, int], None] | None = None,
@@ -304,7 +314,7 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
     tables: list[Table] = []
     excluded: list[Excluded] = []
     raw_chars = sum(p["raw_chars"] for p in pages)
-    acct = {"body": 0, "heading": 0, "caption": 0, "excluded": 0, "table_cells": 0, "table_lines": 0}
+    acct = {"body": 0, "heading": 0, "caption": 0, "excluded": 0, "link_doubles": 0, "table_cells": 0, "table_lines": 0}
 
     cur = front
     last_table: Table | None = None
@@ -323,16 +333,20 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
         if new_para or not sec.paragraphs:
             # merge across blocks/pages when the previous paragraph is visibly unfinished
             if sec.paragraphs and not re.search(r"[.:;!?)\]]\s*$", sec.paragraphs[-1]) and text[:1].islower():
-                sec.paragraphs[-1] += " " + text
+                join(sec, text)
             else:
                 sec.paragraphs.append(text)
         else:
-            sec.paragraphs[-1] += " " + text
+            join(sec, text)
+
+    def join(sec: Section, text: str):
+        # a doubled hyperlink can wrap over two lines ("Figure 638Figure" / "638)"); clean() again once they are joined
+        sec.paragraphs[-1] = clean(sec.paragraphs[-1] + " " + text)
 
     for p in pages:
         pg = p["page"]
         lines = p["lines"]
-        ptables = p["tables"]
+        ptables = [part for t in p["tables"] for part in _split_at_captions(t, lines)]
         # table containment => nested
         tinfo = []
         for ti, t in enumerate(ptables):
@@ -355,7 +369,8 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
             items.append((ti["t"]["bbox"][1], 1, "table", (k, ti)))
         items.sort(key=lambda x: (x[0], x[1]))
 
-        pending_entries = [e for e in by_page.get(pg, []) if not e.consumed]
+        # a bookmark can point at the bottom of the page before its heading: look for a missed one on the next page too
+        pending_entries = [e for e in by_page.get(pg, []) + by_page.get(pg - 1, []) if not e.consumed]
         pending_caption: dict | None = carry_caption
         carry_caption = None
         wrap: tuple[_Entry, str] | None = None
@@ -377,6 +392,7 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
             if kind == "line":
                 i, l = payload
                 text = clean(l["text"])
+                acct["link_doubles"] += nospace_len(l["text"]) - nospace_len(text)   # hyperlink text the PDF repeats
                 if (pg, i) in hf:
                     excluded.append(Excluded(pg, "header/footer", text))
                     acct["excluded"] += nospace_len(text)
@@ -405,6 +421,14 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
                     if nl == nt or (len(nl) >= 3 and nt.startswith(nl) and (l["bold"] or _NUM_HEADING.match(text))):
                         matched = pending_entries.pop(k_)
                         break
+                if matched is None and l["bold"] and nl:
+                    # deep headings are often printed without their number ("I/O Controller" for bookmark
+                    # "3.1.3.1 I/O Controller"); only a bold line, and only the first pending bookmark it fits
+                    for k_, e in enumerate(pending_entries):
+                        nn = norm_title(e.name)
+                        if e.number and (nl == nn or (len(nl) >= 3 and nn.startswith(nl))):
+                            matched = pending_entries.pop(k_)
+                            break
                 if matched is not None:
                     matched.consumed = True
                     flush_caption(pending_caption)
@@ -443,9 +467,17 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
                 k, ti = payload
                 t = ti["t"]
                 rows = t["rows"]
-                acct["table_cells"] += sum(nospace_len(c) for r in rows for c in r)
+                if ti["parent"] is None:    # a nested table's text is already in its parent's cells
+                    acct["table_cells"] += sum(nospace_len(c) for r in rows for c in r)
                 cap = pending_caption
                 pending_caption = None
+                inner = _caption_row(rows)
+                if inner is not None:
+                    # the caption is drawn inside the table frame and was extracted as its first row
+                    if cap is not None and (cap["kind"], cap["label"]) != (inner[0], inner[1]):
+                        flush_caption(cap)
+                    cap = {"kind": inner[0], "label": inner[1], "title": inner[2], "cont": inner[3], "page": pg}
+                    rows = rows[1:]
                 prev_block = None
                 nested_parent = None
                 if ti["parent"] is not None and tinfo[ti["parent"]]["label"] is not None:
@@ -518,7 +550,7 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
         nxt = next((x.page_from for x in sections[i + 1:] if x.level <= s.level), None)
         s.page_to = nxt if nxt is not None else len(pages)
 
-    accounted = sum(acct[k] for k in ("body", "heading", "caption", "excluded", "table_cells"))
+    accounted = sum(acct[k] for k in ("body", "heading", "caption", "excluded", "link_doubles", "table_cells"))
     spec = ParsedSpec(family=family, version=version, title=title, fmt=fmt, pages=len(pages), sections=sections,
                       tables=tables, requirements=[], references=[], excluded=excluded, raw_char_count=raw_chars,
                       accounted_char_count=accounted, notes=notes,
@@ -541,6 +573,30 @@ def _unique_label(label: str, used: Counter, notes: list, page: int) -> str:
     notes.append({"severity": "warning", "kind": "duplicate_figure_label", "node_key": f"fig:{new}", "page": page,
                   "message": f"Figure/Table {label} appears more than once without being a continuation"})
     return new
+
+
+def _split_at_captions(t: dict, lines: list[dict]) -> list[dict]:
+    """Two tables drawn as one grid come out as one table with the second caption as a row; split them there."""
+    rows = t["rows"]
+    for k in range(2, len(rows)):
+        if _caption_row(rows[k:]) is None:
+            continue
+        cap = next((l for l in lines if _inside(l, t["bbox"]) and clean(l["text"]) == clean(next(c for c in rows[k] if c.strip()))), None)
+        if cap is None:
+            continue
+        y = cap["y0"] - 1.0
+        x0, y0, x1, y1 = t["bbox"]
+        head = {**t, "bbox": [x0, y0, x1, y], "rows": rows[:k], "quality": _table_quality(rows[:k])}
+        return [head] + _split_at_captions({**t, "bbox": [x0, y, x1, y1], "rows": rows[k:], "quality": _table_quality(rows[k:])}, lines)
+    return [t]
+
+
+def _caption_row(rows: list[list[str]]):
+    """parse_caption() of the first row when that row is nothing but a Figure/Table caption, else None."""
+    if len(rows) < 2:
+        return None
+    cells = [c for c in rows[0] if c.strip()]
+    return parse_caption(cells[0]) if len(cells) == 1 else None
 
 
 def _same_header(a: list[str], b: list[str]) -> bool:
