@@ -101,6 +101,10 @@ class _Ctx:
             for o in num.findall(W + "lvlOverride"):
                 s = o.find(W + "startOverride")
                 i = int(o.get(W + "ilvl", "0"))
+                rep = o.find(W + "lvl")   # a full replacement level definition for this list instance
+                if rep is not None:
+                    base = lv.get(i, _Level("decimal", "%1.", 1))
+                    lv[i] = _Level(_val(rep, "numFmt", base.fmt), _val(rep, "lvlText", base.text), int(_val(rep, "start", str(base.start))))
                 if s is not None and i in lv:
                     lv[i] = _Level(lv[i].fmt, lv[i].text, int(s.get(W + "val", "1")))
             self.nums[num.get(W + "numId")] = lv
@@ -275,14 +279,21 @@ def _plain(segs: list[Seg]) -> str:
     return re.sub(r"\s+", " ", "".join(s.text for s in segs)).strip()
 
 
+def _is_bullet(lab: str, fmt: str) -> bool:
+    return fmt in ("bullet", "none") or not lab.strip() or not re.search(r"[A-Za-z0-9]", lab)
+
+
 def _cell_text(ctx: _Ctx, tc) -> str:
     parts: list[str] = []
     for ch in tc:
         if ch.tag == W + "p":
             ppr = ch.find(W + "pPr")
             t = inline(ctx.runs(ch, _val(ppr, "pStyle")))
-            if t and ctx.num_of(ch):
-                t = "• " + t
+            num = ctx.num_of(ch)
+            if num:   # advance the list counters here too, so numbering after the table continues correctly
+                lab, fmt, _ = ctx.label(*num)
+                if t:
+                    t = ("• " if _is_bullet(lab, fmt) else lab.strip() + " ") + t
             if t:
                 parts.append(t)
         elif ch.tag == W + "tbl":
@@ -375,8 +386,7 @@ def convert(path: str) -> tuple[list[Block], dict]:
             ms = re.search(r"(?i)^list\s+\w+\s+(\d)$", sname)
             if ms and not depth:
                 depth = int(ms.group(1)) - 1
-            bullet = fmt in ("bullet", "none") or not lab.strip() or not re.search(r"[A-Za-z0-9]", lab)
-            if bullet:
+            if _is_bullet(lab, fmt):
                 blocks.append(Item(depth, segs))
             elif fmt in ("decimal", "decimalZero") and re.fullmatch(r"%?\d+[.)]?|\d+[.)]?", lab.strip()):
                 blocks.append(Item(depth, segs, True, str(n)))

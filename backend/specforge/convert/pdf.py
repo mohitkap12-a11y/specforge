@@ -15,7 +15,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 
-from .md import Block, Code, Heading, Item, Para, Seg, Table
+from .md import Block, Code, Heading, Item, Para, Seg, Table, escape_text
 
 _BULLET = re.compile(r"^([•●▪■◦‣·–—\-])\s+(?=\S)")
 _NUMBER = re.compile(r"^(\d{1,3}[.)]|\(?[A-Za-z][.)]|\((?:\d{1,3}|[ivxIVX]{1,5})\))\s+(?=\S)")
@@ -78,7 +78,7 @@ def _read_page(page, pno: int, pymupdf) -> tuple[list[Line], list[_Table], int]:
     except Exception:  # noqa: BLE001 - a page the table finder cannot read still has its text
         found = []
     for t in found:
-        rows = _clean_rows(t.extract())
+        rows = [[escape_text(c) for c in r] for r in _clean_rows(t.extract())]   # cells are literal spec text, not Markdown
         if len(rows) >= 2 and len(rows[0]) >= 2:
             tables.append((tuple(t.bbox), _Table(t.bbox[1], rows, pno)))
     links = [(pymupdf.Rect(lk["from"]), lk["uri"]) for lk in page.get_links() if lk.get("uri")]

@@ -197,7 +197,7 @@ def render(blocks: list[Block]) -> str:
         elif isinstance(b, Para):
             t = inline(b.segs)
             if t:
-                out.append(_escape_start(t))
+                out.append("\n".join(_escape_start(line) for line in t.split("\n")))
         elif isinstance(b, Quote):
             t = inline(b.segs)
             if t:

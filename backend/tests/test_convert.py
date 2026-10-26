@@ -411,3 +411,33 @@ def test_docx_huge_grid_span_is_clamped(tmp_path):
     path = tmp_path / "span.docx"
     d.save(path)
     assert "| c | d |" in convert_file(path, front_matter=False).markdown
+
+
+def test_paragraph_lines_after_a_manual_break_are_escaped():
+    out = md.render([md.Para([md.Seg("first\n# second\n- third")])])
+    assert out == "first  \n\\# second  \n\\- third\n"
+
+
+def test_pdf_table_cells_are_literal(tmp_path):
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+
+    path = tmp_path / "lit.pdf"
+    SimpleDocTemplate(str(path), pagesize=A4).build([Table([["Field", "Note"], ["a*b*", "<NSID> `x`"]], style=TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black)]))])
+    m = convert_file(path, front_matter=False).markdown
+    assert "a\\*b\\*" in m and "\\<NSID> \\`x\\`" in m
+
+
+def test_docx_numbered_cell_paragraphs_advance_counters_and_override_levels_apply(tmp_path):
+    d = docx.Document()
+    d.add_paragraph("before", style="List Number")
+    t = d.add_table(rows=1, cols=2)
+    t.cell(0, 0).text = "k"
+    t.cell(0, 1).paragraphs[0].text = "in cell"
+    t.cell(0, 1).paragraphs[0].style = d.styles["List Number"]
+    d.add_paragraph("after", style="List Number")
+    path = tmp_path / "cell.docx"
+    d.save(path)
+    m = convert_file(path, front_matter=False).markdown
+    assert "| k | 2. in cell |" in m and "3. after" in m
