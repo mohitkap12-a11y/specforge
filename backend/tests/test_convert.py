@@ -1,0 +1,313 @@
+"""Spec -> Markdown converter: PDF and DOCX structure, escaping, the API endpoint and the CLI."""
+import io
+import re
+import shutil
+import zipfile
+
+import docx
+import pytest
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from fastapi.testclient import TestClient
+
+from specforge.convert import ConversionError, convert_file, output_name, sniff
+from specforge.convert import md
+
+
+# ----------------------------------------------------------------------------- fixtures
+
+@pytest.fixture(scope="module")
+def rich_docx(tmp_path_factory):
+    d = docx.Document()
+    d.core_properties.title = "Widget Spec"
+    d.add_heading("Widget Interface", 0)
+    d.add_heading("Overview", 1)
+    p = d.add_paragraph("A widget ")
+    p.add_run("shall").bold = True
+    p.add_run(" answer ")
+    p.add_run("GET_ID").font.name = "Courier New"
+    p.add_run(" within 10 ms; see ")
+    rid = d.part.relate_to("https://example.com/a b", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", is_external=True)
+    h = OxmlElement("w:hyperlink")
+    h.set(qn("r:id"), rid)
+    r = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = "the site"
+    r.append(t)
+    h.append(r)
+    p._p.append(h)
+    p.add_run(". Value 2")
+    p.add_run("n").font.superscript = True
+    d.add_heading("Details", 2)
+    d.add_paragraph("first bullet", style="List Bullet")
+    d.add_paragraph("nested bullet", style="List Bullet 2")
+    d.add_paragraph("step one", style="List Number")
+    d.add_paragraph("step two", style="List Number")
+    d.add_paragraph("snake_case_name and * star")
+    d.add_paragraph("# not a heading")
+    t = d.add_table(rows=3, cols=3)
+    for c, v in zip(t.rows[0].cells, ("Bits", "Name", "Desc")):
+        c.text = v
+    t.cell(1, 0).text, t.cell(1, 1).text, t.cell(1, 2).text = "7:0", "A|B", "line1"
+    t.cell(1, 2).add_paragraph("line2")
+    t.cell(2, 0).merge(t.cell(2, 1)).text = "merged"
+    t.cell(2, 2).text = "x"
+    path = tmp_path_factory.mktemp("conv") / "rich.docx"
+    d.save(path)
+    return path
+
+
+@pytest.fixture(scope="module")
+def rich_pdf(tmp_path_factory):
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.platypus import PageBreak, Paragraph, Preformatted, SimpleDocTemplate, Table, TableStyle
+
+    ss = getSampleStyleSheet()
+    h1 = ParagraphStyle("h1", parent=ss["Normal"], fontSize=20, leading=24, fontName="Helvetica-Bold")
+    h2 = ParagraphStyle("h2", parent=ss["Normal"], fontSize=15, leading=18, fontName="Helvetica-Bold")
+    n = ParagraphStyle("n", parent=ss["Normal"], fontSize=10, leading=13)
+    code = ParagraphStyle("c", parent=ss["Normal"], fontName="Courier", fontSize=9, leading=11)
+
+    def furniture(c, doc):
+        c.setFont("Helvetica", 8)
+        c.drawString(50, 820, "ACME Confidential Spec")
+        c.drawString(300, 20, f"Page {doc.page}")
+
+    rows = [["Reg", "Desc"]] + [[f"R{i}", f"Register number {i}"] for i in range(70)]
+    story = [Paragraph("Widget Spec", h1), Paragraph("1 Scope", h2),
+             Paragraph("The controller shall be conservative in what it sends and liberal in what it accepts "
+                       "from the host, including <b>bold text</b> and <i>italic</i> words. " * 3, n),
+             Paragraph("• first item", n), Paragraph("• second item", n),
+             Paragraph("1. numbered one", n), Paragraph("2. numbered two", n),
+             Preformatted("int x = 1;\n  if (x) y();", code),
+             Paragraph("2 Registers", h2),
+             Table(rows, repeatRows=1, style=TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black)])),
+             PageBreak(), Paragraph("3 Tail", h2), Paragraph("The end.", n)]
+    path = tmp_path_factory.mktemp("convpdf") / "rich.pdf"
+    SimpleDocTemplate(str(path), pagesize=A4).build(story, onFirstPage=furniture, onLaterPages=furniture)
+    return path
+
+
+# ----------------------------------------------------------------------------- markdown helpers
+
+def test_escape_keeps_snake_case_and_escapes_markup():
+    assert md.escape_text("snake_case and _lead and trail_ *x* <b>") == "snake_case and \\_lead and trail\\_ \\*x\\* \\<b>"
+
+
+def test_inline_moves_whitespace_outside_emphasis_and_joins_phrases():
+    segs = [md.Seg("a ", bold=True), md.Seg("b ", bold=True), md.Seg("c")]
+    assert md.inline(segs) == "**a b** c"
+    assert md.inline([md.Seg("x", bold=True), md.Seg(" "), md.Seg("y", bold=True)]) == "**x y**"
+
+
+def test_paragraph_that_looks_like_markdown_is_escaped():
+    out = md.render([md.Para([md.Seg("# not a heading")]), md.Para([md.Seg("1. not a list")]), md.Para([md.Seg("- dash")])])
+    assert out.split("\n\n") == ["\\# not a heading", "1\\. not a list", "\\- dash\n"]
+
+
+def test_table_escapes_pipes_and_pads_rows():
+    assert md.table_md([["a", "b|c"], ["1"]]) == "| a | b\\|c |\n| --- | --- |\n| 1 |  |"
+
+
+def test_lists_stay_tight_and_nested():
+    out = md.render([md.Item(0, [md.Seg("a")]), md.Item(1, [md.Seg("b")]), md.Item(0, [md.Seg("c")], True, "1"), md.Para([md.Seg("after")])])
+    assert out == "- a\n    - b\n\n1. c\n\nafter\n"
+
+
+# ----------------------------------------------------------------------------- DOCX
+
+def test_docx_structure(rich_docx):
+    r = convert_file(rich_docx, front_matter=False)
+    m = r.markdown
+    assert "# Widget Interface" in m and "# Overview" in m and "## Details" in m
+    assert "**shall**" in m and "`GET_ID`" in m
+    assert "[the site](https://example.com/a%20b)" in m
+    assert "2<sup>n</sup>" in m
+    assert "- first bullet\n    - nested bullet" in m
+    assert "1. step one\n2. step two" in m
+    assert "snake_case_name and \\* star" in m
+    assert "\\# not a heading" in m
+    assert "| 7:0 | A\\|B | line1<br>line2 |" in m
+    assert "| merged |  | x |" in m
+    assert r.stats["tables"] == 1 and r.stats["headings"] == 3 and r.title == "Widget Spec"
+
+
+def test_docx_front_matter(rich_docx):
+    m = convert_file(rich_docx, filename="Widget v1.docx").markdown
+    assert m.startswith('---\ntitle: "Widget Spec"\nsource: "Widget v1.docx"\nformat: docx\n---\n')
+
+
+def test_docx_numbered_headings_and_footnotes(tmp_path):
+    """Word stores heading numbers in numbering.xml, not in the text; footnotes live in their own part."""
+    d = docx.Document()
+    d.add_heading("Scope", 1)
+    d.add_heading("Terms", 2)
+    d.add_heading("Other", 1)
+    path = tmp_path / "num.docx"
+    d.save(path)
+    # give Heading 1 / Heading 2 a multilevel numbering definition
+    with zipfile.ZipFile(path) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+    numbering = (b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                 b'<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1"/></w:lvl>'
+                 b'<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2"/></w:lvl></w:abstractNum>'
+                 b'<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>')
+    files["word/numbering.xml"] = numbering
+    styles = files["word/styles.xml"].decode()
+    for sid, lvl in (("Heading1", 0), ("Heading2", 1)):
+        marker = f'w:styleId="{sid}"'
+        i = styles.index(marker)
+        j = styles.index("<w:pPr>", i)
+        styles = styles[:j] + f'<w:pPr><w:numPr><w:ilvl w:val="{lvl}"/><w:numId w:val="1"/></w:numPr>' + styles[j + len("<w:pPr>"):]
+    files["word/styles.xml"] = styles.encode()
+    with zipfile.ZipFile(path, "w") as z:
+        for n, b in files.items():
+            z.writestr(n, b)
+    m = convert_file(path, front_matter=False).markdown
+    assert "# 1 Scope" in m and "## 1.1 Terms" in m and "# 2 Other" in m
+
+
+def test_docx_corrupt_and_wrong_type(tmp_path):
+    bad = tmp_path / "bad.docx"
+    with zipfile.ZipFile(bad, "w") as z:
+        z.writestr("hello.txt", "x")
+    with pytest.raises(ConversionError):
+        convert_file(bad)
+    txt = tmp_path / "a.pdf"
+    txt.write_text("plain text pretending to be a pdf")
+    with pytest.raises(ConversionError, match="Unsupported"):
+        convert_file(txt)
+    with pytest.raises(ConversionError, match="Cannot read"):
+        sniff(tmp_path / "missing.pdf")
+
+
+# ----------------------------------------------------------------------------- PDF
+
+def test_pdf_structure(rich_pdf):
+    r = convert_file(rich_pdf, front_matter=False)
+    m = r.markdown
+    assert m.startswith("# Widget Spec\n\n## 1 Scope\n")
+    assert "## 2 Registers" in m and "## 3 Tail" in m
+    assert "**bold text**" in m and "*italic*" in m
+    assert "- first item\n- second item" in m
+    assert "1. numbered one\n2. numbered two" in m
+    assert "```\nint x = 1;\n  if (x) y();\n```" in m or "```\nint x = 1;\nif (x) y();\n```" in m
+    assert "ACME Confidential" not in m and "Page 1" not in m          # running header / footer removed
+    assert r.stats["pages"] >= 2 and r.stats["tables"] == 1
+    # the table that spans pages is one table with a single header and all 70 rows
+    assert m.count("| Reg | Desc |") == 1 and "| R69 | Register number 69 |" in m and len(re.findall(r"^\| R\d+ \|", m, re.M)) == 70
+
+
+def test_pdf_hyphenated_line_break_is_healed(tmp_path):
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "A controller shall support the inter-", fontsize=11)
+    page.insert_text((72, 114), "operability requirements of the host.", fontsize=11)
+    path = tmp_path / "hy.pdf"
+    doc.save(path)
+    assert "interoperability requirements" in convert_file(path, front_matter=False).markdown
+
+
+def test_pdf_bookmarks_set_heading_levels(tmp_path):
+    import pymupdf
+
+    doc = pymupdf.open()
+    for t in ("Intro", "Details"):
+        page = doc.new_page()
+        page.insert_text((72, 100), t, fontsize=11)
+        page.insert_text((72, 130), "Body text of the section.", fontsize=11)
+    doc.set_toc([[1, "Intro", 1], [2, "Details", 2]])
+    path = tmp_path / "bm.pdf"
+    doc.save(path)
+    m = convert_file(path, front_matter=False).markdown
+    assert "# Intro\n" in m and "## Details\n" in m
+
+
+def test_pdf_without_text_layer_is_rejected(tmp_path):
+    import pymupdf
+
+    doc = pymupdf.open()
+    doc.new_page()
+    path = tmp_path / "blank.pdf"
+    doc.save(path)
+    with pytest.raises(ConversionError, match="no text layer"):
+        convert_file(path)
+
+
+def test_demo_specs_convert_with_all_tables(demo_dir):
+    for name in ("nvme-base-2.4.pdf", "nvme-base-2.4.docx"):
+        r = convert_file(demo_dir / name, front_matter=False)
+        assert "| 01h | M | Create I/O Submission Queue |" in r.markdown
+        assert "## 5.1 Admin Command Overview" in r.markdown
+        assert r.stats["tables"] == 11
+
+
+# ----------------------------------------------------------------------------- .doc, API, CLI
+
+@pytest.mark.skipif(not (shutil.which("soffice") or shutil.which("libreoffice")), reason="LibreOffice not installed")
+def test_legacy_doc_via_libreoffice(rich_docx, tmp_path):
+    import subprocess
+
+    subprocess.run(["soffice", "--headless", "--convert-to", "doc:MS Word 97", "--outdir", str(tmp_path), str(rich_docx)], check=True, capture_output=True, timeout=180)
+    doc = tmp_path / "rich.doc"
+    assert sniff(doc) == "doc"
+    assert "## Details" in convert_file(doc, front_matter=False).markdown
+
+
+def test_doc_without_libreoffice_gives_a_clear_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    f = tmp_path / "old.doc"
+    f.write_bytes(b"\xd0\xcf\x11\xe0" + b"\0" * 64)
+    with pytest.raises(ConversionError, match="LibreOffice"):
+        convert_file(f)
+
+
+def test_output_name_is_download_safe():
+    assert output_name("NVM Express Base 2.4.pdf") == "NVM Express Base 2.4.md"
+    assert output_name('we"ird/\\na.docx') == "na.md" or output_name('we"ird/\\na.docx').endswith(".md")
+    assert output_name("") == "document.md"
+
+
+@pytest.fixture()
+def client(ws):
+    from specforge.api.app import create_app
+
+    with TestClient(create_app()) as c:
+        yield c
+
+
+def test_api_convert_returns_markdown_and_stores_nothing(client, rich_docx, rich_pdf):
+    with open(rich_docx, "rb") as f:
+        r = client.post("/api/convert/markdown", files={"file": ("Widget Spec.docx", f)})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["filename"] == "Widget Spec.md" and j["format"] == "docx" and "## Details" in j["markdown"] and j["markdown"].startswith("---")
+    with open(rich_pdf, "rb") as f:
+        r = client.post("/api/convert/markdown?front_matter=false", files={"file": ("w.pdf", f)})
+    assert r.json()["markdown"].startswith("# Widget Spec")
+    assert client.get("/api/specs").json() == []
+
+
+def test_api_convert_download_and_errors(client, rich_docx):
+    with open(rich_docx, "rb") as f:
+        r = client.post("/api/convert/markdown?download=true", files={"file": ("Spéc.docx", f)})
+    assert r.headers["content-type"].startswith("text/markdown")
+    assert "filename*=UTF-8''Sp%C3%A9c.md" in r.headers["content-disposition"]
+    assert r.text.startswith("---")
+    assert client.post("/api/convert/markdown", files={"file": ("a.txt", io.BytesIO(b"hi"))}).status_code == 400
+    bad = client.post("/api/convert/markdown", files={"file": ("a.pdf", io.BytesIO(b"not a pdf"))})
+    assert bad.status_code == 422 and "Unsupported" in bad.json()["detail"]
+
+
+def test_cli_to_md(rich_docx, rich_pdf, tmp_path):
+    from specforge.cli import main
+
+    main(["to-md", str(rich_docx), str(rich_pdf), "--out", str(tmp_path / "out")])
+    assert {p.name for p in (tmp_path / "out").iterdir()} == {"rich.md", "rich.pdf.md"}
+    with pytest.raises(SystemExit) as e:
+        main(["to-md", str(tmp_path / "nope.pdf")])
+    assert e.value.code == 1

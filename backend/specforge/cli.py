@@ -55,6 +55,32 @@ def cmd_ingest(a):
         print(f"spec set '{a.set}' (#{sid}) now has {len(rows(conn, 'SELECT 1 FROM spec_set_member WHERE set_id=?', (sid,)))} members")
 
 
+def cmd_to_md(a):
+    from .convert import ConversionError, convert_file, output_name
+
+    out_dir = Path(a.out) if a.out else None
+    failed, written = 0, set()
+    for f in a.files:
+        try:
+            res = convert_file(f, front_matter=not a.no_front_matter)
+        except ConversionError as e:
+            print(f"{f}: {e}", file=sys.stderr)
+            failed += 1
+            continue
+        target = (out_dir or Path(f).parent) / output_name(Path(f).name)
+        if target in written:   # spec.pdf and spec.docx in one run
+            target = target.with_name(Path(f).name + ".md")
+        written.add(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(res.markdown, encoding="utf-8")
+        st = res.stats
+        print(f"{f} -> {target}  ({st['words']} words, {st['headings']} headings, {st['tables']} tables, {st['list_items']} list items)")
+        for w in res.warnings:
+            print("  warning:", w)
+    if failed:
+        sys.exit(1)
+
+
 def cmd_reparse(a):
     conn = _conn()
     rid = store.run_parse(conn, a.document_id, workers=a.workers, activate=a.activate)
@@ -129,6 +155,8 @@ def main(argv=None):
     s = sub.add_parser("make-demo", help="write synthetic demo specs and command DB"); s.add_argument("dir"); s.set_defaults(fn=cmd_demo)
     s = sub.add_parser("ingest", help="register + parse spec files"); s.add_argument("files", nargs="+"); s.add_argument("--family"); s.add_argument("--version")
     s.add_argument("--workers", type=int, default=None); s.add_argument("--set", help="add to (and create) this spec set"); s.set_defaults(fn=cmd_ingest)
+    s = sub.add_parser("to-md", help="convert PDF / DOC / DOCX files to Markdown"); s.add_argument("files", nargs="+")
+    s.add_argument("--out", help="output directory (default: next to each source file)"); s.add_argument("--no-front-matter", action="store_true", help="omit the YAML header"); s.set_defaults(fn=cmd_to_md)
     s = sub.add_parser("reparse", help="parse a registered document again"); s.add_argument("document_id", type=int); s.add_argument("--activate", action="store_true")
     s.add_argument("--previous", type=int, help="run id to diff against"); s.add_argument("--workers", type=int, default=None); s.set_defaults(fn=cmd_reparse)
     s = sub.add_parser("catalog", help="build the catalog for a spec set"); s.add_argument("set_id", type=int); s.set_defaults(fn=cmd_catalog)

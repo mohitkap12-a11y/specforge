@@ -9,6 +9,7 @@ import CommandDBsPage from "./pages/CommandDBs";
 import ActivityPage from "./pages/Activity";
 import SettingsPage from "./pages/Settings";
 import SpecsPage from "./pages/Specs";
+import ConvertPage from "./pages/Convert";
 import ExplorerPage from "./pages/Explorer";
 import ScenariosPage from "./pages/Scenarios";
 import CoveragePage from "./pages/Coverage";
@@ -23,6 +24,7 @@ export default function App() {
         <Route path="/" element={<OverviewPage />} />
         <Route path="/dashboard" element={<Navigate to="/" replace />} />
         <Route path="/specs" element={<SpecsPage />} />
+        <Route path="/convert" element={<ConvertPage />} />
         <Route path="/explorer" element={<ExplorerPage />} />
         <Route path="/sets" element={<SetsPage />} />
         <Route path="/catalog" element={<CatalogPage />} />

@@ -26,6 +26,18 @@ Scenario and command **coverage for the NVMe / NVMe-MI specifications**, fully o
 | React UI (all pages: Dashboard, Specs, Explorer, Sets, Catalog, Scenarios, Command DBs, Coverage, Reports, Jobs, Settings) | implemented in `frontend/`; checked in a browser against the synthetic demo. Not yet exercised on real specs |
 | Real NVMe specs (`docs/specifications/`: Base 2.4, MI 2.2, NVM Command Set 1.3) | run end to end once (parse, references, catalog, cross-command generation, approval, import, coverage, export); parser audit passes with 0 errors on all three, warnings remain (see "Before trusting real-spec results"); not yet run against a real command log or a local model |
 
+## Convert a spec to Markdown
+
+Any PDF, DOC or DOCX can be turned into one clean `.md` file, independent of the coverage workflow (nothing is stored in the workspace):
+
+```bash
+specforge to-md "NVM Express Base 2.4.pdf" notes.docx --out ./md     # writes ./md/NVM Express Base 2.4.md, ./md/notes.md
+```
+
+or use the **To Markdown** page in the UI (preview, copy, download), or `POST /api/convert/markdown` (multipart `file`; `?front_matter=false`, `?download=true`).
+
+Kept: heading hierarchy (PDF bookmarks, font sizes or Word styles, including Word's automatic heading numbers), paragraphs, bullet / numbered lists with nesting, tables (merged cells, tables continued across PDF pages), code, bold / italic / super- and subscript, hyperlinks, footnotes, image alt text. Dropped: running page headers / footers, page numbers, table-of-contents dot leaders. Limits: scanned PDFs without a text layer are rejected (no OCR), images are not extracted (a warning counts them), legacy `.doc` needs LibreOffice (`soffice`) on the machine, multi-column PDF layouts are read in PyMuPDF's block order.
+
 ## Install
 
 Requires Python 3.11+. Everything runs locally; nothing is downloaded at run time.

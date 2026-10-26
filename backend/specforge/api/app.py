@@ -8,6 +8,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -15,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .. import __version__, catalog, cmddb, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
 from ..crossgen import generate_cross_scenarios
+from ..convert import ConversionError, SUPPORTED, convert_file, output_name
 from ..core import config
 from ..core.db import get_conn, jloads, row, rows
 from ..ingest import store
@@ -22,6 +24,7 @@ from ..llm.base import LLMError
 from ..llm.service import LLMService, make_provider
 
 
+MAX_CONVERT_BYTES = 200 * 1024 * 1024
 SCENARIO_STATES = {"draft", "approved", "rejected"}
 LINK_STATES = {"proposed", "approved", "rejected"}
 EXEC_READONLY = "executed scenarios are read from the command DB: they have no review state and their steps cannot be edited; review their requirement links instead"
@@ -123,6 +126,39 @@ def create_app() -> FastAPI:
         except LLMError as e:
             audit(f"Connection test: {name} failed: {e}", "warn", provider=name)
             return {"ok": False, "error": str(e), "models": []}
+
+    # ------------------------------------------------------------------ spec -> markdown (stateless: nothing is stored)
+    @app.post("/api/convert/markdown")
+    def convert_markdown(file: UploadFile = File(...), front_matter: bool = Query(True), download: bool = Query(False)):
+        name = os.path.basename(file.filename or "document")
+        suffix = Path(name).suffix.lower()
+        if suffix not in SUPPORTED:
+            raise HTTPException(400, f"Unsupported file type: {name}. Upload a PDF, DOC or DOCX file.")
+        size = 0
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            try:
+                while chunk := file.file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_CONVERT_BYTES:
+                        raise HTTPException(413, f"File is larger than {MAX_CONVERT_BYTES // (1024 * 1024)} MB.")
+                    tmp.write(chunk)
+            except BaseException:
+                tmp.close()
+                os.unlink(tmp.name)
+                raise
+        try:
+            res = convert_file(tmp.name, filename=name, front_matter=front_matter)
+        except ConversionError as e:
+            raise HTTPException(422, str(e)) from e
+        finally:
+            os.unlink(tmp.name)
+        out = output_name(name)
+        audit(f"Converted {name} to Markdown", format=res.source_format, **res.stats)
+        if download:
+            return Response(res.markdown, media_type="text/markdown; charset=utf-8",
+                            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(out)}"})
+        return {"filename": out, "title": res.title, "format": res.source_format, "markdown": res.markdown,
+                "stats": res.stats, "warnings": res.warnings}
 
     # ------------------------------------------------------------------ specs
     @app.post("/api/specs/upload")

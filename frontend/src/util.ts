@@ -27,3 +27,9 @@ export function bufferPaused<T>(buf: T[], batch: T[], max: number): { buf: T[]; 
   const all = [...buf, ...batch];
   return all.length > max ? { buf: all.slice(all.length - max), overflowed: true } : { buf: all, overflowed: false };
 }
+
+/** "1,204 words · 12 headings · 3 tables" for a Markdown conversion; zero counts are left out. */
+export function conversionSummary(s: { words: number; headings: number; tables: number; list_items: number; code_blocks: number; pages?: number }): string {
+  const part = (n: number | undefined, one: string, many = one + "s") => (n ? `${n.toLocaleString("en-US")} ${n === 1 ? one : many}` : "");
+  return [part(s.pages, "page"), part(s.words, "word"), part(s.headings, "heading"), part(s.tables, "table"), part(s.list_items, "list item"), part(s.code_blocks, "code block")].filter(Boolean).join(" · ");
+}
