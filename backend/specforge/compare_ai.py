@@ -146,7 +146,7 @@ def summarize(conn: sqlite3.Connection, cid: int, svc: LLMService, redo: bool = 
     for n, ch in enumerate(chapters):
         if progress:
             progress(f"summarising chapter {ch['chapter']}", n, len(chapters) + 1)
-        items = compare.query_changes(conn, cid, chapter=ch["chapter"], nested=False, sort="importance", limit=PER_CHAPTER * 3)["items"]
+        items = compare.query_changes(conn, cid, chapter=ch["chapter"], nested=True, sort="importance", limit=PER_CHAPTER * 3)["items"]
         items = [c for c in items if c["impact"] != "editorial"][:PER_CHAPTER]
         if not items:
             continue

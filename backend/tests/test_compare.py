@@ -514,3 +514,26 @@ def test_concurrent_summary_requests_start_exactly_one_job(client, tmp_path, mon
     with ThreadPoolExecutor(8) as ex:
         codes = sorted(f.result().status_code for f in [ex.submit(client.post, f"/api/compare/{cid}/summarize") for _ in range(8)])
     assert codes.count(200) == 1 and codes.count(409) == 7
+
+
+def test_ai_digest_includes_changes_inside_new_sections(conn, tmp_path):
+    from llm_helpers import settings
+    from specforge import compare_ai
+    from specforge.llm.service import LLMService
+
+    base = base_spec()
+    new = base + [("h", 1, "7 Brand new chapter"), ("h", 2, "7.1 Child section"), ("p", "The controller shall do a new thing.")]
+    rids = []
+    for ver, bl in (("1", base), ("2", new)):
+        d = store.register_document(conn, write_docx(tmp_path / f"ai{ver}.docx", bl), "nvme-base", ver)
+        rids.append(store.run_parse(conn, d["id"], workers=1, activate=True))
+    cid = compare.run_comparison(conn, *rids)
+    seen = []
+
+    def reply(messages):
+        seen.append(messages[1]["content"])
+        return json.dumps({"headline": "h", "points": [], "overview": "o"})
+    from llm_helpers import Fake
+
+    compare_ai.summarize(conn, cid, LLMService(conn, settings(), provider=Fake([reply])))
+    assert any("Child section" in m and "shall do a new thing" in m for m in seen)
