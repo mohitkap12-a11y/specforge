@@ -441,3 +441,25 @@ def test_docx_numbered_cell_paragraphs_advance_counters_and_override_levels_appl
     d.save(path)
     m = convert_file(path, front_matter=False).markdown
     assert "| k | 2. in cell |" in m and "3. after" in m
+
+
+def test_brackets_and_entities_stay_literal_but_footnote_refs_work():
+    assert md.inline([md.Seg("[7:0]: Reserved &copy; 5 & 6")]) == "\\[7:0\\]: Reserved &amp;copy; 5 & 6"
+    assert md.inline([md.Seg("text"), md.Seg("[^1]", raw=True)]) == "text[^1]"
+    assert md.render([md.Para([md.Seg("[7:0]: Reserved")])]) == "\\[7:0\\]: Reserved\n"
+
+
+def test_docx_footnote_reference_is_emitted_with_definition(tmp_path):
+    from specforge.convert import word
+
+    d = docx.Document()
+    d.add_paragraph("Body.")
+    path = tmp_path / "fn.docx"
+    d.save(path)
+    ctx = word._Ctx(docx.Document(path))
+    ctx.footnotes["2"] = "Note text"
+    r = OxmlElement("w:r")
+    ref = OxmlElement("w:footnoteReference")
+    ref.set(qn("w:id"), "2")
+    r.append(ref)
+    assert md.inline(ctx.run(r, None, None, False)) == "[^2]"

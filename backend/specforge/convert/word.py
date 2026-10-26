@@ -212,7 +212,7 @@ class _Ctx:
                     flush()
                     if fid not in self.used_notes:
                         self.used_notes.append(fid)
-                    segs.append(Seg(f"[^{fid}]"))
+                    segs.append(Seg(f"[^{fid}]", raw=True))
             elif t == W + "drawing" or t == W + "pict":
                 self.images += 1
                 doc_pr = next(iter(c.iter(WP + "docPr")), None)

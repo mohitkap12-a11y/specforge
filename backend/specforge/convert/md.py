@@ -19,6 +19,7 @@ class Seg:
     sup: bool = False
     sub: bool = False
     link: str | None = None
+    raw: bool = False   # already Markdown (footnote references): emitted as is
 
 
 @dataclass
@@ -70,7 +71,8 @@ _UNDERSCORE = re.compile(r"(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])")
 
 def escape_text(s: str) -> str:
     """Escape characters that would be read as Markdown/HTML. Intra-word underscores (snake_case) are left alone."""
-    s = s.replace("\\", "\\\\").replace("*", "\\*").replace("`", "\\`").replace("<", "\\<")
+    s = s.replace("\\", "\\\\").replace("*", "\\*").replace("`", "\\`").replace("<", "\\<").replace("[", "\\[").replace("]", "\\]")
+    s = re.sub(r"&(?=#?\w+;)", "&amp;", s)   # a literal "&copy;" must not turn into a character
     return _UNDERSCORE.sub(r"\\_", s)
 
 
@@ -87,6 +89,8 @@ def _longest_run(text: str, ch: str = "`") -> int:
 
 
 def _fmt(s: Seg) -> str:
+    if s.raw:
+        return s.text
     if s.code:
         t = s.text.replace("\n", " ")
         if not t.strip():
@@ -123,14 +127,14 @@ def merge_segs(segs: list[Seg]) -> list[Seg]:
     out: list[Seg] = []
     for s in segs:
         if out and _same(out[-1], s):
-            out[-1] = Seg(out[-1].text + s.text, s.bold, s.italic, s.code, s.sup, s.sub, s.link)
+            out[-1] = Seg(out[-1].text + s.text, s.bold, s.italic, s.code, s.sup, s.sub, s.link, s.raw)
         else:
             out.append(s)
     return out
 
 
 def _same(a: Seg, b: Seg) -> bool:
-    return (a.bold, a.italic, a.code, a.sup, a.sub, a.link) == (b.bold, b.italic, b.code, b.sup, b.sub, b.link)
+    return (a.bold, a.italic, a.code, a.sup, a.sub, a.link, a.raw) == (b.bold, b.italic, b.code, b.sup, b.sub, b.link, b.raw)
 
 
 def inline(segs: list[Seg]) -> str:
@@ -142,7 +146,7 @@ def inline(segs: list[Seg]) -> str:
         piece = _fmt(s)
         if s.link and s.text.strip():
             lead, trail = piece[: len(piece) - len(piece.lstrip())], piece[len(piece.rstrip()):]
-            core = piece.strip().replace("]", "\\]")
+            core = piece.strip()
             piece = f"{lead}[{core}]({s.link.replace(' ', '%20').replace(')', '%29')}){trail}"
         out.append(piece)
     text = "".join(out).replace("\r", "").strip(" \n")
