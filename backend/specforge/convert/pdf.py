@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .md import Block, Code, Heading, Item, Para, Seg, Table, escape_text
 
@@ -108,7 +108,7 @@ def _read_page(page, pno: int, pymupdf) -> tuple[list[Line], list[_Table], int]:
                 if links:
                     c = pymupdf.Point((s["bbox"][0] + s["bbox"][2]) / 2, (s["bbox"][1] + s["bbox"][3]) / 2)
                     uri = next((u for r, u in links if r.contains(c)), None)
-                segs.append(Seg(s["text"], bold and s["text"].strip() != "", italic, mono, link=uri))
+                segs.append(Seg(s["text"], bold and s["text"].strip() != "", italic, mono, sup=bool(s["flags"] & 1) and s["text"].strip() != "", link=uri))
                 weight[(round(s["size"], 1), bold, mono)] += len(s["text"].strip())
             (size, _, _), _ = weight.most_common(1)[0]
             body = [s for s in segs if s.text.strip()]
@@ -196,7 +196,7 @@ class _Builder:
             else:
                 text = "".join(s.text for s in segs).strip()
                 if _CAPTION.match(text) and not any(s.bold for s in segs):
-                    segs = [Seg(s.text, True, s.italic, s.code, link=s.link) for s in segs]
+                    segs = [replace(s, bold=True) for s in segs]
                 self.blocks.append(Para(segs))
 
     def _item(self, first: Line, segs: list[Seg]) -> Item:
@@ -223,7 +223,8 @@ class _Builder:
         if self.cur is not None and self.last is not None:
             cont = False
             if kind == self.kind and kind != "item":
-                cont = kind != "heading" or level == self.cur_level
+                # two separately bookmarked headings of one level are two sections, not a wrapped title
+                cont = kind != "heading" or (level == self.cur_level and not any(pg == ln.page for _, pg in self.toc.get(_norm(ln.plain), [])))
             elif kind == "p" and self.kind == "item":
                 # wrapped continuation of a list item: indented past the marker, or running on in lower case
                 cont = ln.x0 > self.cur[0].x0 + 4 or ln.plain[:1].islower()
@@ -320,9 +321,12 @@ def convert(path: str) -> tuple[list[Block], dict]:
         raise PdfError("The PDF has no text layer (scanned images). OCR is not supported; run the file through an OCR tool first.")
     furniture = _drop_furniture(pages, heights)
     indents: list[float] = []
+    lefts = sorted(min(ln.x0 for ln in lines) for lines in pages if lines)
+    typical = lefts[len(lefts) // 2] if lefts else 0.0
     for lines in pages:
-        prose = [ln.x0 for ln in lines if not (_BULLET.match(ln.plain) or _NUMBER.match(ln.plain))] or [ln.x0 for ln in lines]
-        left = min(prose, default=0.0)
+        left = min((ln.x0 for ln in lines), default=0.0)
+        if left > typical + 12:   # a page holding only indented items: measure from the document's usual margin
+            left = typical
         for ln in lines:
             ln.rel = ln.x0 - left
             if (_BULLET.match(ln.plain) or _NUMBER.match(ln.plain)) and not ln.mono:

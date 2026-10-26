@@ -504,3 +504,49 @@ def test_pdf_paragraph_after_list_is_not_swallowed(tmp_path):
     path = tmp_path / "li.pdf"
     doc.save(path)
     assert "- only item\n\nA new paragraph at the margin." in convert_file(path, front_matter=False).markdown
+
+
+def test_docx_monospace_list_items_stay_list_items(tmp_path):
+    d = docx.Document()
+    for t in ("first_cmd", "second_cmd"):
+        d.add_paragraph(style="List Number").add_run(t).font.name = "Courier New"
+    path = tmp_path / "ml.docx"
+    d.save(path)
+    m = convert_file(path, front_matter=False).markdown
+    assert "1. `first_cmd`\n2. `second_cmd`" in m
+
+
+def test_docx_hyperlink_anchor_is_kept(tmp_path):
+    d = docx.Document()
+    p = d.add_paragraph("see ")
+    rid = d.part.relate_to("https://example.com/doc", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", is_external=True)
+    h = OxmlElement("w:hyperlink")
+    h.set(qn("r:id"), rid)
+    h.set(qn("w:anchor"), "sec2")
+    r = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = "here"
+    r.append(t)
+    h.append(r)
+    p._p.append(h)
+    path = tmp_path / "anchor.docx"
+    d.save(path)
+    assert "[here](https://example.com/doc#sec2)" in convert_file(path, front_matter=False).markdown
+
+
+def test_superscript_segments_render_as_sup():
+    assert md.inline([md.Seg("2"), md.Seg("n", sup=True)]) == "2<sup>n</sup>"
+
+
+def test_pdf_adjacent_bookmarked_headings_stay_separate(tmp_path):
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "Alpha", fontsize=11)
+    page.insert_text((72, 112), "Beta", fontsize=11)
+    doc.set_toc([[1, "Alpha", 1], [1, "Beta", 1]])
+    path = tmp_path / "two.pdf"
+    doc.save(path)
+    m = convert_file(path, front_matter=False).markdown
+    assert "# Alpha\n\n# Beta" in m

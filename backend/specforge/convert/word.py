@@ -74,6 +74,7 @@ class _Ctx:
     def __init__(self, doc):
         self.doc = doc
         self.rels = doc.part.rels
+        self.cur_rels = self.rels   # relationships of the part being read (footnotes have their own)
         self.styles = {s.get(W + "styleId"): s for s in doc.styles.element.findall(W + "style")}
         self.nums: dict[str, dict[int, _Level]] = {}
         self.style_level: dict[tuple[str, str], int] = {}   # (numId, styleId) -> level a style is linked to in the abstract definition
@@ -117,6 +118,7 @@ class _Ctx:
                 from lxml import etree
 
                 root = etree.fromstring(rel.target_part.blob)
+                self.cur_rels = rel.target_part.rels
                 for fn in root.findall(W + "footnote"):
                     if fn.get(W + "type") in ("separator", "continuationSeparator", "continuationNotice"):
                         continue
@@ -125,6 +127,7 @@ class _Ctx:
                         segs.extend(self.runs(p, None))
                         segs.append(Seg(" "))
                     self.footnotes[fn.get(W + "id")] = inline(segs).strip()
+                self.cur_rels = self.rels
 
     # ------------------------------------------------------------------ styles
     def chain(self, style_id: str | None):
@@ -175,7 +178,11 @@ class _Ctx:
                 out.extend(self.run(ch, pstyle, link, heading))
             elif tag == W + "hyperlink":
                 rid = ch.get(R + "id")
-                target = self.rels[rid].target_ref if rid and rid in self.rels and self.rels[rid].is_external else None
+                rels = self.cur_rels
+                target = rels[rid].target_ref if rid and rid in rels and rels[rid].is_external else None
+                anchor = ch.get(W + "anchor")
+                if target and anchor:
+                    target += "#" + anchor
                 out.extend(self.runs(ch, pstyle, target or link, heading))
             elif tag in (W + "ins", W + "smartTag", W + "sdtContent", W + "fldSimple", W + "customXml") or tag == W + "sdt":
                 out.extend(self.runs(ch.find(W + "sdtContent") if tag == W + "sdt" and ch.find(W + "sdtContent") is not None else ch,
@@ -380,7 +387,7 @@ def convert(path: str) -> tuple[list[Block], dict]:
             blocks.append(Heading(level, text))
             return
         mono = bool(segs) and all(s.code or not s.text.strip() for s in segs) and any(s.text.strip() for s in segs)
-        if _CODE_STYLE.search(sname) or mono:
+        if _CODE_STYLE.search(sname) or (mono and not num):
             code_run.append("".join(s.text for s in segs).replace("\n", "\n").rstrip())
             return
         flush_code()
