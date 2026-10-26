@@ -42,6 +42,7 @@ class Line:
     y0: float
     y1: float
     page: int
+    rel: float = 0.0   # indent relative to the page's left text edge
 
 
 @dataclass
@@ -52,7 +53,7 @@ class _Table:
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", s.lower())
+    return re.sub(r"[\W_]+", "", s.lower())   # keeps letters and digits of every script
 
 
 def _clean_cell(c) -> str:
@@ -156,14 +157,15 @@ class _Builder:
         self.kind = ""
         self.cur_level = 0
         self.last: Line | None = None
-        self.list_x: dict[int, list[float]] = {}
+        self.list_x: list[float] = []   # distinct list indents across the whole document
 
     # ------------------------------------------------------------------ classification
     def heading_level(self, ln: Line) -> int | None:
         t = ln.plain
         if len(t) > 160 or _TOC_LEADER.search(t) or t.endswith(("," , ";")):
             return None
-        for lvl, pg in self.toc.get(_norm(t), []):
+        key = _norm(t)
+        for lvl, pg in self.toc.get(key, []) if key else []:
             if pg == ln.page:
                 return lvl
         big = ln.size >= self.body * 1.15 and ln.size >= self.body + 1.0
@@ -199,15 +201,7 @@ class _Builder:
 
     def _item(self, first: Line, segs: list[Seg]) -> Item:
         text = "".join(s.text for s in segs)
-        xs = self.list_x.setdefault(first.page, [])
-        for i, x in enumerate(xs):
-            if abs(x - first.x0) <= 4:
-                lvl = i
-                break
-        else:
-            xs.append(first.x0)
-            xs.sort()
-            lvl = xs.index(first.x0)
+        lvl = next((i for i, x in enumerate(self.list_x) if abs(x - first.rel) <= 4), 0)
         lvl = min(lvl, 4)
         m = _BULLET.match(text.lstrip())
         if m:
@@ -248,9 +242,9 @@ class _Builder:
         self.flush()
         self.last = None
         prev = self.blocks[-1] if self.blocks else None
-        if page_start and isinstance(prev, Table) and len(prev.rows[0]) == len(t.rows[0]):
-            rows = t.rows[1:] if [c.lower() for c in t.rows[0]] == [c.lower() for c in prev.rows[0]] else t.rows
-            prev.rows.extend(rows)
+        if (page_start and isinstance(prev, Table) and len(prev.rows[0]) == len(t.rows[0])
+                and [c.lower() for c in t.rows[0]] == [c.lower() for c in prev.rows[0]]):
+            prev.rows.extend(t.rows[1:])   # same repeated header: one table continued on the next page
         else:
             self.blocks.append(Table(t.rows))
 
@@ -324,6 +318,18 @@ def convert(path: str) -> tuple[list[Block], dict]:
     if total_chars == 0 and not any(tables):
         raise PdfError("The PDF has no text layer (scanned images). OCR is not supported; run the file through an OCR tool first.")
     furniture = _drop_furniture(pages, heights)
+    indents: list[float] = []
+    for lines in pages:
+        prose = [ln.x0 for ln in lines if not (_BULLET.match(ln.plain) or _NUMBER.match(ln.plain))] or [ln.x0 for ln in lines]
+        left = min(prose, default=0.0)
+        for ln in lines:
+            ln.rel = ln.x0 - left
+            if (_BULLET.match(ln.plain) or _NUMBER.match(ln.plain)) and not ln.mono:
+                indents.append(ln.rel)
+    clusters: list[float] = []
+    for x in sorted(indents):
+        if not clusters or x - clusters[-1] > 4:
+            clusters.append(x)
 
     weight: Counter = Counter()
     for p in pages:
@@ -336,6 +342,7 @@ def convert(path: str) -> tuple[list[Block], dict]:
                     if ln.size >= body * 1.15 and ln.size >= body + 1.0 and len(ln.plain) <= 160 and ln.plain not in ("",)
                     and not _TOC_LEADER.search(ln.plain)})
     b = _Builder(body, toc, sizes)
+    b.list_x = clusters
     leaders = 0
     for pno, (lines, tbls) in enumerate(zip(pages, tables)):
         items = sorted([(ln.y0, 0, ln) for ln in lines] + [(t.y0, 1, t) for t in tbls], key=lambda x: (x[0], x[1]))

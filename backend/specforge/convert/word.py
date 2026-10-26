@@ -55,7 +55,7 @@ def _format_num(n: int, fmt: str) -> str:
             m, r = divmod(m - 1, 26)
             s = chr(65 + r) + s
         return s if fmt == "upperLetter" else s.lower()
-    if fmt in ("upperRoman", "lowerRoman"):
+    if fmt in ("upperRoman", "lowerRoman") and 0 < n < 4000:   # outside Roman range (or hostile start values) fall through to digits
         vals = [(1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"), (50, "L"), (40, "XL"), (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")]
         s, m = "", n
         for v, t in vals:
@@ -191,7 +191,7 @@ class _Ctx:
             if t == W + "t":
                 buf.append(c.text or "")
             elif t == W + "tab":
-                buf.append(" ")
+                buf.append("\t")   # kept for code blocks; prose rendering turns it into a space
             elif t in (W + "br", W + "cr"):
                 if c.get(W + "type") == "page":
                     continue
@@ -352,7 +352,7 @@ def convert(path: str) -> tuple[list[Block], dict]:
             if num:
                 lab, _, _ = ctx.label(*num)
                 lab = lab.strip()
-                if lab and not text.startswith(lab.rstrip(".")):
+                if lab and not re.match(rf"{re.escape(lab.rstrip('.'))}\.?(?:\s|$)", text):
                     text = f"{lab} {text}"
             blocks.append(Heading(level, text))
             return

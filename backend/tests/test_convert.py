@@ -145,6 +145,7 @@ def test_docx_numbered_headings_and_footnotes(tmp_path):
     d.add_heading("Scope", 1)
     d.add_heading("Terms", 2)
     d.add_heading("Other", 1)
+    d.add_heading("2-bit flags", 1)
     path = tmp_path / "num.docx"
     d.save(path)
     # give Heading 1 / Heading 2 a multilevel numbering definition
@@ -167,6 +168,7 @@ def test_docx_numbered_headings_and_footnotes(tmp_path):
             z.writestr(n, b)
     m = convert_file(path, front_matter=False).markdown
     assert "# 1 Scope" in m and "## 1.1 Terms" in m and "# 2 Other" in m
+    assert "# 3 2-bit flags" in m   # a label is only skipped when the text really starts with it
 
 
 def test_docx_corrupt_and_wrong_type(tmp_path):
@@ -311,3 +313,87 @@ def test_cli_to_md(rich_docx, rich_pdf, tmp_path):
     with pytest.raises(SystemExit) as e:
         main(["to-md", str(tmp_path / "nope.pdf")])
     assert e.value.code == 1
+
+
+# ----------------------------------------------------------------------------- review regressions
+
+def test_code_keeps_literal_spacing_blank_lines_and_backticks():
+    assert md.inline([md.Seg("a  b", code=True)]) == "`a  b`"
+    assert md.inline([md.Seg("a`b``c", code=True)]) == "```a`b``c```"
+    out = md.render([md.Code(["x = 1", "", "", "y = 2"]), md.Code(["````", "z"])])
+    assert "x = 1\n\n\ny = 2" in out and "`````\n````\nz\n`````" in out
+    assert md.inline([md.Seg("two  spaces in prose")]) == "two spaces in prose"
+
+
+def test_pdf_distinct_tables_with_equal_columns_are_not_merged(tmp_path):
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import PageBreak, SimpleDocTemplate, Table, TableStyle
+
+    grid = TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black)])
+    path = tmp_path / "two.pdf"
+    SimpleDocTemplate(str(path), pagesize=A4).build([
+        Table([["Reg", "Desc"], ["R0", "zero"]], style=grid), PageBreak(),
+        Table([["Opcode", "Name"], ["01h", "Write"]], style=grid)])
+    m = convert_file(path, front_matter=False).markdown
+    assert m.count("| --- | --- |") == 2 and "| Opcode | Name |" in m and "| R0 | zero |" in m
+
+
+def test_pdf_list_nesting_is_consistent_across_pages(tmp_path):
+    import pymupdf
+
+    doc = pymupdf.open()
+    p1 = doc.new_page()
+    p1.insert_text((72, 100), "Introduction text for the list below.", fontsize=11)
+    p1.insert_text((72, 130), "• parent item", fontsize=11)
+    p2 = doc.new_page()
+    p2.insert_text((72, 100), "More prose on the second page.", fontsize=11)
+    p2.insert_text((90, 130), "• child item", fontsize=11)
+    p2.insert_text((72, 160), "• other parent", fontsize=11)
+    path = tmp_path / "nest.pdf"
+    doc.save(path)
+    m = convert_file(path, front_matter=False).markdown
+    lines = [ln for ln in m.splitlines() if "item" in ln or "parent" in ln]
+    assert lines[0].startswith("- parent") and lines[1].startswith("    - child") and lines[2].startswith("- other")
+
+
+def test_pdf_non_latin_bookmarks_do_not_turn_body_lines_into_headings(tmp_path):
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "Plain body line one.", fontsize=11)
+    doc.set_toc([[1, "概要", 1]])
+    path = tmp_path / "jp.pdf"
+    doc.save(path)
+    assert convert_file(path, front_matter=False).markdown.strip() == "Plain body line one."
+
+
+def test_cli_never_overwrites_an_input_or_an_earlier_output(tmp_path):
+    from specforge.cli import _free_target
+
+    src = tmp_path / "spec.md"
+    written = set()
+    t1 = _free_target(tmp_path / "spec.md", "spec.md", written, {src.resolve()})
+    assert t1 != src
+    written.add(t1)
+    t2 = _free_target(tmp_path / "spec.md", "spec.md", written, {src.resolve()})
+    t3 = _free_target(tmp_path / "spec.md", "spec.md", written | {t2}, {src.resolve()})
+    assert len({src, t1, t2, t3}) == 4
+
+
+def test_docx_huge_roman_start_is_bounded():
+    from specforge.convert.word import _format_num
+
+    assert _format_num(10**15, "upperRoman") == str(10**15)
+    assert _format_num(4, "lowerRoman") == "iv"
+
+
+def test_docx_tabs_survive_in_code_paragraphs(tmp_path):
+    d = docx.Document()
+    p = d.add_paragraph()
+    r = p.add_run("if (x)\n\ty();")
+    r.font.name = "Courier New"
+    path = tmp_path / "tab.docx"
+    d.save(path)
+    assert "if (x)\n\ty();" in convert_file(path, front_matter=False).markdown

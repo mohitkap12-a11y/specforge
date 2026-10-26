@@ -55,11 +55,19 @@ def cmd_ingest(a):
         print(f"spec set '{a.set}' (#{sid}) now has {len(rows(conn, 'SELECT 1 FROM spec_set_member WHERE set_id=?', (sid,)))} members")
 
 
+def _free_target(target: Path, source_name: str, written: set, sources: set) -> Path:
+    """spec.pdf + spec.docx, or two spec.pdf from different folders, must not overwrite each other or an input file."""
+    cands = [target, target.with_name(source_name + ".md")]
+    cands += [target.with_name(f"{target.stem}-{i}{target.suffix}") for i in range(2, 10000)]
+    return next(c for c in cands if c not in written and c.resolve() not in sources)
+
+
 def cmd_to_md(a):
     from .convert import ConversionError, convert_file, output_name
 
     out_dir = Path(a.out) if a.out else None
     failed, written = 0, set()
+    sources = {Path(f).resolve() for f in a.files}
     for f in a.files:
         try:
             res = convert_file(f, front_matter=not a.no_front_matter)
@@ -67,9 +75,7 @@ def cmd_to_md(a):
             print(f"{f}: {e}", file=sys.stderr)
             failed += 1
             continue
-        target = (out_dir or Path(f).parent) / output_name(Path(f).name)
-        if target in written:   # spec.pdf and spec.docx in one run
-            target = target.with_name(Path(f).name + ".md")
+        target = _free_target((out_dir or Path(f).parent) / output_name(Path(f).name), Path(f).name, written, sources)
         written.add(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(res.markdown, encoding="utf-8")

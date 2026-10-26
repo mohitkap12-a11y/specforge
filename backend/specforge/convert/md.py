@@ -82,28 +82,33 @@ def _wrap(text: str, marker: str) -> str:
     return f"{lead}{marker}{core}{marker}{trail}"
 
 
+def _longest_run(text: str, ch: str = "`") -> int:
+    return max((len(m) for m in re.findall(f"{re.escape(ch)}+", text)), default=0)
+
+
 def _fmt(s: Seg) -> str:
     if s.code:
         t = s.text.replace("\n", " ")
         if not t.strip():
             return t
-        fence = "``" if "`" in t else "`"
-        pad = " " if t.startswith("`") or t.endswith("`") else ""
+        fence = "`" * (_longest_run(t) + 1)   # longer than any backtick run inside, so the span cannot close early
         core = t.strip(" ")
         lead, trail = t[: len(t) - len(t.lstrip(" "))], t[len(t.rstrip(" ")):]
-        out = f"{lead}{fence}{pad}{core}{pad}{fence}{trail}"
-    else:
-        out = escape_text(s.text)
-        if s.sup:
-            out = f"<sup>{out}</sup>" if out.strip() else out
-        elif s.sub:
-            out = f"<sub>{out}</sub>" if out.strip() else out
-        if s.bold and s.italic:
-            out = _wrap(out, "***")
-        elif s.bold:
-            out = _wrap(out, "**")
-        elif s.italic:
-            out = _wrap(out, "*")
+        pad = " " if core.startswith("`") or core.endswith("`") else ""
+        return f"{lead}{fence}{pad}{core}{pad}{fence}{trail}"
+    out = escape_text(s.text)
+    # collapse runs of spaces in prose only; code keeps its literal spacing
+    out = re.sub(r"(?<=\S)[ ]{2,}(?=\S)", " ", out.replace("\t", " "))
+    if s.sup:
+        out = f"<sup>{out}</sup>" if out.strip() else out
+    elif s.sub:
+        out = f"<sub>{out}</sub>" if out.strip() else out
+    if s.bold and s.italic:
+        out = _wrap(out, "***")
+    elif s.bold:
+        out = _wrap(out, "**")
+    elif s.italic:
+        out = _wrap(out, "*")
     return out
 
 
@@ -140,8 +145,7 @@ def inline(segs: list[Seg]) -> str:
             core = piece.strip().replace("]", "\\]")
             piece = f"{lead}[{core}]({s.link.replace(' ', '%20').replace(')', '%29')}){trail}"
         out.append(piece)
-    text = "".join(out).replace("\r", "").replace("\t", " ").strip(" \n")
-    text = re.sub(r"(?<=\S)[ ]{2,}(?=\S)", " ", text)
+    text = "".join(out).replace("\r", "").strip(" \n")
     return re.sub(r" *\n *", "  \n", text)
 
 
@@ -206,7 +210,7 @@ def render(blocks: list[Block]) -> str:
                 lines.pop()
             if lines:
                 body = "\n".join(lines)
-                fence = "````" if "```" in body else "```"
+                fence = "`" * max(3, _longest_run(body) + 1)
                 out.append(f"{fence}\n{body}\n{fence}")
         elif isinstance(b, Raw):
             if b.text.strip():
@@ -215,4 +219,4 @@ def render(blocks: list[Block]) -> str:
             if b.rows:
                 out.append(table_md(b.rows))
         prev = b
-    return re.sub(r"\n{3,}", "\n\n", "\n\n".join(out)).strip() + "\n"
+    return "\n\n".join(out).strip() + "\n"
