@@ -17,6 +17,7 @@ R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 WP = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
 _MONO = re.compile(r"courier|consolas|mono|menlo|lucida console", re.I)
 _CODE_STYLE = re.compile(r"code|preformatted|source|verbatim|listing", re.I)
+MAX_SPAN = 64   # a hostile gridSpan must not allocate billions of cells
 _QUOTE_STYLE = re.compile(r"(intense )?quote|block text|callout", re.I)
 
 
@@ -73,6 +74,7 @@ class _Ctx:
         self.rels = doc.part.rels
         self.styles = {s.get(W + "styleId"): s for s in doc.styles.element.findall(W + "style")}
         self.nums: dict[str, dict[int, _Level]] = {}
+        self.style_level: dict[tuple[str, str], int] = {}   # (numId, styleId) -> level a style is linked to in the abstract definition
         self.counters: dict[tuple[str, int], int] = {}
         self.footnotes: dict[str, str] = {}
         self.used_notes: list[str] = []
@@ -93,6 +95,8 @@ class _Ctx:
                 continue
             lv = {}
             for l in a.findall(W + "lvl"):
+                if _val(l, "pStyle"):
+                    self.style_level[(num.get(W + "numId"), _val(l, "pStyle"))] = int(l.get(W + "ilvl", "0"))
                 lv[int(l.get(W + "ilvl", "0"))] = _Level(_val(l, "numFmt", "decimal"), _val(l, "lvlText", ""), int(_val(l, "start", "1")))
             for o in num.findall(W + "lvlOverride"):
                 s = o.find(W + "startOverride")
@@ -229,8 +233,9 @@ class _Ctx:
         if not nid or nid == "0" or nid not in self.nums:
             return None
         ilvl = _val(num, "ilvl")
-        if ilvl is None:   # a style-linked list level (Heading numbering) names the level in the abstract definition
-            ilvl = _val(self.style_prop(sid, "numPr"), "ilvl", "0")
+        if ilvl is None:   # a style-linked level (Heading numbering): the abstract definition names the style it belongs to
+            ilvl = next((str(self.style_level[(nid, st.get(W + "styleId"))]) for st in self.chain(sid)
+                         if (nid, st.get(W + "styleId")) in self.style_level), "0")
         return nid, int(ilvl)
 
     def label(self, nid: str, ilvl: int) -> tuple[str, str, int]:
@@ -293,7 +298,8 @@ def _grid(ctx: _Ctx, tbl) -> list[list[str]]:
             tcpr = tc.find(W + "tcPr")
             span = 1
             if tcpr is not None and tcpr.find(W + "gridSpan") is not None:
-                span = int(tcpr.find(W + "gridSpan").get(W + "val", "1"))
+                raw = tcpr.find(W + "gridSpan").get(W + "val", "1") or "1"
+                span = max(1, min(int(raw), MAX_SPAN)) if raw.isdigit() else 1
             vm = tcpr.find(W + "vMerge") if tcpr is not None else None
             cont = vm is not None and (vm.get(W + "val") or "continue") == "continue"
             row.append("" if cont else _cell_text(ctx, tc))

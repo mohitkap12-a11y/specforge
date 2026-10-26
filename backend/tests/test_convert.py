@@ -152,16 +152,16 @@ def test_docx_numbered_headings_and_footnotes(tmp_path):
     with zipfile.ZipFile(path) as z:
         files = {n: z.read(n) for n in z.namelist()}
     numbering = (b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-                 b'<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1"/></w:lvl>'
-                 b'<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1.%2"/></w:lvl></w:abstractNum>'
+                 b'<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="Heading1"/><w:lvlText w:val="%1"/></w:lvl>'
+                 b'<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="Heading2"/><w:lvlText w:val="%1.%2"/></w:lvl></w:abstractNum>'
                  b'<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>')
     files["word/numbering.xml"] = numbering
     styles = files["word/styles.xml"].decode()
-    for sid, lvl in (("Heading1", 0), ("Heading2", 1)):
+    for sid in ("Heading1", "Heading2"):
         marker = f'w:styleId="{sid}"'
         i = styles.index(marker)
         j = styles.index("<w:pPr>", i)
-        styles = styles[:j] + f'<w:pPr><w:numPr><w:ilvl w:val="{lvl}"/><w:numId w:val="1"/></w:numPr>' + styles[j + len("<w:pPr>"):]
+        styles = styles[:j] + '<w:pPr><w:numPr><w:numId w:val="1"/></w:numPr>' + styles[j + len("<w:pPr>"):]
     files["word/styles.xml"] = styles.encode()
     with zipfile.ZipFile(path, "w") as z:
         for n, b in files.items():
@@ -397,3 +397,17 @@ def test_docx_tabs_survive_in_code_paragraphs(tmp_path):
     path = tmp_path / "tab.docx"
     d.save(path)
     assert "if (x)\n\ty();" in convert_file(path, front_matter=False).markdown
+
+
+def test_docx_huge_grid_span_is_clamped(tmp_path):
+    d = docx.Document()
+    t = d.add_table(rows=2, cols=2)
+    t.cell(0, 0).text, t.cell(0, 1).text, t.cell(1, 0).text, t.cell(1, 1).text = "a", "b", "c", "d"
+    tc = t.cell(0, 0)._tc
+    pr = tc.get_or_add_tcPr()
+    gs = OxmlElement("w:gridSpan")
+    gs.set(qn("w:val"), "2147483647")
+    pr.append(gs)
+    path = tmp_path / "span.docx"
+    d.save(path)
+    assert "| c | d |" in convert_file(path, front_matter=False).markdown
