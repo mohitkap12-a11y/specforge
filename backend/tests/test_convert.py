@@ -113,7 +113,7 @@ def test_table_escapes_pipes_and_pads_rows():
 
 def test_lists_stay_tight_and_nested():
     out = md.render([md.Item(0, [md.Seg("a")]), md.Item(1, [md.Seg("b")]), md.Item(0, [md.Seg("c")], True, "1"), md.Para([md.Seg("after")])])
-    assert out == "- a\n    - b\n\n1. c\n\nafter\n"
+    assert out == "- a\n  - b\n\n1. c\n\nafter\n"
 
 
 # ----------------------------------------------------------------------------- DOCX
@@ -125,7 +125,7 @@ def test_docx_structure(rich_docx):
     assert "**shall**" in m and "`GET_ID`" in m
     assert "[the site](https://example.com/a%20b)" in m
     assert "2<sup>n</sup>" in m
-    assert "- first bullet\n    - nested bullet" in m
+    assert "- first bullet\n  - nested bullet" in m
     assert "1. step one\n2. step two" in m
     assert "snake_case_name and \\* star" in m
     assert "\\# not a heading" in m
@@ -347,14 +347,13 @@ def test_pdf_list_nesting_is_consistent_across_pages(tmp_path):
     p1.insert_text((72, 100), "Introduction text for the list below.", fontsize=11)
     p1.insert_text((72, 130), "• parent item", fontsize=11)
     p2 = doc.new_page()
-    p2.insert_text((72, 100), "More prose on the second page.", fontsize=11)
-    p2.insert_text((90, 130), "• child item", fontsize=11)
-    p2.insert_text((72, 160), "• other parent", fontsize=11)
+    p2.insert_text((90, 100), "• child item", fontsize=11)
+    p2.insert_text((72, 130), "• other parent", fontsize=11)
     path = tmp_path / "nest.pdf"
     doc.save(path)
     m = convert_file(path, front_matter=False).markdown
     lines = [ln for ln in m.splitlines() if "item" in ln or "parent" in ln]
-    assert lines[0].startswith("- parent") and lines[1].startswith("    - child") and lines[2].startswith("- other")
+    assert lines[0].startswith("- parent") and lines[1].startswith("  - child") and lines[2].startswith("- other")
 
 
 def test_pdf_non_latin_bookmarks_do_not_turn_body_lines_into_headings(tmp_path):
@@ -463,3 +462,45 @@ def test_docx_footnote_reference_is_emitted_with_definition(tmp_path):
     ref.set(qn("w:id"), "2")
     r.append(ref)
     assert md.inline(ctx.run(r, None, None, False)) == "[^2]"
+
+
+def test_nested_items_indent_past_the_parent_marker():
+    out = md.render([md.Item(0, [md.Seg("p")], True, "100"), md.Item(1, [md.Seg("c")]), md.Item(2, [md.Seg("g")])])
+    assert out == "100. p\n     - c\n       - g\n"
+    # an item whose parent is missing nests under the deepest open level instead of detaching
+    assert md.render([md.Item(3, [md.Seg("x")])]) == "- x\n"
+
+
+def test_heading_with_trailing_hashes_keeps_them():
+    assert md.render([md.Heading(2, "Language C #")]) == "## Language C \\#\n"
+
+
+def test_docx_extreme_list_depth_is_clamped(tmp_path):
+    d = docx.Document()
+    p = d.add_paragraph("deep", style="List Bullet")
+    ilvl = p._p.get_or_add_pPr().get_or_add_numPr().get_or_add_ilvl()
+    ilvl.set(qn("w:val"), "2147483647")
+    path = tmp_path / "deep.docx"
+    d.save(path)
+    assert len(convert_file(path, front_matter=False).markdown) < 200
+
+
+def test_docx_contents_heading_is_kept_unless_it_held_a_toc(tmp_path):
+    d = docx.Document()
+    d.add_heading("Contents", 1)
+    d.add_heading("Hardware", 2)
+    path = tmp_path / "c.docx"
+    d.save(path)
+    assert "# Contents" in convert_file(path, front_matter=False).markdown
+
+
+def test_pdf_paragraph_after_list_is_not_swallowed(tmp_path):
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "\u2022 only item", fontsize=11)
+    page.insert_text((72, 114), "A new paragraph at the margin.", fontsize=11)
+    path = tmp_path / "li.pdf"
+    doc.save(path)
+    assert "- only item\n\nA new paragraph at the margin." in convert_file(path, front_matter=False).markdown

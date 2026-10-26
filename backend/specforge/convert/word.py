@@ -17,6 +17,8 @@ R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 WP = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
 _MONO = re.compile(r"courier|consolas|mono|menlo|lucida console", re.I)
 _CODE_STYLE = re.compile(r"code|preformatted|source|verbatim|listing", re.I)
+MAX_COLS = 256   # cells kept per table row
+MAX_TABLE_CELLS = 2_000_000
 MAX_SPAN = 64   # a hostile gridSpan must not allocate billions of cells
 _QUOTE_STYLE = re.compile(r"(intense )?quote|block text|callout", re.I)
 
@@ -315,7 +317,7 @@ def _grid(ctx: _Ctx, tbl) -> list[list[str]]:
             cont = vm is not None and (vm.get(W + "val") or "continue") == "continue"
             row.append("" if cont else _cell_text(ctx, tc))
             row.extend([""] * (span - 1))
-        rows.append(row)
+        rows.append(row[:MAX_COLS])
     return rows
 
 
@@ -324,6 +326,8 @@ def _table_blocks(ctx: _Ctx, tbl) -> list[Block]:
     if not rows:
         return []
     ncol = max(len(r) for r in rows)
+    if len(rows) * ncol > MAX_TABLE_CELLS:
+        raise DocxError("A table in the document is too large to convert.")
     keep = [i for i in range(ncol) if any(i < len(r) and r[i].strip() for r in rows)]
     rows = [[r[i] if i < len(r) else "" for i in keep] for r in rows]
     if len(keep) == 1:   # a one-column table is a call-out box
@@ -357,6 +361,8 @@ def convert(path: str) -> tuple[list[Block], dict]:
         sname = ctx.style_name(sid)
         if re.match(r"(?i)^(toc|table of figures|index)\b", sname) or sname.lower() == "toc heading":
             stats["toc_paragraphs_removed"] += 1
+            if blocks and isinstance(blocks[-1], Heading):
+                blocks[-1].toc = True
             return
         level = ctx.heading_level(p)
         segs = ctx.runs(p, sid, heading=bool(level))
@@ -382,7 +388,7 @@ def convert(path: str) -> tuple[list[Block], dict]:
             return
         if num:
             lab, fmt, n = ctx.label(*num)
-            depth = num[1]
+            depth = min(max(num[1], 0), 8)
             ms = re.search(r"(?i)^list\s+\w+\s+(\d)$", sname)
             if ms and not depth:
                 depth = int(ms.group(1)) - 1
@@ -418,7 +424,7 @@ def convert(path: str) -> tuple[list[Block], dict]:
     flush_code()
     # a "Contents" heading whose entries were table-of-contents paragraphs
     blocks = [b for i, b in enumerate(blocks)
-              if not (isinstance(b, Heading) and re.fullmatch(r"(table of )?contents", b.text, re.I)
+              if not (isinstance(b, Heading) and b.toc and re.fullmatch(r"(table of )?contents", b.text, re.I)
                       and (i + 1 == len(blocks) or isinstance(blocks[i + 1], Heading)))]
     cp = doc.core_properties
     meta = {"title": (cp.title or "").strip(), "footnotes": [(f, ctx.footnotes[f]) for f in ctx.used_notes],

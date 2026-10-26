@@ -225,7 +225,8 @@ class _Builder:
             if kind == self.kind and kind != "item":
                 cont = kind != "heading" or level == self.cur_level
             elif kind == "p" and self.kind == "item":
-                cont = True   # wrapped continuation of a list item
+                # wrapped continuation of a list item: indented past the marker, or running on in lower case
+                cont = ln.x0 > self.cur[0].x0 + 4 or ln.plain[:1].islower()
             if cont and page_start:
                 prev = self.cur[-1].plain[-1:]
                 cont = kind == "code" or (kind == "p" and ln.plain[:1].islower() and prev not in _END)
@@ -290,7 +291,7 @@ def _drop_empty_toc(blocks: list[Block]) -> list[Block]:
     """A 'Contents' heading whose entries were all dot-leader lines is left with nothing under it."""
     out: list[Block] = []
     for i, b in enumerate(blocks):
-        if isinstance(b, Heading) and re.fullmatch(r"(table of )?contents", b.text.strip(), re.I):
+        if isinstance(b, Heading) and b.toc and re.fullmatch(r"(table of )?contents", b.text.strip(), re.I):
             nxt = blocks[i + 1] if i + 1 < len(blocks) else None
             if nxt is None or isinstance(nxt, Heading):
                 continue
@@ -352,6 +353,9 @@ def convert(path: str) -> tuple[list[Block], dict]:
                 b.table(it, first)
             elif _TOC_LEADER.search(it.plain):
                 leaders += 1
+                b.flush()
+                if b.blocks and isinstance(b.blocks[-1], Heading):
+                    b.blocks[-1].toc = True
                 continue
             else:
                 b.add(it, first)

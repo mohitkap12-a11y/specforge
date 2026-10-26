@@ -26,6 +26,7 @@ class Seg:
 class Heading:
     level: int
     text: str
+    toc: bool = False   # table-of-contents entries were stripped right after this heading
 
 
 @dataclass
@@ -178,18 +179,22 @@ def table_md(rows: list[list[str]]) -> str:
 def render(blocks: list[Block]) -> str:
     out: list[str] = []
     prev: Block | None = None
+    widths: list[int] = []   # content column of each open list level: a child must be indented past its parent's marker
     for b in blocks:
         if isinstance(b, Item):
             text = inline(b.segs)
             if not text:
                 continue
-            ind = "    " * b.level
-            if b.ordered and not b.label:
-                chunk = f"{ind}{b.number}. {text}"
-            else:
-                chunk = f"{ind}- {(b.label + ' ') if b.label else ''}{text}"
-            text_line = chunk.replace("  \n", "  \n" + ind + "  ")
-            if isinstance(prev, Item) and (prev.ordered == b.ordered or b.level > 0):
+            if not isinstance(prev, Item):
+                widths = []
+            level = min(b.level, len(widths))   # an item whose parent is missing nests under the deepest open one
+            del widths[level:]
+            ind = " " * sum(widths)
+            marker = f"{b.number}. " if b.ordered and not b.label else "- "
+            widths.append(len(marker))
+            chunk = f"{ind}{marker}{(b.label + ' ') if b.label else ''}{text}"
+            text_line = chunk.replace("  \n", "  \n" + ind + " " * len(marker))
+            if isinstance(prev, Item) and (prev.ordered == b.ordered or level > 0):
                 out[-1] += "\n" + text_line
             else:
                 out.append(text_line)
@@ -197,7 +202,8 @@ def render(blocks: list[Block]) -> str:
             t = re.sub(r"\s+", " ", b.text).strip()
             if not t:
                 continue
-            out.append("#" * max(1, min(6, b.level)) + " " + escape_text(t).replace("\n", " "))
+            t = re.sub(r"( +#+)$", lambda m: m.group(1).replace("#", "\\#"), escape_text(t))   # a trailing run of # would read as a closing sequence
+            out.append("#" * max(1, min(6, b.level)) + " " + t.replace("\n", " "))
         elif isinstance(b, Para):
             t = inline(b.segs)
             if t:
