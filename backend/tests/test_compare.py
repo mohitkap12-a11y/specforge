@@ -482,3 +482,35 @@ def test_second_summary_request_while_one_is_running_is_rejected(client, tmp_pat
     c.execute("INSERT INTO job(type,state,payload_json) VALUES('compare-summary','running',?)", (json.dumps({"compare_id": cid}),))
     c.commit()
     assert client.post(f"/api/compare/{cid}/summarize").status_code == 409
+
+
+def test_describe_renames_with_old_and_new_caption():
+    from specforge import compare_ai
+
+    t = {"kind": "table", "change": "renamed", "impact": "changed", "title": "Figure 5: Power (W)", "title_from": "Figure 5: Power (mW)", "number_to": "5", "details": {"how": "caption"}}
+    text = compare_ai._describe(t)
+    assert "'Figure 5: Power (mW)' -> 'Figure 5: Power (W)'" in text and "0 row" not in text
+
+
+def test_concurrent_summary_requests_start_exactly_one_job(client, tmp_path, monkeypatch):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from specforge import compare_ai
+
+    for ver, blocks in (("2.3", base_spec()), ("2.4", v_new())):
+        p = write_docx(tmp_path / f"r{ver}.docx", blocks)
+        with open(p, "rb") as f:
+            doc = client.post("/api/specs/upload", files=[("files", (p.name, f))]).json()[0]
+        client.patch(f"/api/specs/{doc['id']}", json={"family": "nvme-base", "version": ver})
+        job = client.post(f"/api/specs/{doc['id']}/parse?activate=true").json()["job"]
+        for _ in range(300):
+            if client.get(f"/api/jobs/{job}").json()["state"] in ("done", "failed"):
+                break
+            time.sleep(0.1)
+    opts = client.get("/api/compare/options").json()
+    cid = client.post("/api/compare", json={"from_run": opts[0]["run_id"], "to_run": opts[1]["run_id"]}).json()["id"]
+    monkeypatch.setattr(compare_ai, "summarize", lambda *a, **k: time.sleep(2) or {})
+    with ThreadPoolExecutor(8) as ex:
+        codes = sorted(f.result().status_code for f in [ex.submit(client.post, f"/api/compare/{cid}/summarize") for _ in range(8)])
+    assert codes.count(200) == 1 and codes.count(409) == 7

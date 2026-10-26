@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -162,6 +163,8 @@ def create_app() -> FastAPI:
                 "stats": res.stats, "warnings": res.warnings}
 
     # ------------------------------------------------------------------ compare two spec versions
+    _summary_lock = threading.Lock()
+
     def _compare_or_404(cid: int) -> dict:
         c = compare.get_comparison(conn(), cid)
         if c is None:
@@ -220,6 +223,10 @@ def create_app() -> FastAPI:
     @app.post("/api/compare/{cid}/summarize")
     def compare_summarize(cid: int, body: dict = Body(default={})):
         _compare_or_404(cid)
+        with _summary_lock:            # the check and the reservation (the job row written by submit) must not interleave with another request
+            return _start_summary(cid, body)
+
+    def _start_summary(cid: int, body: Any) -> dict:
         busy = row(conn(), "SELECT id FROM job WHERE type='compare-summary' AND state IN ('queued','running') AND payload_json LIKE ?", (f'%"compare_id": {cid}}}%',))
         if busy:
             raise HTTPException(409, f"an AI summary of this comparison is already being written (job {busy['id']})")

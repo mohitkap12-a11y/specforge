@@ -84,7 +84,11 @@ def _describe(c: dict) -> str:
     d, num = c.get("details", {}), c.get("number_to") or c.get("number_from") or ""
     head = f"{c['change'].upper()} {c['kind']} {num} '{c['title']}' [{c['impact']}]"
     lines = [head]
-    if c["kind"] == "section" and c["change"] == "modified":
+    if c["change"] == "renamed":
+        lines.append(f"  caption/title: '{c.get('title_from') or ''}' -> '{c['title']}' (content unchanged)")
+    elif c["change"] == "moved":
+        lines.append(f"  number: {c.get('number_from')} -> {c.get('number_to')} (content unchanged)")
+    elif c["kind"] == "section" and c["change"] == "modified":
         for s in d.get("removed", [])[:4]:
             lines.append(f"  - removed: {_clip(s['text'], 260)}")
         for s in d.get("added", [])[:4]:
