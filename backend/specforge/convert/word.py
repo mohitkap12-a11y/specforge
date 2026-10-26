@@ -313,7 +313,10 @@ def _cell_text(ctx: _Ctx, tc) -> str:
 def _grid(ctx: _Ctx, tbl) -> list[list[str]]:
     rows: list[list[str]] = []
     for tr in tbl.findall(W + "tr"):
-        row: list[str] = []
+        trpr = tr.find(W + "trPr")
+        before = trpr.find(W + "gridBefore") if trpr is not None else None
+        raw_before = (before.get(W + "val") or "0") if before is not None else "0"   # columns skipped at the start of the row
+        row: list[str] = [""] * (min(int(raw_before), MAX_SPAN) if raw_before.isdigit() else 0)
         for tc in tr.findall(W + "tc"):
             tcpr = tc.find(W + "tcPr")
             span = 1

@@ -550,3 +550,30 @@ def test_pdf_adjacent_bookmarked_headings_stay_separate(tmp_path):
     doc.save(path)
     m = convert_file(path, front_matter=False).markdown
     assert "# Alpha\n\n# Beta" in m
+
+
+def test_docx_grid_before_keeps_values_under_their_columns(tmp_path):
+    d = docx.Document()
+    t = d.add_table(rows=2, cols=2)
+    t.cell(0, 0).text, t.cell(0, 1).text, t.cell(1, 0).text, t.cell(1, 1).text = "A", "B", "x", "y"
+    t.cell(1, 0)._tc.getparent().remove(t.cell(1, 0)._tc)   # row 2 now starts one column in
+    tr = t.rows[1]._tr
+    pr = tr.get_or_add_trPr()
+    gb = OxmlElement("w:gridBefore")
+    gb.set(qn("w:val"), "1")
+    pr.append(gb)
+    path = tmp_path / "gb.docx"
+    d.save(path)
+    assert "|  | y |" in convert_file(path, front_matter=False).markdown
+
+
+def test_pdf_code_indentation_from_leading_spaces_is_kept(tmp_path):
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "def f():", fontname="cour", fontsize=10)
+    page.insert_text((72, 112), "    return 1", fontname="cour", fontsize=10)
+    path = tmp_path / "code.pdf"
+    doc.save(path)
+    assert "def f():\n    return 1" in convert_file(path, front_matter=False).markdown

@@ -186,7 +186,12 @@ class _Builder:
         if kind == "code":
             base = min(ln.x0 for ln in lines)
             cw = max(1.0, lines[0].size * 0.6)
-            self.blocks.append(Code([" " * int(round((ln.x0 - base) / cw)) + ln.plain for ln in lines]))
+            raw = ["".join(sg.text for sg in ln.segs).rstrip().replace("\t", "    ") for ln in lines]
+            lead = [len(r) - len(r.lstrip(" ")) for r in raw]
+            floor = min(lead)
+            # indentation lives either in the geometry or in leading spaces of the span text; take whichever carries it
+            self.blocks.append(Code([" " * max(int(round((ln.x0 - base) / cw)), ld - floor) + r.lstrip(" ")
+                                     for ln, r, ld in zip(lines, raw, lead)]))
         elif kind == "heading":
             self.blocks.append(Heading(self.cur_level, " ".join(ln.plain for ln in lines)))
         else:
