@@ -33,3 +33,14 @@ describe("bufferPaused", () => {
   it("accumulates under the cap", () => expect(bufferPaused([1, 2], [3], 5)).toEqual({ buf: [1, 2, 3], overflowed: false }));
   it("keeps the newest events and reports the overflow", () => expect(bufferPaused([1, 2, 3], [4, 5], 4)).toEqual({ buf: [2, 3, 4, 5], overflowed: true }));
 });
+
+describe("tool separation", () => {
+  it("keeps the converter, comparison and coverage tools in their own groups", () => {
+    const of = (g: string) => NAV.filter((n) => n.group === g).map((n) => n.to);
+    expect(of("convert")).toEqual(["/convert"]);
+    expect(of("compare")).toEqual(["/compare"]);
+    expect(of("coverage")).toEqual(expect.arrayContaining(["/workflow", "/specs", "/catalog", "/cmddb", "/coverage", "/reports"]));
+    expect(of("coverage")).not.toContain("/compare");
+  });
+  it("titles every tool group", () => expect(GROUPS.filter((g) => g.key !== "home").every((g) => g.title)).toBe(true));
+});

@@ -157,6 +157,20 @@ CREATE TABLE IF NOT EXISTS event_log(
 CREATE INDEX IF NOT EXISTS ix_event_job ON event_log(job_id, id);
 CREATE INDEX IF NOT EXISTS ix_event_source ON event_log(source, id);
 
+-- A comparison of two parsed versions of a spec (see compare.py); its changes are rows so they can be filtered and paged
+CREATE TABLE IF NOT EXISTS spec_compare(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_a INTEGER NOT NULL REFERENCES parse_run(id) ON DELETE CASCADE,
+  run_b INTEGER NOT NULL REFERENCES parse_run(id) ON DELETE CASCADE,
+  algo TEXT, summary_json TEXT NOT NULL, ai_json TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(run_a, run_b)
+);
+CREATE TABLE IF NOT EXISTS compare_change(
+  id INTEGER PRIMARY KEY, compare_id INTEGER NOT NULL REFERENCES spec_compare(id) ON DELETE CASCADE,
+  ord INTEGER NOT NULL, kind TEXT NOT NULL, change TEXT NOT NULL, impact TEXT NOT NULL, score INTEGER DEFAULT 0,
+  chapter TEXT, number_from TEXT, number_to TEXT, title TEXT, nested INTEGER DEFAULT 0, detail_json TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_cc ON compare_change(compare_id, ord);
 CREATE TABLE IF NOT EXISTS job(
   id INTEGER PRIMARY KEY, type TEXT NOT NULL, state TEXT NOT NULL, progress INTEGER DEFAULT 0,
   total INTEGER DEFAULT 0, message TEXT, payload_json TEXT, result_json TEXT, error TEXT,

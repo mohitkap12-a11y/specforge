@@ -36,3 +36,20 @@ import { conversionSummary } from "./util";
 describe("conversionSummary", () => {
   it("pluralises and drops zero counts", () => expect(conversionSummary({ words: 1204, headings: 1, tables: 3, list_items: 0, code_blocks: 0, pages: 2 })).toBe("2 pages · 1,204 words · 1 heading · 3 tables"));
 });
+
+import { compareVersions, splitMarks } from "./util";
+
+describe("compareVersions", () => {
+  it("orders numerically, not alphabetically", () => expect(["2.10", "2.3", "2.4", "1.4"].sort(compareVersions)).toEqual(["1.4", "2.3", "2.4", "2.10"]));
+  it("handles revision letters and unequal lengths", () => { expect(compareVersions("1.0", "1.0a")).toBeLessThan(0); expect(compareVersions("2.0b", "2.0a")).toBeGreaterThan(0); expect(compareVersions("2.4", "2.4")).toBe(0); });
+});
+
+describe("splitMarks", () => {
+  it("marks the changed words and keeps the rest", () => {
+    expect(splitMarks("A controller shall process each command", ["shall"])).toEqual([{ t: "A controller ", m: false }, { t: "shall", m: true }, { t: " process each command", m: false }]);
+  });
+  it("returns the text whole when nothing changed and survives regex characters", () => {
+    expect(splitMarks("plain", [])).toEqual([{ t: "plain", m: false }]);
+    expect(splitMarks("value (A+B) here", ["(A+B)"]).some((p) => p.m && p.t === "(A+B)")).toBe(true);
+  });
+});

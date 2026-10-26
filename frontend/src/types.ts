@@ -102,3 +102,36 @@ export interface MarkdownConversion {
   stats: { words: number; headings: number; tables: number; list_items: number; code_blocks: number; characters: number; pages?: number };
   warnings: string[];
 }
+
+export interface CompareOption { doc_id: number; family: string; version: string; filename: string | null; pages: number | null; run_id: number | null; parsed: boolean; outdated: boolean }
+export type Impact = "breaking" | "new" | "changed" | "clarification" | "editorial";
+export interface CompareChapter { chapter: string; title: string; total: number; score: number; breaking: number; new: number; changed: number; clarification: number; editorial: number }
+export interface CompareSide { run_id: number; family: string; version: string; sections: number; tables: number; requirements: number }
+export interface CompareSummary {
+  from: CompareSide; to: CompareSide; total: number; by_impact: Record<Impact, number>; by_change: Record<string, number>;
+  roots: { sections_added: number; sections_removed: number; tables_added: number; tables_removed: number };
+  matched: { sections: number; tables: number }; normative: { added: number; removed: number; strength_changed: number }; chapters: CompareChapter[];
+}
+export interface AIPoint { title: string; detail: string; impact: Impact; refs?: { id: number; kind: string; number: string | null; title: string }[] }
+export interface CompareAI {
+  overview: string; highlights: AIPoint[]; breaking: string[]; upgrade_notes: string[];
+  chapters: { chapter: string; title: string; headline: string; points: AIPoint[]; changes: number }[];
+  meta: { provider?: string; model?: string; prompt_version?: string }; stats: Record<string, number>;
+}
+export interface Comparison { id: number; created: string; summary: CompareSummary; overview: string; ai: CompareAI | null }
+export interface ComparisonRow { id: number; created: string; has_ai: boolean; from: CompareSide; to: CompareSide; total: number; by_impact: Record<Impact, number> }
+export interface SentenceChange { text: string; strength: string | null; impact: Impact }
+export interface SentenceEdit { before: string; after: string; delta: { removed: string[]; added: string[] }; impact: Impact; strength: (string | null)[] }
+export interface CellChange { column: string; before: string; after: string }
+export interface RowChange { key: string; key_before: string; cells: CellChange[]; rekeyed?: boolean }
+export interface ChangeDetails {
+  how?: string; ratio?: number; excerpt?: string[]; added?: SentenceChange[]; removed?: SentenceChange[]; modified?: SentenceEdit[];
+  counts?: { added: number; removed: number; modified: number }; truncated?: boolean;
+  header?: string[]; rows?: string[][]; row_count?: number;
+  header_before?: string[]; header_after?: string[]; header_changed?: boolean;
+  rows_added?: string[][]; rows_removed?: string[][]; rows_changed?: RowChange[]; rows_added_count?: number; rows_removed_count?: number; rows_changed_count?: number;
+}
+export interface CompareChange {
+  id: number; kind: "section" | "table"; change: "added" | "removed" | "modified" | "moved" | "renamed"; impact: Impact; score: number; chapter: string;
+  number_from: string | null; number_to: string | null; title: string; title_from?: string | null; nested: boolean; moved?: boolean; normative?: number; details: ChangeDetails;
+}

@@ -2,7 +2,9 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./components/Shell";
 import { JobToasts } from "./components/jobs";
 import { useToast } from "./components/Toasts";
+import HomePage from "./pages/Home";
 import OverviewPage from "./pages/Overview";
+import ComparePage from "./pages/Compare";
 import SetsPage from "./pages/Sets";
 import CatalogPage from "./pages/Catalog";
 import CommandDBsPage from "./pages/CommandDBs";
@@ -21,7 +23,9 @@ export default function App() {
     <Shell>
       <JobToasts push={push} />
       <Routes>
-        <Route path="/" element={<OverviewPage />} />
+        <Route path="/" element={<HomePage />} />
+        <Route path="/workflow" element={<OverviewPage />} />
+        <Route path="/compare" element={<ComparePage />} />
         <Route path="/dashboard" element={<Navigate to="/" replace />} />
         <Route path="/specs" element={<SpecsPage />} />
         <Route path="/convert" element={<ConvertPage />} />

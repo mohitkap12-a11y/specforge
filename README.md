@@ -1,5 +1,17 @@
 # specforge
 
+**Three offline tools for NVMe / NVMe-MI specifications**, each with its own place in the app (sidebar groups and the Home page):
+
+| Tool | What it does | Where |
+|---|---|---|
+| **Spec Converter** | Any PDF / DOC / DOCX into one clean Markdown file | UI *To Markdown*, `specforge to-md`, `POST /api/convert/markdown` |
+| **Spec Compare** | Pick two versions of a spec from your library (e.g. NVMe 2.3 and 2.4): every new / removed / modified section, table and requirement, ranked by impact, plus an optional AI summary | UI *Compare versions*, `specforge compare`, `/api/compare` |
+| **Coverage Tool** | Which commands, fields and requirements your tests cover (everything below) | UI *Coverage Tool* group (Workflow, Specs, Explorer, ... Reports) |
+
+Compare and Coverage share the library of specs uploaded and parsed on the **Specs** page; the Converter is stateless.
+
+## Coverage tool
+
 Scenario and command **coverage for the NVMe / NVMe-MI specifications**, fully offline.
 
 1. Parse spec PDFs / DOCX (Base, NVM Command Set, MI, ...) into a versioned, cross-referenced model.
@@ -37,6 +49,19 @@ specforge to-md "NVM Express Base 2.4.pdf" notes.docx --out ./md     # writes ./
 or use the **To Markdown** page in the UI (preview, copy, download), or `POST /api/convert/markdown` (multipart `file`; `?front_matter=false`, `?download=true`).
 
 Kept: heading hierarchy (PDF bookmarks, font sizes or Word styles, including Word's automatic heading numbers), paragraphs, bullet / numbered lists with nesting, tables (merged cells, tables continued across PDF pages), code, bold / italic / super- and subscript, hyperlinks, footnotes, image alt text. Dropped: running page headers / footers, page numbers, table-of-contents dot leaders. Limits: scanned PDFs without a text layer are rejected (no OCR), images are not extracted (a warning counts them), legacy `.doc` needs LibreOffice (`soffice`) on the machine, multi-column PDF layouts are read in PyMuPDF's block order.
+
+## Compare two spec versions
+
+Upload and parse both versions on the **Specs** page, then open **Compare versions**, choose the specification and the old / new version from the drop-downs and press Compare (or `specforge compare nvme-base 2.3 2.4 --out diff.md`).
+
+How it works: both versions are compared from their *parsed model*, not as flat text, because revisions renumber sections and figures constantly.
+
+1. Sections are matched by their title path first (a renumbered section is "moved", not "removed + added"), then by number and by near-identical title; tables by caption inside matched sections, then by caption and header.
+2. Matched sections are compared sentence by sentence (with the exact words that changed); matched tables row by row, keyed by the first column (bit range, opcode, value).
+3. Every change gets an impact: **breaking** (a *shall* weakened or removed, a row removed, a field becoming reserved), **new**, **changed**, **clarification**, **editorial** (renumbering). Normative statements (*shall / should / may*) are tracked.
+4. Optional **AI summary**: per chapter the model sees the top detected changes (with ids) and writes a headline and points citing those ids; a second call writes the overall summary, breaking changes and what to review. Ids the model was not shown are dropped, so it cannot invent a change. It uses the same `generate` model as the rest of the AI features (Settings); without AI you still get the full change list and a factual overview.
+
+The result is stored (filter, search and page it in the UI) and exports to a Markdown report. Limits: tested on synthetic specs, not yet on the real NVMe versions; a section whose title was rewritten *and* renumbered is reported as removed + added.
 
 ## Install
 

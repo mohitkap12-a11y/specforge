@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>About SpecForge</title>
-<meta name="description" content="SpecForge: offline NVMe / NVMe-MI specification coverage, from spec to evidence." />
+<meta name="description" content="SpecForge: three offline tools for NVMe / NVMe-MI specifications. Convert a spec to Markdown, compare two versions, and measure test coverage." />
 <style>
   :root {
     --bg: #05060d; --bg2: #0b0d1a; --card: rgba(255,255,255,.04); --line: rgba(255,255,255,.10);
@@ -87,6 +87,7 @@
   .split { display: flex; flex: 1 1 280px; gap: 16px; }
   .split .card { flex: 1; text-align: center; padding: 22px 14px; }
   .split .card b { display: block; font-size: 15px; margin-bottom: 4px; }
+  code { font: .9em var(--mono); background: rgba(255,255,255,.08); padding: 1px 6px; border-radius: 6px; color: var(--text); }
   .badge-code { color: var(--c); } .badge-ai { color: var(--d); }
   .shield { border: 1px dashed rgba(251,191,36,.6); border-radius: 18px; padding: 20px 24px; flex: 1 1 280px; color: var(--dim); position: relative; }
   .shield::before { content: "Human approval gate"; position: absolute; top: -11px; left: 18px; background: var(--bg); padding: 0 8px; font: 600 12px var(--mono); color: var(--d); }
@@ -143,17 +144,52 @@
 
 <section id="top" data-title="Intro">
   <div class="eyebrow rv">NVMe · NVMe-MI · fully offline</div>
-  <h1 class="rv" style="--d:.1s">Know exactly what your<br /><span class="grad">tests really cover.</span></h1>
-  <p class="lead rv" style="--d:.2s">SpecForge reads the NVMe specifications, builds the complete list of everything that <b>can</b> be tested, and proves from your own command logs what <b>was</b> tested, with evidence for every verdict.</p>
+  <h1 class="rv" style="--d:.1s">Three tools for<br /><span class="grad">NVMe specifications.</span></h1>
+  <p class="lead rv" style="--d:.2s">Turn a spec into <b>Markdown</b>, see exactly what a new revision <b>changed</b>, and prove what your tests <b>cover</b>. Each tool stands on its own; compare and coverage share the library of specs you upload once.</p>
   <div class="cta rv" style="--d:.3s">
-    <a class="btn primary" href="#why">See why it matters ↓</a>
+    <a class="btn primary" href="#tools">See the three tools ↓</a>
     <a class="btn" href="/">Open the workbench</a>
   </div>
   <div class="hint rv" style="--d:.5s"><i></i> Scroll, or use ↑ ↓ / Space / PageUp / PageDown</div>
 </section>
 
-<section id="why" data-title="Problem">
-  <div class="eyebrow rv">The problem</div>
+<section id="tools" data-title="Three tools">
+  <div class="eyebrow rv">One workbench, three separate tools</div>
+  <h2 class="rv">Pick the job. Each tool has its own place in the app.</h2>
+  <div class="grid g3">
+    <a class="card rv" href="#convert" style="text-decoration:none"><div class="ic">📄</div><h3>Spec Converter</h3><p>Any PDF, DOC or DOCX into one clean Markdown file. Headings, lists, tables, code, links and footnotes kept; page furniture dropped. Nothing is stored.</p></a>
+    <a class="card rv" href="#compare" style="--d:.08s;text-decoration:none"><div class="ic">🔀</div><h3>Spec Compare</h3><p>Choose two versions from your library, say NVMe 2.3 and 2.4, and get every new, removed and modified section, table and requirement, ranked by impact, with an optional AI summary.</p></a>
+    <a class="card rv" href="#why" style="--d:.16s;text-decoration:none"><div class="ic">🎯</div><h3>Coverage Tool</h3><p>Build the list of everything that can be covered, derive scenarios from what your tests executed, and report covered / partial / not covered with evidence.</p></a>
+  </div>
+</section>
+
+<section id="convert" data-title="Spec Converter">
+  <div class="eyebrow rv">Tool 1 · Spec Converter</div>
+  <h2 class="rv">Any spec document to a clean, functional Markdown file.</h2>
+  <div class="vs">
+    <div class="card good rv" style="--d:.1s"><h3>Kept</h3>
+      <ul><li>Heading hierarchy, including Word's automatic section numbers</li><li>Bullet and numbered lists with nesting</li><li>Tables, merged cells, tables that continue across pages</li><li>Code blocks, bold / italic, links, footnotes, image alt text</li></ul></div>
+    <div class="card rv" style="--d:.2s"><h3>Dropped</h3>
+      <ul><li>Running page headers, footers and page numbers</li><li>Table-of-contents dot leaders</li><li>Layout noise such as hyphenated line breaks</li><li>Markdown-looking text is escaped, so a spec value stays literal</li></ul></div>
+  </div>
+  <p class="note rv">Upload in the web UI (preview, copy, download), call <code>POST /api/convert/markdown</code>, or run <code>specforge to-md spec.pdf</code>. Scanned PDFs need OCR first; legacy .doc needs LibreOffice on the machine.</p>
+</section>
+
+<section id="compare" data-title="Spec Compare">
+  <div class="eyebrow rv">Tool 2 · Spec Compare</div>
+  <h2 class="rv">What does the new revision actually change?</h2>
+  <div class="pipe">
+    <div class="node rv" style="--d:.05s"><span class="n">01</span><h3>Pick</h3><p>Choose a spec and two versions from the library in drop-downs.</p></div>
+    <div class="node rv" style="--d:.15s"><span class="n">02</span><h3>Match</h3><p>Sections and tables are matched by title, so renumbering is not mistaken for new content.</p></div>
+    <div class="node rv" style="--d:.25s"><span class="n">03</span><h3>Diff</h3><p>Sentence-level and table-row changes, with the exact words that moved.</p></div>
+    <div class="node rv" style="--d:.35s"><span class="n">04</span><h3>Rank</h3><p>Breaking, new, changed, clarification, editorial: a <i>shall</i> weakened to <i>should</i> is breaking.</p></div>
+    <div class="node rv" style="--d:.45s"><span class="n">05</span><h3>Summarise</h3><p>Optional AI summary of what the version brings, citing only detected changes.</p></div>
+  </div>
+  <p class="note rv">Code finds and classifies every change; AI only describes them, and the full change list stays the authoritative record. Export the comparison as a Markdown report, or run <code>specforge compare nvme-base 2.3 2.4</code>.</p>
+</section>
+
+<section id="why" data-title="Coverage Tool">
+  <div class="eyebrow rv">Tool 3 · Coverage Tool · the problem</div>
   <h2 class="rv">Coverage of a 1,000-page standard is judged by hand today.</h2>
   <div class="vs">
     <div class="card bad rv" style="--d:.1s"><h3>Without SpecForge</h3>
@@ -164,7 +200,7 @@
 </section>
 
 <section id="how" data-title="How it works">
-  <div class="eyebrow rv">How it works</div>
+  <div class="eyebrow rv">Coverage Tool · how it works</div>
   <h2 class="rv">From PDF to evidence in six steps.</h2>
   <div class="pipe">
     <div class="node rv" style="--d:.05s"><span class="n">01</span><h3>Parse</h3><p>PDF / DOCX into a versioned, cross-referenced model with a self-audit.</p></div>
@@ -178,9 +214,9 @@
 </section>
 
 <section id="trust" data-title="Trust">
-  <div class="eyebrow rv">The design rule</div>
+  <div class="eyebrow rv">All three tools · the design rule</div>
   <h2 class="rv">Code decides. <span class="grad">AI only drafts.</span></h2>
-  <p class="lead rv" style="--d:.1s">A coverage number you cannot reproduce is worthless. Scenarios are read from what your tests executed, and verdicts come from deterministic code. AI only describes flows, proposes the requirements they exercise and suggests scenarios for gaps; nothing it writes counts until a person approves it.</p>
+  <p class="lead rv" style="--d:.1s">A coverage number or a change list you cannot reproduce is worthless. Changes, scenarios and verdicts come from deterministic code. AI only describes: it summarises a version comparison, describes executed flows, proposes the requirements they exercise and suggests scenarios for gaps; nothing it writes counts until a person approves it.</p>
   <div class="rule rv" style="--d:.2s">
     <div class="split">
       <div class="card"><b class="badge-code">Code (deterministic)</b><p>What exists<br />What is covered<br />Every verdict</p></div>
@@ -191,7 +227,7 @@
 </section>
 
 <section id="cov" data-title="Coverage">
-  <div class="eyebrow rv">What management sees</div>
+  <div class="eyebrow rv">Coverage Tool · what management sees</div>
   <h2 class="rv">An honest verdict for every requirement.</h2>
   <div class="bars" id="bars">
     <div class="bar-row rv"><span>Covered</span><div class="track"><div class="fill" style="--w:46%;--col:#30a46c"></div></div><span class="num" data-to="46">0%</span></div>
@@ -222,13 +258,15 @@
 
 <section id="demo" data-title="Demo">
   <div class="eyebrow rv">Try it in minutes</div>
-  <h2 class="rv">One workflow, from CLI or the web UI.</h2>
+  <h2 class="rv">Every tool, from the CLI or the web UI.</h2>
   <div class="term rv" style="--d:.1s">
     <div class="tb"><i></i><i></i><i></i></div>
     <pre id="term" data-lines='[
 "<span class=cm># synthetic demo data, no real specs needed</span>",
+"<span class=p>$</span> specforge to-md \"NVMe Base 2.4.pdf\" --out ./md        <span class=cm># tool 1: convert</span>",
 "<span class=p>$</span> specforge make-demo ./demo",
 "<span class=p>$</span> specforge ingest demo/*.pdf --set demo",
+"<span class=p>$</span> specforge compare nvme-base 2.3 2.4 --out diff.md  <span class=cm># tool 2: compare</span>",
 "<span class=p>$</span> specforge catalog 1",
 "<span class=p>$</span> specforge coverage 1 demo/demo-commands.db --out ./reports",
 "<span class=p>$</span> specforge serve   <span class=cm># UI + API on http://127.0.0.1:8000</span>"
@@ -240,7 +278,7 @@
   <div class="eyebrow rv">At a glance</div>
   <h2 class="rv">Engineered like a product.</h2>
   <div class="grid g4">
-    <div class="card rv"><div class="stat"><span data-count="11">0</span></div><div class="statlbl">UI pages: dashboard to reports</div></div>
+    <div class="card rv"><div class="stat"><span data-count="3">0</span></div><div class="statlbl">tools: convert, compare, coverage</div></div>
     <div class="card rv" style="--d:.1s"><div class="stat"><span data-count="4">0</span></div><div class="statlbl">report formats: xlsx · html · csv · json</div></div>
     <div class="card rv" style="--d:.2s"><div class="stat"><span data-count="2">0</span></div><div class="statlbl">AI providers: Ollama, OpenCode</div></div>
     <div class="card rv" style="--d:.3s"><div class="stat"><span data-count="0">0</span></div><div class="statlbl">downloads at run time: everything runs locally</div></div>
@@ -253,13 +291,14 @@
   <h2 class="rv">Built and tested. Real-spec validation is next.</h2>
   <div class="tl">
     <div class="it done rv"><h3>Parsing, catalog, scenarios, coverage, reports</h3><p>Implemented and tested against synthetic NVMe-style specifications.</p></div>
+    <div class="it done rv" style="--d:.05s"><h3>Spec Converter and Spec Compare</h3><p>PDF / DOC / DOCX to Markdown, and version-to-version comparison with an AI summary. Tested on synthetic specifications; real-spec runs come next.</p></div>
     <div class="it done rv" style="--d:.1s"><h3>Web workbench, REST API, CLI, live activity log</h3><p>Complete UI checked in a browser against the demo data.</p></div>
     <div class="it next rv" style="--d:.2s"><h3>Run on the real NVMe Base, NVM CS and MI specifications</h3><p>Next milestone: verify parsing against the ratified PDFs and confirm the NVMe-MI header layout.</p></div>
     <div class="it rv" style="--d:.3s"><h3>Roll out against production command logs</h3><p>Produce the first measured coverage baseline and track it release over release.</p></div>
   </div>
 </section>
 
-<footer>SpecForge · NVMe / NVMe-MI coverage workbench · Press <b>F</b> for full screen · <a href="/">Back to app</a></footer>
+<footer>SpecForge · NVMe / NVMe-MI spec workbench · Press <b>F</b> for full screen · <a href="/">Back to app</a></footer>
 
 <script>
 (function () {

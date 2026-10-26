@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -14,7 +15,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import __version__, catalog, cmddb, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
+from .. import __version__, catalog, cmddb, compare, compare_ai, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
 from ..crossgen import generate_cross_scenarios
 from ..convert import ConversionError, SUPPORTED, convert_file, output_name
 from ..core import config
@@ -159,6 +160,79 @@ def create_app() -> FastAPI:
                             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(out)}"})
         return {"filename": out, "title": res.title, "format": res.source_format, "markdown": res.markdown,
                 "stats": res.stats, "warnings": res.warnings}
+
+    # ------------------------------------------------------------------ compare two spec versions
+    def _compare_or_404(cid: int) -> dict:
+        c = compare.get_comparison(conn(), cid)
+        if c is None:
+            raise HTTPException(404, "comparison not found")
+        return c
+
+    @app.get("/api/compare/options")
+    def compare_options():
+        """Every spec in the data store, with the parse run that would be compared (the active one, else the newest successful one)."""
+        out = []
+        for d in rows(conn(), "SELECT * FROM spec_document ORDER BY family, id"):
+            runs = rows(conn(), "SELECT id,active,status,parser_version FROM parse_run WHERE document_id=? AND status='done' ORDER BY active DESC, id DESC", (d["id"],))
+            r = runs[0] if runs else None
+            out.append({"doc_id": d["id"], "family": d["family"], "version": d["version"], "filename": d["filename"], "pages": d["pages"],
+                        "run_id": r["id"] if r else None, "parsed": r is not None,
+                        "outdated": bool(r and r["parser_version"] != config.PARSER_VERSION)})
+        out.sort(key=lambda o: (o["family"], [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", o["version"]) if t], o["doc_id"]))
+        return out
+
+    @app.post("/api/compare")
+    def compare_run(body: dict = Body(...)):
+        need(body, "from_run", "to_run")
+        a, b = body["from_run"], body["to_run"]
+        if any(not isinstance(x, int) or isinstance(x, bool) for x in (a, b)):
+            raise HTTPException(422, "from_run and to_run must be parse run ids")
+        try:
+            cid = compare.run_comparison(conn(), a, b)
+        except compare.CompareError as e:
+            raise HTTPException(422, str(e)) from e
+        c = _compare_or_404(cid)
+        audit(f"Compared {c['summary']['from']['family']} {c['summary']['from']['version']} with {c['summary']['to']['version']}", compare_id=cid,
+              changes=c["summary"]["total"])
+        return c
+
+    @app.get("/api/compare")
+    def compare_list():
+        return compare.list_comparisons(conn())
+
+    @app.get("/api/compare/{cid}")
+    def compare_get(cid: int):
+        return _compare_or_404(cid)
+
+    @app.get("/api/compare/{cid}/changes")
+    def compare_changes(cid: int, kind: str | None = None, impact: str | None = None, change: str | None = None, chapter: str | None = None,
+                        q: str | None = None, nested: bool = True, sort: str = Query("document", pattern="^(document|importance)$"),
+                        offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500)):
+        _compare_or_404(cid)
+        return compare.query_changes(conn(), cid, kind, impact, change, chapter, q, nested, offset, limit, sort)
+
+    @app.get("/api/compare/{cid}/export")
+    def compare_export(cid: int):
+        _compare_or_404(cid)
+        md = compare.export_markdown(conn(), cid)
+        return Response(md, media_type="text/markdown; charset=utf-8", headers={"Content-Disposition": f"attachment; filename=\"spec-comparison-{cid}.md\""})
+
+    @app.post("/api/compare/{cid}/summarize")
+    def compare_summarize(cid: int, body: dict = Body(default={})):
+        _compare_or_404(cid)
+        redo = bool(body.get("redo")) if isinstance(body, dict) else False
+        st = settings()
+
+        def work(c, prog):
+            return compare_ai.summarize(c, cid, LLMService(c, st), redo=redo, progress=prog)
+        audit(f"AI summary of comparison #{cid} requested", compare_id=cid, redo=redo)
+        return {"job": jobs.submit(conn(), "compare-summary", work, {"compare_id": cid}, DB)}
+
+    @app.delete("/api/compare/{cid}")
+    def compare_delete(cid: int):
+        if not compare.delete_comparison(conn(), cid):
+            raise HTTPException(404, "comparison not found")
+        return {"ok": True}
 
     # ------------------------------------------------------------------ specs
     @app.post("/api/specs/upload")

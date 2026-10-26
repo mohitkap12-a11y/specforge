@@ -1,4 +1,4 @@
-import type { MarkdownConversion, LogEvent, CatalogItem, CmdSource, DecodedCommand, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { CompareChange, CompareOption, Comparison, ComparisonRow, MarkdownConversion, LogEvent, CatalogItem, CmdSource, DecodedCommand, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -39,6 +39,13 @@ export const api = {
   specs: () => req<SpecDoc[]>("GET", "/api/specs"),
   upload: (files: File[]) => { const f = new FormData(); files.forEach((x) => f.append("files", x)); return req<SpecDoc[]>("POST", "/api/specs/upload", f); },
   toMarkdown: (file: File, frontMatter = true) => { const f = new FormData(); f.append("file", file); return req<MarkdownConversion>("POST", `/api/convert/markdown${qs({ front_matter: frontMatter ? undefined : "false" })}`, f); },
+  compareOptions: () => req<CompareOption[]>("GET", "/api/compare/options"),
+  compare: (from_run: number, to_run: number) => req<Comparison>("POST", "/api/compare", { from_run, to_run }),
+  comparisons: () => req<ComparisonRow[]>("GET", "/api/compare"),
+  comparison: (id: number) => req<Comparison>("GET", `/api/compare/${id}`),
+  compareChanges: (id: number, p: Record<string, string | number | undefined>) => req<{ total: number; items: CompareChange[] }>("GET", `/api/compare/${id}/changes${qs(p)}`),
+  compareSummarize: (id: number, redo = false) => req<{ job: number }>("POST", `/api/compare/${id}/summarize`, { redo }),
+  deleteComparison: (id: number) => req("DELETE", `/api/compare/${id}`),
   patchSpec: (id: number, b: { family?: string; version?: string }) => req("PATCH", `/api/specs/${id}`, b),
   deleteSpec: (id: number) => req("DELETE", `/api/specs/${id}`),
   parse: (id: number, activate = false) => req<{ job: number }>("POST", `/api/specs/${id}/parse${qs({ activate: activate ? "true" : undefined })}`),

@@ -33,3 +33,25 @@ export function conversionSummary(s: { words: number; headings: number; tables: 
   const part = (n: number | undefined, one: string, many = one + "s") => (n ? `${n.toLocaleString("en-US")} ${n === 1 ? one : many}` : "");
   return [part(s.pages, "page"), part(s.words, "word"), part(s.headings, "heading"), part(s.tables, "table"), part(s.list_items, "list item"), part(s.code_blocks, "code block")].filter(Boolean).join(" · ");
 }
+
+/** Natural order of version strings: 2.3 < 2.4 < 2.10, 1.0a < 1.0b. */
+export function compareVersions(a: string, b: string): number {
+  const ta = a.match(/\d+|[A-Za-z]+/g) ?? [], tb = b.match(/\d+|[A-Za-z]+/g) ?? [];
+  for (let i = 0; i < Math.max(ta.length, tb.length); i++) {
+    const x = ta[i], y = tb[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const nx = /^\d+$/.test(x), ny = /^\d+$/.test(y);
+    if (nx && ny) { if (Number(x) !== Number(y)) return Number(x) - Number(y); }
+    else if (x.toLowerCase() !== y.toLowerCase()) return x.toLowerCase() < y.toLowerCase() ? -1 : 1;
+  }
+  return 0;
+}
+
+/** Splits `text` into runs, marking the ones that equal one of `chunks` (the words a revision removed or added). */
+export function splitMarks(text: string, chunks: string[]): { t: string; m: boolean }[] {
+  const parts = chunks.filter((c) => c.trim()).sort((a, b) => b.length - a.length);
+  if (!parts.length) return [{ t: text, m: false }];
+  const rx = new RegExp(`(${parts.map((p) => p.split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+")).join("|")})`, "g");
+  return text.split(rx).filter((t) => t !== "").map((t) => ({ t, m: parts.some((p) => p.replace(/\s+/g, " ") === t.replace(/\s+/g, " ")) }));
+}
