@@ -661,3 +661,47 @@ def test_docx_footnotes_do_not_expand_external_entities(tmp_path):
     ctx = word._Ctx(docx.Document(path))
     assert "2" in ctx.footnotes and "TOP-SECRET" not in ctx.footnotes["2"]
     assert "TOP-SECRET" not in convert_file(path, front_matter=False).markdown
+
+
+def test_docx_blank_paragraph_inside_code_keeps_one_block(tmp_path):
+    d = docx.Document()
+    for t in ("a = 1", "", "b = 2"):
+        p = d.add_paragraph()
+        if t:
+            p.add_run(t).font.name = "Courier New"
+    path = tmp_path / "cb.docx"
+    d.save(path)
+    assert "```\na = 1\n\nb = 2\n```" in convert_file(path, front_matter=False).markdown
+
+
+def test_docx_tracked_move_destination_text_is_kept(tmp_path):
+    d = docx.Document()
+    p = d.add_paragraph("keep ")
+    mv = OxmlElement("w:moveTo")
+    r = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = "moved"
+    r.append(t)
+    mv.append(r)
+    p._p.append(mv)
+    path = tmp_path / "mv.docx"
+    d.save(path)
+    assert "keep moved" in convert_file(path, front_matter=False).markdown
+
+
+def test_pdf_blank_line_in_code_keeps_one_block_and_indent(tmp_path):
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    for y, t in ((100, "def f():"), (112, "    x = 1"), (136, "    return x")):
+        page.insert_text((72, y), t, fontname="cour", fontsize=10)
+    path = tmp_path / "cg.pdf"
+    doc.save(path)
+    assert "```\ndef f():\n    x = 1\n\n    return x\n```" in convert_file(path, front_matter=False).markdown
+
+
+def test_docx_numbering_definitions_are_bounded(tmp_path):
+    levels = "".join(f'<w:lvl w:ilvl="{i}"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>' for i in range(200))
+    ctx = _ctx_with_numbering(tmp_path, levels)
+    assert max(ctx.nums["1"]) < 9

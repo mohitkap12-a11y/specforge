@@ -187,11 +187,15 @@ class _Builder:
             base = min(ln.x0 for ln in lines)
             cw = max(1.0, lines[0].size * 0.6)
             raw = ["".join(sg.text for sg in ln.segs).rstrip().replace("\t", "    ") for ln in lines]
+            blanks = [0] + [_blank_lines(a, b) for a, b in zip(lines, lines[1:])]
             lead = [len(r) - len(r.lstrip(" ")) for r in raw]
             floor = min(lead)
             # indentation lives either in the geometry or in leading spaces of the span text; take whichever carries it
-            self.blocks.append(Code([" " * max(int(round((ln.x0 - base) / cw)), ld - floor) + r.lstrip(" ")
-                                     for ln, r, ld in zip(lines, raw, lead)]))
+            out: list[str] = []
+            for ln, r, ld, nb in zip(lines, raw, lead, blanks):
+                out.extend([""] * nb)   # one blank source line per line-pitch of vertical gap
+                out.append(" " * max(int(round((ln.x0 - base) / cw)), ld - floor) + r.lstrip(" "))
+            self.blocks.append(Code(out))
         elif kind == "heading":
             self.blocks.append(Heading(self.cur_level, " ".join(ln.plain for ln in lines)))
         else:
@@ -237,7 +241,8 @@ class _Builder:
                 prev = self.cur[-1].plain[-1:]
                 cont = kind == "code" or (kind == "p" and ln.plain[:1].islower() and prev not in _END)
             elif cont:
-                cont = -ln.size <= ln.y0 - self.last.y1 <= max(0.45 * ln.size, 3.0)
+                limit = 3.5 * ln.size if kind == "code" else max(0.45 * ln.size, 3.0)   # code keeps its blank lines
+                cont = -ln.size <= ln.y0 - self.last.y1 <= limit
             if cont:
                 self.cur.append(ln)
                 self.last = ln
@@ -254,6 +259,12 @@ class _Builder:
             prev.rows.extend(t.rows[1:])   # same repeated header: one table continued on the next page
         else:
             self.blocks.append(Table(t.rows))
+
+
+def _blank_lines(a: Line, b: Line) -> int:
+    pitch = max(b.y1 - b.y0, 1.0)
+    gap = b.y0 - a.y1
+    return min(3, int(round(gap / pitch))) if gap > 0.6 * pitch else 0
 
 
 def _strip_prefix(segs: list[Seg], n: int) -> list[Seg]:

@@ -17,6 +17,8 @@ R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 WP = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
 _MONO = re.compile(r"courier|consolas|mono|menlo|lucida console", re.I)
 _CODE_STYLE = re.compile(r"code|preformatted|source|verbatim|listing", re.I)
+MAX_LEVELS = 9   # Word's own limit; hostile files must not multiply levels across thousands of list instances
+MAX_NUMS = 10_000
 MAX_COLS = 256   # cells kept per table row
 MAX_TABLE_CELLS = 2_000_000
 MAX_SPAN = 64   # a hostile gridSpan must not allocate billions of cells
@@ -93,12 +95,14 @@ class _Ctx:
         except Exception:  # noqa: BLE001 - document without numbering definitions
             return
         absn = {a.get(W + "abstractNumId"): a for a in root.findall(W + "abstractNum")}
-        for num in root.findall(W + "num"):
+        for num in root.findall(W + "num")[:MAX_NUMS]:
             a = absn.get(_val(num, "abstractNumId"))
             if a is None:
                 continue
             lv = {}
             for l in a.findall(W + "lvl"):
+                if not l.get(W + "ilvl", "0").isdigit() or int(l.get(W + "ilvl", "0")) >= MAX_LEVELS:
+                    continue
                 if _val(l, "pStyle"):
                     self.style_level[(num.get(W + "numId"), _val(l, "pStyle"))] = int(l.get(W + "ilvl", "0"))
                 lr = _val(l, "lvlRestart")
@@ -188,7 +192,7 @@ class _Ctx:
                 if target and anchor:
                     target += "#" + anchor
                 out.extend(self.runs(ch, pstyle, target or link, heading))
-            elif tag in (W + "ins", W + "smartTag", W + "sdtContent", W + "fldSimple", W + "customXml") or tag == W + "sdt":
+            elif tag in (W + "ins", W + "moveTo", W + "smartTag", W + "sdtContent", W + "fldSimple", W + "customXml") or tag == W + "sdt":
                 out.extend(self.runs(ch.find(W + "sdtContent") if tag == W + "sdt" and ch.find(W + "sdtContent") is not None else ch,
                                      pstyle, link, heading))
         return out
@@ -398,6 +402,9 @@ def convert(path: str) -> tuple[list[Block], dict]:
         mono = bool(segs) and all(s.code or not s.text.strip() for s in segs) and any(s.text.strip() for s in segs)
         if _CODE_STYLE.search(sname) or (mono and not num):
             code_run.append("".join(s.text for s in segs).replace("\n", "\n").rstrip())
+            return
+        if not text and code_run and not any(s.text.startswith("[Image") for s in segs):
+            code_run.append("")   # a blank paragraph inside a code sample is part of the sample
             return
         flush_code()
         if not text and not any(s.text.startswith("[Image") for s in segs):
