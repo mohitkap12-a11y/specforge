@@ -163,8 +163,8 @@ def _sentence_impact(kind: str, before: str | None, after: str | None, delta: di
     changed = " ".join((delta or {}).get("removed", []) + (delta or {}).get("added", []))
     if re.search(r"\d|\b[0-9a-f]+h\b|\breserved\b", changed, re.I):
         return "changed"
-    if re.fullmatch(r"[\W_]*", changed):
-        return "editorial"
+    if re.fullmatch(r"[\W_]*", changed) and not re.search(r"[+\-<>=\u2264\u2265\u00d7*/%]", changed):
+        return "editorial"             # punctuation only; a sign or comparison operator (+5 -> -5, < -> >) is a value change
     return "clarification" if not sa else "changed"
 
 
@@ -433,10 +433,13 @@ def compare_irs(ira: dict, irb: dict) -> dict[str, Any]:
         A, B = ta[x], tb[y]
         d = diff_table(A, B)
         relabel = x != y
+        cap_a, cap_b = _CAPTION_LABEL.sub("", (A.get("caption") or "").strip()).strip(), _CAPTION_LABEL.sub("", (B.get("caption") or "").strip()).strip()
+        renamed = cap_a != cap_b       # what the table's values describe can change with its rows untouched
         if d is None:
-            if relabel:
-                add(kind="table", change="moved", impact="editorial", chapter=_chapter(B.get("section")), number_from=x, number_to=y,
-                    title=B.get("caption") or f"Table {y}", details={"how": how})
+            if relabel or renamed:
+                add(kind="table", change="renamed" if renamed else "moved", impact="changed" if renamed else "editorial", chapter=_chapter(B.get("section")),
+                    number_from=x, number_to=y, title=B.get("caption") or f"Table {y}", title_from=A.get("caption") if renamed else None,
+                    sec=B.get("section"), details={"how": how})
             continue
         d["how"] = how
         for k in ("rows_added", "rows_removed"):
@@ -447,19 +450,20 @@ def compare_irs(ira: dict, irb: dict) -> dict[str, Any]:
         d["truncated"] = any(d[k + "_count"] > MAX_DETAIL_ITEMS for k in ("rows_added", "rows_removed", "rows_changed"))
         impact = _table_impact(d)
         add(kind="table", change="modified", impact=impact, chapter=_chapter(B.get("section")), number_from=x, number_to=y,
-            title=B.get("caption") or f"Table {y}", moved=relabel, normative=0, details=d)
+            title=B.get("caption") or f"Table {y}", title_from=A.get("caption") if renamed else None, moved=relabel, normative=0,
+            sec=B.get("section"), details=d)
     for x in ta:
         if x not in t_matched_a:
             A = ta[x]
             add(kind="table", change="removed", impact="breaking", chapter=_chapter(A.get("section")), number_from=x, number_to=None,
-                title=A.get("caption") or f"Table {x}", nested=bool(A.get("section")) and A.get("section") not in a_to_b,
+                title=A.get("caption") or f"Table {x}", sec=A.get("section"), side="a", nested=bool(A.get("section")) and A.get("section") not in a_to_b,
                 details={"header": _cells(A.get("header") or []), "rows": [_cells(r) for r in (A.get("rows") or [])[:MAX_DETAIL_ITEMS]],
                          "row_count": len(A.get("rows") or [])})
     for y in tb:
         if y not in t_matched_b:
             B = tb[y]
             add(kind="table", change="added", impact="new", chapter=_chapter(B.get("section")), number_from=None, number_to=y,
-                title=B.get("caption") or f"Table {y}", nested=bool(B.get("section")) and B.get("section") not in b_to_a,
+                title=B.get("caption") or f"Table {y}", sec=B.get("section"), nested=bool(B.get("section")) and B.get("section") not in b_to_a,
                 details={"header": _cells(B.get("header") or []), "rows": [_cells(r) for r in (B.get("rows") or [])[:MAX_DETAIL_ITEMS]],
                          "row_count": len(B.get("rows") or [])})
 
@@ -467,12 +471,23 @@ def compare_irs(ira: dict, irb: dict) -> dict[str, Any]:
     order_b = {n: i for i, n in enumerate(irb["section_order"])}
     order_a = {n: i for i, n in enumerate(ira["section_order"])}
 
+    tord_b = {n: i for i, n in enumerate(irb["tables"])}
+    tord_a = {n: i for i, n in enumerate(ira["tables"])}
+
     def sort_key(c: dict) -> tuple:
-        n = c.get("number_to") or c.get("number_from")
-        pos = order_b.get(c.get("number_to")) if c["kind"] == "section" and c.get("number_to") in order_b else None
-        if pos is None and c["kind"] == "section":
-            pos = order_a.get(c.get("number_from"), 10 ** 6)
-        return (pos if pos is not None else 10 ** 7, 0 if c["kind"] == "section" else 1, str(n))
+        """Document order of the newer version (removals by their old position); a table sits right after the section that contains it."""
+        if c["kind"] == "section":
+            pos = order_b.get(c.get("number_to"))
+            if pos is None:
+                pos = order_a.get(c.get("number_from"), 10 ** 6)
+            return (pos, 0, 0)
+        in_a = c.get("side") == "a" or c.get("number_to") is None
+        sec = c.get("sec")
+        pos = (order_a if in_a else order_b).get(sec)
+        if pos is None:
+            pos = 10 ** 6
+        idx = (tord_a if in_a else tord_b).get(c.get("number_from") if in_a else c.get("number_to"), 10 ** 6)
+        return (pos, 1, idx)
     changes.sort(key=sort_key)
     for i, c in enumerate(changes, 1):
         c["ord"] = i
@@ -495,7 +510,7 @@ def summarise(ira: dict, irb: dict, changes: list[dict], n_sections_matched: int
         for k, v in (c.get("norm") or {}).items():          # full counts, computed before any display limit
             norm[k] += v
     titles = {}
-    for ir in (ira, irb):
+    for ir in (irb, ira):          # the newer title wins; the old one only names chapters that were removed
         for n, s in ir["sections"].items():
             if "." not in n and n not in titles:
                 titles[_chapter(n)] = s["title"]

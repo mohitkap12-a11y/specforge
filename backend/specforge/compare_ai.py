@@ -194,7 +194,10 @@ def summarize(conn: sqlite3.Connection, cid: int, svc: LLMService, redo: bool = 
         except LLMError as e:
             stats["failed"] += 1
             eventlog.emit("error", "agent", f"overall summary: model failed: {str(e)[:200]}", compare_id=cid, error=str(e))
-    if not done and not overall["overview"]:
+    if not chapters:       # nothing but renumbering or no change at all: there is nothing for a model to describe, and that is not a failure
+        overall["overview"] = "No substantive changes were detected between these versions." if not s["total"] else \
+            "The only differences are editorial (renumbering and renaming); nothing else changed."
+    elif not done and not overall["overview"]:
         raise LLMError("the model produced no summary (see the Activity log for the errors)")
     if not overall["overview"]:     # the reduce step failed: fall back to the chapter headlines so the work is not lost
         overall["overview"] = " ".join(ch["headline"] for ch in done[:6])

@@ -405,3 +405,80 @@ def test_ai_points_without_a_shown_ref_are_dropped_and_header_changes_are_descri
     t = {"kind": "table", "change": "modified", "impact": "changed", "title": "T", "number_to": "1",
          "details": {"header_changed": True, "header_before": ["Name", "Value (mW)"], "header_after": ["Name", "Value (W)"], "rows_added": [], "rows_removed": [], "rows_changed": []}}
     assert "columns: Name | Value (mW) -> Name | Value (W)" in compare_ai._describe(t)
+
+
+def test_caption_only_table_edit_is_reported_as_a_rename(conn, tmp_path):
+    base = base_spec()
+    new = [("table", b[1].replace("Opcodes for Admin Commands", "Opcodes for Admin Commands (all)"), b[2], b[3], b[4])
+           if b[0] == "table" and b[1].startswith("Figure 100") else b for b in base]
+    rids = []
+    for ver, bl in (("1", base), ("2", new)):
+        d = store.register_document(conn, write_docx(tmp_path / f"cap{ver}.docx", bl), "nvme-base", ver)
+        rids.append(store.run_parse(conn, d["id"], workers=1, activate=True))
+    cid = compare.run_comparison(conn, *rids)
+    ch = [c for c in compare.query_changes(conn, cid, kind="table")["items"] if c["change"] == "renamed"]
+    assert ch and ch[0]["impact"] == "changed" and "(all)" in ch[0]["title"] and ch[0]["title_from"].endswith("Admin Commands")
+
+
+def test_sign_or_operator_change_is_not_editorial():
+    assert compare._sentence_impact("modified", "Set to +5 volts.", "Set to -5 volts.", compare.word_delta("Set to +5 volts.", "Set to -5 volts.", None)) != "editorial"
+    d = compare.diff_text("The limit is x < 5 here.", "The limit is x > 5 here.")
+    assert d and not d["editorial_only"] and d["modified"][0]["impact"] != "editorial"
+    d = compare.diff_text("The limit is 5, here.", "The limit is 5 here.")
+    assert d is None or d["modified"][0]["impact"] == "editorial"
+
+
+def test_ai_summary_with_nothing_to_describe_succeeds_without_a_model_call(conn, tmp_path):
+    from llm_helpers import Fake, settings
+    from specforge import compare_ai
+    from specforge.llm.service import LLMService
+
+    rids = []
+    for ver in ("1", "2"):
+        path = write_docx(tmp_path / f"same{ver}.docx", base_spec())
+        import docx as _docx
+
+        doc = _docx.Document(path)
+        doc.core_properties.comments = f"copy {ver}"          # different bytes, identical content
+        doc.save(path)
+        d = store.register_document(conn, path, "nvme-base", ver)
+        rids.append(store.run_parse(conn, d["id"], workers=1, activate=True))
+    cid = compare.run_comparison(conn, *rids)
+    fake = Fake(["unused"])
+    compare_ai.summarize(conn, cid, LLMService(conn, settings(), provider=fake))
+    assert fake.calls == 0 and compare.get_comparison(conn, cid)["ai"]["overview"]
+
+
+def test_latest_chapter_title_and_table_document_order(conn, two_versions):
+    cid, ch, comp = run(conn, two_versions)
+    items = compare.query_changes(conn, cid, limit=500)["items"]
+    # tables follow their section, in document order (Figure 101 before 102 before 103, not interleaved with later sections)
+    order = [c["id"] for c in items]
+    t = {c["title"].split(":")[0] if False else c["number_to"] or c["number_from"]: c["id"] for c in items if c["kind"] == "table"}
+    assert t["101"] < t["102"] < t["103"]
+    sec52 = next(c["id"] for c in items if c["kind"] == "section" and c["number_to"] == "5.2")
+    sec54 = next(c["id"] for c in items if c["kind"] == "section" and c["number_to"] == "5.4")
+    assert sec52 < t["101"] < sec54 and order == sorted(order)
+
+
+def test_second_summary_request_while_one_is_running_is_rejected(client, tmp_path):
+    import time
+
+    for ver, blocks in (("2.3", base_spec()), ("2.4", v_new())):
+        p = write_docx(tmp_path / f"d{ver}.docx", blocks)
+        with open(p, "rb") as f:
+            doc = client.post("/api/specs/upload", files=[("files", (p.name, f))]).json()[0]
+        client.patch(f"/api/specs/{doc['id']}", json={"family": "nvme-base", "version": ver})
+        job = client.post(f"/api/specs/{doc['id']}/parse?activate=true").json()["job"]
+        for _ in range(300):
+            if client.get(f"/api/jobs/{job}").json()["state"] in ("done", "failed"):
+                break
+            time.sleep(0.1)
+    opts = client.get("/api/compare/options").json()
+    cid = client.post("/api/compare", json={"from_run": opts[0]["run_id"], "to_run": opts[1]["run_id"]}).json()["id"]
+    from specforge.core.db import get_conn
+
+    c = get_conn()
+    c.execute("INSERT INTO job(type,state,payload_json) VALUES('compare-summary','running',?)", (json.dumps({"compare_id": cid}),))
+    c.commit()
+    assert client.post(f"/api/compare/{cid}/summarize").status_code == 409

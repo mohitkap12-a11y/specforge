@@ -104,22 +104,27 @@ function Points({ items }: { items: AIPoint[] }) {
 
 function Summary({ comp }: { comp: Comparison }) {
   const qc = useQueryClient();
-  const { track } = useJobs();
+  const { track, active } = useJobs();
+  const [waiting, setWaiting] = useState(false);     // the submitted summary job has not finished yet
   const run = useMutation({
     mutationFn: (redo: boolean) => api.compareSummarize(comp.id, redo),
-    onSuccess: (r) => track(r.job, `AI summary of comparison #${comp.id}`, () => qc.invalidateQueries({ queryKey: ["comparison", comp.id] })),
+    onSuccess: (r) => {
+      setWaiting(true);
+      track(r.job, `AI summary of comparison #${comp.id}`, () => { setWaiting(false); qc.invalidateQueries({ queryKey: ["comparison", comp.id] }); });
+    },
   });
+  const writing = waiting || run.isPending || active.some((j) => j.type === "compare-summary");   // also covers a job started before a page reload
   const ai = comp.ai;
   return (
     <div className="card">
       <div className="card-head">
         <h2 style={{ margin: 0 }}>Summary</h2><span className="grow" />
         <a href={`/api/compare/${comp.id}/export`} download><button><Download size={14} /> Export Markdown</button></a>
-        <button className={ai ? "" : "primary"} disabled={run.isPending} onClick={() => run.mutate(!!ai)}><Bot size={14} /> {ai ? "Regenerate AI summary" : "Generate AI summary"}</button>
+        <button className={ai ? "" : "primary"} disabled={writing} onClick={() => run.mutate(!!ai)}><Bot size={14} /> {writing ? "Writing summary…" : ai ? "Regenerate AI summary" : "Generate AI summary"}</button>
       </div>
       <p style={{ margin: "0 0 8px" }}>{comp.overview}</p>
       <ErrorNote error={run.error} />
-      {run.isSuccess && !ai && <div className="muted small">The AI summary is being written; follow it in <Link to="/activity?lens=ai">Activity</Link>. It appears here when ready.</div>}
+      {writing && !ai && <div className="muted small">The AI summary is being written; follow it in <Link to="/activity?lens=ai">Activity</Link>. It appears here when ready.</div>}
       {ai && (
         <div className="ai-box">
           <div className="muted small" style={{ marginBottom: 6 }}>AI summary · {ai.meta.provider}/{ai.meta.model}. It describes the detected changes below; the list is the authoritative record.</div>
@@ -243,6 +248,7 @@ export default function ComparePage() {
           <ErrorNote error={go.error} />
         </div>
       )}
+      <ErrorNote error={past.error ?? del.error} />
       {open ? <Result id={open} /> : (
         (past.data ?? []).length > 0 && (
           <div className="card">

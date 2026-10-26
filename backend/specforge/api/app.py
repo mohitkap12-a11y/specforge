@@ -220,6 +220,9 @@ def create_app() -> FastAPI:
     @app.post("/api/compare/{cid}/summarize")
     def compare_summarize(cid: int, body: dict = Body(default={})):
         _compare_or_404(cid)
+        busy = row(conn(), "SELECT id FROM job WHERE type='compare-summary' AND state IN ('queued','running') AND payload_json LIKE ?", (f'%"compare_id": {cid}}}%',))
+        if busy:
+            raise HTTPException(409, f"an AI summary of this comparison is already being written (job {busy['id']})")
         redo = bool(body.get("redo")) if isinstance(body, dict) else False
         st = settings()
 
