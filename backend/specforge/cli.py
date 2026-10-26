@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import catalog, cmddb, coverage, execscen, refs, reports
+from . import catalog, cmddb, compare, coverage, execscen, refs, reports
 from .core import config
 from .core.db import connect, row, rows
 from .ingest import store
@@ -87,6 +87,41 @@ def cmd_to_md(a):
         sys.exit(1)
 
 
+def _run_of(conn, family: str, version: str) -> int:
+    r = row(conn, "SELECT p.id FROM parse_run p JOIN spec_document d ON d.id=p.document_id "
+                  "WHERE d.family=? AND d.version=? AND p.status='done' ORDER BY p.active DESC, p.id DESC", (family, version))
+    if not r:
+        known = ", ".join(sorted({f"{d['family']} {d['version']}" for d in rows(conn, "SELECT family,version FROM spec_document")})) or "none"
+        raise SystemExit(f"no parsed spec '{family}' version '{version}' (ingest it first). Known: {known}")
+    return r["id"]
+
+
+def cmd_compare(a):
+    conn = _conn()
+    try:
+        cid = compare.run_comparison(conn, _run_of(conn, a.family, a.old), _run_of(conn, a.family, a.new))
+    except compare.CompareError as e:
+        raise SystemExit(str(e))
+    if a.ai:
+        from . import compare_ai
+        from .llm.base import LLMError
+        from .llm.service import LLMService
+
+        try:
+            compare_ai.summarize(conn, cid, LLMService(conn, config.load_settings(conn)), redo=True, progress=lambda m, x, y: print(f"  {m} {x}/{y}", file=sys.stderr))
+        except LLMError as e:
+            print(f"AI summary failed: {e}", file=sys.stderr)
+    c = compare.get_comparison(conn, cid)
+    print(c["overview"])
+    if c["ai"]:
+        print("\nAI summary:", c["ai"]["overview"])
+    if a.out:
+        p = Path(a.out)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(compare.export_markdown(conn, cid), encoding="utf-8")
+        print("wrote", p)
+
+
 def cmd_reparse(a):
     conn = _conn()
     rid = store.run_parse(conn, a.document_id, workers=a.workers, activate=a.activate)
@@ -163,6 +198,8 @@ def main(argv=None):
     s.add_argument("--workers", type=int, default=None); s.add_argument("--set", help="add to (and create) this spec set"); s.set_defaults(fn=cmd_ingest)
     s = sub.add_parser("to-md", help="convert PDF / DOC / DOCX files to Markdown"); s.add_argument("files", nargs="+")
     s.add_argument("--out", help="output directory (default: next to each source file)"); s.add_argument("--no-front-matter", action="store_true", help="omit the YAML header"); s.set_defaults(fn=cmd_to_md)
+    s = sub.add_parser("compare", help="compare two parsed versions of a spec and list what changed"); s.add_argument("family"); s.add_argument("old"); s.add_argument("new")
+    s.add_argument("--out", help="write the full report as Markdown"); s.add_argument("--ai", action="store_true", help="also write an AI summary (needs a configured model)"); s.set_defaults(fn=cmd_compare)
     s = sub.add_parser("reparse", help="parse a registered document again"); s.add_argument("document_id", type=int); s.add_argument("--activate", action="store_true")
     s.add_argument("--previous", type=int, help="run id to diff against"); s.add_argument("--workers", type=int, default=None); s.set_defaults(fn=cmd_reparse)
     s = sub.add_parser("catalog", help="build the catalog for a spec set"); s.add_argument("set_id", type=int); s.set_defaults(fn=cmd_catalog)

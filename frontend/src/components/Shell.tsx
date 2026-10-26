@@ -20,6 +20,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const { active } = useJobs();
   const health = useQuery({ queryKey: ["health"], queryFn: api.health, staleTime: 60_000 });
   const running = active.filter((j) => j.state === "running" || j.state === "queued").length;
+  const tool = GROUPS.find((g) => g.key === NAV.find((n) => (n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to)))?.group)?.title ?? null;
   const current = NAV.find((n) => (n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to)));
 
   const toggle = useCallback(() => setCollapsed((c) => {
@@ -54,7 +55,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <nav className="nav" aria-label="Main">
           <Link to="/" className="brand" title={tip("SpecForge")} aria-label="SpecForge home">
             <span className="brand-mark" aria-hidden="true"><Layers size={15} /></span>
-            <span>SpecForge<small>NVMe coverage workbench</small></span>
+            <span>SpecForge<small>NVMe spec workbench</small></span>
           </Link>
           <button className="side-search" onClick={() => setPalette(true)} aria-label="Search pages and actions" title={tip("Search")}>
             <Search size={16} /><span className="lbl grow" style={{ textAlign: "left" }}>Search…</span><span className="kbd lbl">{isMac ? "⌘" : "Ctrl"} K</span>
@@ -80,7 +81,7 @@ export function Shell({ children }: { children: ReactNode }) {
       <div className="main-col">
         <header className="topbar">
           <button className="iconbtn menu-btn" aria-label="Open menu" onClick={() => setMenu(true)}><Menu size={18} /></button>
-          <div className="crumbs"><span>SpecForge</span><span>/</span><strong>{current?.label ?? "Page"}</strong></div>
+          <div className="crumbs"><span>SpecForge</span><span>/</span>{tool && <><span>{tool}</span><span>/</span></>}<strong>{current?.label ?? "Page"}</strong></div>
           <button className="iconbtn search-mobile" aria-label="Search pages and actions" onClick={() => setPalette(true)}><Search size={17} /></button>
           <Link to="/activity" className="iconbtn" aria-label={running ? `${running} jobs running, open activity` : "Open activity"} title="Activity">
             {running > 0 ? <span className="spinner" /> : <span className="dot ok" style={{ position: "static", boxShadow: "none" }} />}

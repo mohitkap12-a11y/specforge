@@ -295,3 +295,37 @@ table.t { width: 100%; border-collapse: collapse; }
 .savebar button.primary { background: var(--bg); color: var(--text); border-color: var(--bg); }
 @media (max-width: 900px) { .settings { grid-template-columns: minmax(0, 1fr); } .settings nav { display: none; } }
 @media (prefers-reduced-motion: reduce) { * { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+
+/* ---------- home: the three tools ---------- */
+.tools { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
+.tool { display: flex; flex-direction: column; gap: 10px; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); min-width: 0; }
+.tool h2 { margin: 2px 0 0; font-size: 18px; } .tool-tag { margin: 0; color: var(--text-2); }
+.tool ul { margin: 4px 0 14px; padding-left: 18px; color: var(--text-2); font-size: 13px; display: grid; gap: 5px; }
+.tool-ic { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; }
+.tool.convert .tool-ic { background: var(--info-bg); color: var(--info); } .tool.compare .tool-ic { background: var(--violet-bg); color: var(--violet); } .tool.coverage .tool-ic { background: var(--ok-bg); color: var(--ok); }
+.tool.convert { border-top: 3px solid var(--info); } .tool.compare { border-top: 3px solid var(--violet); } .tool.coverage { border-top: 3px solid var(--ok); }
+.tool-foot { padding-top: 8px; border-top: 1px solid var(--border); }
+
+/* ---------- compare ---------- */
+.pick { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); align-items: end; }
+.pick label { display: grid; gap: 4px; font-size: 12.5px; color: var(--text-2); font-weight: 500; } .pick select { width: 100%; }
+.impacts { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(min(130px, 100%), 1fr)); margin-bottom: 16px; }
+.impact-card { text-align: left; display: grid; gap: 2px; padding: 12px 14px; height: auto; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); }
+.impact-card strong { font-size: 24px; letter-spacing: -0.03em; } .impact-card span { font-size: 12.5px; color: var(--text-2); }
+.impact-card.on { border-color: var(--text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--text) 8%, transparent); }
+.impact-card.breaking strong { color: var(--bad); } .impact-card.new strong { color: var(--ok); } .impact-card.changed strong { color: var(--warn); } .impact-card.clarification strong { color: var(--info); }
+.badge.breaking { background: var(--bad-bg); color: var(--bad); } .badge.new { background: var(--ok-bg); color: var(--ok); }
+.badge.changed { background: var(--warn-bg); color: var(--warn); } .badge.clarification { background: var(--info-bg); color: var(--info); }
+.cmp-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+.change { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); margin-bottom: 8px; }
+.change > summary { display: flex; gap: 10px; align-items: center; padding: 9px 12px; cursor: pointer; list-style: none; flex-wrap: wrap; }
+.change > summary::-webkit-details-marker { display: none; }
+.change[open] > summary { border-bottom: 1px solid var(--border); }
+.change .num { font-family: var(--mono); font-size: 12px; color: var(--text-2); } .change .ttl { font-weight: 550; min-width: 0; overflow-wrap: anywhere; }
+.change .body { padding: 10px 14px; display: grid; gap: 8px; font-size: 13px; }
+.diff-line { padding: 6px 10px; border-radius: 6px; border-left: 3px solid transparent; overflow-wrap: anywhere; }
+.diff-line.add { background: var(--ok-bg); border-color: var(--ok); } .diff-line.del { background: var(--bad-bg); border-color: var(--bad); } .diff-line.mod { background: var(--surface-2); border-color: var(--warn); }
+.diff-line mark { background: color-mix(in srgb, var(--warn) 35%, transparent); color: inherit; border-radius: 3px; padding: 0 2px; }
+.diff-line .lbl2 { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); margin-right: 6px; }
+.ai-box { border: 1px solid color-mix(in srgb, var(--violet) 35%, var(--border)); background: color-mix(in srgb, var(--violet-bg) 40%, var(--surface)); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 16px; }
+.ai-box h3 { margin: 10px 0 4px; font-size: 13px; } .ai-box ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }

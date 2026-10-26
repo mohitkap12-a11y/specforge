@@ -112,8 +112,8 @@ export default function OverviewPage() {
   const covRuns = useQuery({ queryKey: ["covruns", "all"], queryFn: () => api.covRuns() });
   const stale = (specs.data ?? []).filter((d) => d.runs.some((r) => r.active && r.outdated));
 
-  if (specs.isLoading || sets.isLoading) return <><PageHeader title="Overview" /><Loading q={specs.isLoading ? specs : sets} /></>;
-  if (specs.error) return <><PageHeader title="Overview" /><ErrorNote error={specs.error} /></>;     // never mistake a failed load for an empty workspace
+  if (specs.isLoading || sets.isLoading) return <><PageHeader title="Coverage workflow" /><Loading q={specs.isLoading ? specs : sets} /></>;
+  if (specs.error) return <><PageHeader title="Coverage workflow" /><ErrorNote error={specs.error} /></>;     // never mistake a failed load for an empty workspace
   const docs = specs.data ?? [];
   const setList = sets.data ?? [];
   const nRuns = (covRuns.data ?? []).length;
@@ -168,7 +168,7 @@ export default function OverviewPage() {
 
   return (
     <>
-      <PageHeader title="Overview" description="Where things stand and what to do next."
+      <PageHeader title="Coverage workflow" description="Coverage tool: where things stand and what to do next."
         actions={<><Link to="/activity"><button>Activity</button></Link><Link to="/specs"><button className="primary">Upload spec</button></Link></>} />
       <ErrorNote error={specs.error ?? sets.error} />
       {stale.length > 0 && <div className="toast warn">Parser updated: reparse available for {stale.map((d) => `${d.family} ${d.version}`).join(", ")}. See <Link to="/specs">Specs</Link>.</div>}
