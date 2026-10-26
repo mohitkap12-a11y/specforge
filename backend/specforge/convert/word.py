@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .md import Block, Code, Heading, Item, Para, Quote, Raw, Seg, Table, inline
+from .md import Block, Code, Heading, Item, Para, Quote, Raw, Seg, Table, escape_lines, inline
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
@@ -236,20 +236,18 @@ class _Ctx:
     # ------------------------------------------------------------------ lists / headings
     def num_of(self, p) -> tuple[str, int] | None:
         ppr = p.find(W + "pPr")
-        num = ppr.find(W + "numPr") if ppr is not None else None
+        local = ppr.find(W + "numPr") if ppr is not None else None
         sid = _val(ppr, "pStyle")
-        if num is None:
-            num = self.style_prop(sid, "numPr")
-        if num is None:
-            return None
-        nid = _val(num, "numId")
+        styled = self.style_prop(sid, "numPr")
+        # numId and ilvl are resolved independently: a paragraph may override only the level and inherit the list from its style
+        nid = _val(local, "numId") or _val(styled, "numId")
         if not nid or nid == "0" or nid not in self.nums:
             return None
-        ilvl = _val(num, "ilvl")
+        ilvl = _val(local, "ilvl") or _val(styled, "ilvl")
         if ilvl is None:   # a style-linked level (Heading numbering): the abstract definition names the style it belongs to
             ilvl = next((str(self.style_level[(nid, st.get(W + "styleId"))]) for st in self.chain(sid)
                          if (nid, st.get(W + "styleId")) in self.style_level), "0")
-        return nid, int(ilvl)
+        return nid, int(ilvl) if str(ilvl).isdigit() else 0
 
     def label(self, nid: str, ilvl: int) -> tuple[str, str, int]:
         """Advance the counters for this list level; returns (text of the label, number format, counter)."""
@@ -341,7 +339,7 @@ def _table_blocks(ctx: _Ctx, tbl) -> list[Block]:
     keep = [i for i in range(ncol) if any(i < len(r) and r[i].strip() for r in rows)]
     rows = [[r[i] if i < len(r) else "" for i in keep] for r in rows]
     if len(keep) == 1:   # a one-column table is a call-out box
-        return [Raw("\n".join("> " + ln for ln in r[0].split("\n"))) for r in rows]
+        return [Raw("\n".join("> " + ln for ln in escape_lines(r[0]).split("\n"))) for r in rows]
     return [Table(rows)]
 
 

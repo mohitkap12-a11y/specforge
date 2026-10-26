@@ -66,7 +66,7 @@ class Raw:
 
 Block = Heading | Para | Item | Code | Table | Quote | Raw
 
-_LINE_START = re.compile(r"^(\s*)(#{1,6}(?=\s|$)|[-+*](?=\s|$)|>|\d{1,9}(?=[.)](?:\s|$))|={2,}$|-{2,}$)")
+_LINE_START = re.compile(r"^(\s*)(#{1,6}(?=\s|$)|[-+*](?=\s|$)|>|\d{1,9}(?=[.)](?:\s|$))|~{3,}|={2,}$|-{2,}$)")
 _UNDERSCORE = re.compile(r"(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])")
 
 
@@ -148,7 +148,7 @@ def inline(segs: list[Seg]) -> str:
         if s.link and s.text.strip():
             lead, trail = piece[: len(piece) - len(piece.lstrip())], piece[len(piece.rstrip()):]
             core = piece.strip()
-            piece = f"{lead}[{core}]({s.link.replace(' ', '%20').replace(')', '%29')}){trail}"
+            piece = f"{lead}[{core}]({s.link.replace(' ', '%20').replace('(', '%28').replace(')', '%29')}){trail}"
         out.append(piece)
     text = "".join(out).replace("\r", "").strip(" \n")
     return re.sub(r" *\n *", "  \n", text)
@@ -160,6 +160,11 @@ def _escape_start(text: str) -> str:
         return text
     i = m.end(2) if m.group(2)[:1].isdigit() else m.end(1)
     return text[:i] + "\\" + text[i:]
+
+
+def escape_lines(text: str) -> str:
+    """Escape every line of an inline-rendered block (a manual line break starts a new Markdown line)."""
+    return "\n".join(_escape_start(ln) for ln in text.split("\n"))
 
 
 def table_md(rows: list[list[str]]) -> str:
@@ -182,8 +187,8 @@ def render(blocks: list[Block]) -> str:
     widths: list[int] = []   # content column of each open list level: a child must be indented past its parent's marker
     for b in blocks:
         if isinstance(b, Item):
-            text = inline(b.segs)
-            if not text:
+            text = escape_lines(inline(b.segs))   # item text starting "# " or "- " must stay literal after our own marker
+            if not text.strip():
                 continue
             if not isinstance(prev, Item):
                 widths = []
@@ -207,11 +212,11 @@ def render(blocks: list[Block]) -> str:
         elif isinstance(b, Para):
             t = inline(b.segs)
             if t:
-                out.append("\n".join(_escape_start(line) for line in t.split("\n")))
+                out.append(escape_lines(t))
         elif isinstance(b, Quote):
             t = inline(b.segs)
             if t:
-                out.append("\n".join("> " + ln for ln in t.split("\n")))
+                out.append("\n".join("> " + ln for ln in escape_lines(t).split("\n")))
         elif isinstance(b, Code):
             lines = list(b.lines)
             while lines and not lines[0].strip():

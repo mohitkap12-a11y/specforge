@@ -577,3 +577,27 @@ def test_pdf_code_indentation_from_leading_spaces_is_kept(tmp_path):
     path = tmp_path / "code.pdf"
     doc.save(path)
     assert "def f():\n    return 1" in convert_file(path, front_matter=False).markdown
+
+
+def test_list_and_quote_text_that_looks_like_markdown_stays_literal():
+    out = md.render([md.Item(0, [md.Seg("# Foo")]), md.Item(0, [md.Seg("- Bar")]), md.Quote([md.Seg("# Baz")])])
+    assert out == "- \\# Foo\n- \\- Bar\n\n> \\# Baz\n"
+
+
+def test_tilde_fence_at_line_start_is_escaped():
+    assert md.render([md.Para([md.Seg("~~~ not a fence")])]) == "\\~~~ not a fence\n"
+
+
+def test_link_destination_parentheses_are_encoded():
+    assert md.inline([md.Seg("x", link="https://e.com/a(b)c")]) == "[x](https://e.com/a%28b%29c)"
+
+
+def test_docx_local_ilvl_only_keeps_the_style_list(tmp_path):
+    d = docx.Document()
+    d.add_paragraph("one", style="List Number")
+    p = d.add_paragraph("two", style="List Number")
+    p._p.get_or_add_pPr().get_or_add_numPr().get_or_add_ilvl().set(qn("w:val"), "0")
+    d.add_paragraph("three", style="List Number")
+    path = tmp_path / "ilvl.docx"
+    d.save(path)
+    assert "1. one\n2. two\n3. three" in convert_file(path, front_matter=False).markdown
