@@ -601,3 +601,63 @@ def test_docx_local_ilvl_only_keeps_the_style_list(tmp_path):
     path = tmp_path / "ilvl.docx"
     d.save(path)
     assert "1. one\n2. two\n3. three" in convert_file(path, front_matter=False).markdown
+
+
+def _ctx_with_numbering(tmp_path, abstract_levels: str):
+    d = docx.Document()
+    d.add_paragraph("x")
+    path = tmp_path / "n.docx"
+    d.save(path)
+    with zipfile.ZipFile(path) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+    files["word/numbering.xml"] = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                                   f'<w:abstractNum w:abstractNumId="0">{abstract_levels}</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>').encode()
+    with zipfile.ZipFile(path, "w") as z:
+        for n, b in files.items():
+            z.writestr(n, b)
+    from specforge.convert import word
+
+    return word._Ctx(docx.Document(path))
+
+
+def test_docx_lvl_restart_zero_keeps_child_counter(tmp_path):
+    lv0 = '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>'
+    lv1 = '<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlRestart w:val="0"/><w:lvlText w:val="%2)"/></w:lvl>'
+    ctx = _ctx_with_numbering(tmp_path, lv0 + lv1)
+    labels = [ctx.label("1", i)[0] for i in (0, 1, 0, 1)]
+    assert labels == ["1.", "1)", "2.", "2)"]   # the child level never restarts
+    lv1 = lv1.replace('<w:lvlRestart w:val="0"/>', "")
+    ctx = _ctx_with_numbering(tmp_path, lv0 + lv1)
+    assert [ctx.label("1", i)[0] for i in (0, 1, 0, 1)] == ["1.", "1)", "2.", "1)"]
+
+
+def test_docx_style_linked_level_wins_over_style_ilvl(tmp_path):
+    lv0 = '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="Heading1"/><w:lvlText w:val="%1"/></w:lvl>'
+    lv1 = '<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="Heading2"/><w:lvlText w:val="%1.%2"/></w:lvl>'
+    ctx = _ctx_with_numbering(tmp_path, lv0 + lv1)
+    assert ctx.style_level[("1", "Heading2")] == 1
+
+
+def test_docx_footnotes_do_not_expand_external_entities(tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP-SECRET")
+    d = docx.Document()
+    d.add_paragraph("Body.")
+    path = tmp_path / "xxe.docx"
+    d.save(path)
+    with zipfile.ZipFile(path) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+    files["word/footnotes.xml"] = (
+        f'<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "file://{secret}">]>'
+        '<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="2"><w:p><w:r><w:t>&x;</w:t></w:r></w:p></w:footnote></w:footnotes>').encode()
+    files["[Content_Types].xml"] = files["[Content_Types].xml"].replace(b"</Types>", b'<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/></Types>')
+    files["word/_rels/document.xml.rels"] = files["word/_rels/document.xml.rels"].replace(
+        b"</Relationships>", b'<Relationship Id="rIdFn" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/></Relationships>')
+    with zipfile.ZipFile(path, "w") as z:
+        for n, b in files.items():
+            z.writestr(n, b)
+    from specforge.convert import word
+
+    ctx = word._Ctx(docx.Document(path))
+    assert "2" in ctx.footnotes and "TOP-SECRET" not in ctx.footnotes["2"]
+    assert "TOP-SECRET" not in convert_file(path, front_matter=False).markdown

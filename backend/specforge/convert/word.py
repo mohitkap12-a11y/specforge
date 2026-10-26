@@ -49,6 +49,7 @@ class _Level:
     fmt: str
     text: str
     start: int
+    restart: int | None = None   # w:lvlRestart: None = after any higher level, 0 = never, N = after level N (1-based)
 
 
 def _format_num(n: int, fmt: str) -> str:
@@ -100,16 +101,18 @@ class _Ctx:
             for l in a.findall(W + "lvl"):
                 if _val(l, "pStyle"):
                     self.style_level[(num.get(W + "numId"), _val(l, "pStyle"))] = int(l.get(W + "ilvl", "0"))
-                lv[int(l.get(W + "ilvl", "0"))] = _Level(_val(l, "numFmt", "decimal"), _val(l, "lvlText", ""), int(_val(l, "start", "1")))
+                lr = _val(l, "lvlRestart")
+                lv[int(l.get(W + "ilvl", "0"))] = _Level(_val(l, "numFmt", "decimal"), _val(l, "lvlText", ""), int(_val(l, "start", "1")),
+                                                         int(lr) if lr is not None and lr.isdigit() else None)
             for o in num.findall(W + "lvlOverride"):
                 s = o.find(W + "startOverride")
                 i = int(o.get(W + "ilvl", "0"))
                 rep = o.find(W + "lvl")   # a full replacement level definition for this list instance
                 if rep is not None:
                     base = lv.get(i, _Level("decimal", "%1.", 1))
-                    lv[i] = _Level(_val(rep, "numFmt", base.fmt), _val(rep, "lvlText", base.text), int(_val(rep, "start", str(base.start))))
+                    lv[i] = _Level(_val(rep, "numFmt", base.fmt), _val(rep, "lvlText", base.text), int(_val(rep, "start", str(base.start))), base.restart)
                 if s is not None and i in lv:
-                    lv[i] = _Level(lv[i].fmt, lv[i].text, int(s.get(W + "val", "1")))
+                    lv[i] = _Level(lv[i].fmt, lv[i].text, int(s.get(W + "val", "1")), lv[i].restart)
             self.nums[num.get(W + "numId")] = lv
 
     def _load_footnotes(self) -> None:
@@ -117,7 +120,8 @@ class _Ctx:
             if rel.reltype.endswith("/footnotes") and not rel.is_external:
                 from lxml import etree
 
-                root = etree.fromstring(rel.target_part.blob)
+                # explicit parser: no entity expansion, no DTD or network access, whatever the installed lxml defaults to
+                root = etree.fromstring(rel.target_part.blob, parser=etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False))
                 self.cur_rels = rel.target_part.rels
                 for fn in root.findall(W + "footnote"):
                     if fn.get(W + "type") in ("separator", "continuationSeparator", "continuationNotice"):
@@ -243,10 +247,12 @@ class _Ctx:
         nid = _val(local, "numId") or _val(styled, "numId")
         if not nid or nid == "0" or nid not in self.nums:
             return None
-        ilvl = _val(local, "ilvl") or _val(styled, "ilvl")
-        if ilvl is None:   # a style-linked level (Heading numbering): the abstract definition names the style it belongs to
+        ilvl = _val(local, "ilvl")
+        if ilvl is None:
+            # a style-linked level (Heading numbering): the abstract definition names the style it belongs to, and wins over
+            # the style's own ilvl, which Word ignores for linked levels
             ilvl = next((str(self.style_level[(nid, st.get(W + "styleId"))]) for st in self.chain(sid)
-                         if (nid, st.get(W + "styleId")) in self.style_level), "0")
+                         if (nid, st.get(W + "styleId")) in self.style_level), None) or _val(styled, "ilvl") or "0"
         return nid, int(ilvl) if str(ilvl).isdigit() else 0
 
     def label(self, nid: str, ilvl: int) -> tuple[str, str, int]:
@@ -256,7 +262,9 @@ class _Ctx:
         key = (nid, ilvl)
         self.counters[key] = self.counters.get(key, cur.start - 1) + 1
         for k in [k for k in self.counters if k[0] == nid and k[1] > ilvl]:
-            del self.counters[k]
+            rs = lv.get(k[1], _Level("decimal", "", 1)).restart
+            if rs is None or (rs > 0 and ilvl <= rs - 1):
+                del self.counters[k]
 
         def sub(m):
             i = int(m.group(1)) - 1
