@@ -96,6 +96,8 @@ def _describe(c: dict) -> str:
         for s in d.get("excerpt", [])[:2]:
             lines.append(f"  {_clip(s, 260)}")
     elif c["change"] == "modified":
+        if d.get("header_changed"):
+            lines.append(f"  ~ columns: {_clip(' | '.join(d.get('header_before', [])), 160)} -> {_clip(' | '.join(d.get('header_after', [])), 160)}")
         for r in d.get("rows_added", [])[:5]:
             lines.append(f"  + row: {_clip(' | '.join(r), 220)}")
         for r in d.get("rows_removed", [])[:5]:
@@ -133,7 +135,7 @@ def summarize(conn: sqlite3.Connection, cid: int, svc: LLMService, redo: bool = 
     s = comp["summary"]
     cfg = svc.task_cfg("generate")
     chapters = [c for c in s["chapters"] if c["total"] - c["editorial"] > 0][:MAX_CHAPTERS]
-    stats = {"chapters": len(chapters), "summarised": 0, "failed": 0, "dropped_refs": 0}
+    stats = {"chapters": len(chapters), "summarised": 0, "failed": 0, "dropped_refs": 0, "dropped_points": 0}
     eventlog.emit("info", "agent", f"Compare summariser starting: {len(chapters)} chapter(s), model {cfg['provider']}/{cfg['model'] or '(unset)'}", compare_id=cid)
     done: list[dict] = []
     meta: dict = {}
@@ -159,6 +161,9 @@ def summarize(conn: sqlite3.Connection, cid: int, svc: LLMService, redo: bool = 
             refs = [r.strip().upper() for r in p.refs]
             good = [r for r in refs if r in by_id]
             stats["dropped_refs"] += len(refs) - len(good)
+            if not good:        # a point that cites no change it was shown could be invented: it is not kept
+                stats["dropped_points"] += 1
+                continue
             points.append({"title": _clip(p.title, 160), "detail": _clip(p.detail, 700), "impact": p.impact,
                            "refs": [{"id": by_id[r]["id"], "kind": by_id[r]["kind"], "number": by_id[r].get("number_to") or by_id[r].get("number_from"),
                                      "title": by_id[r]["title"]} for r in good]})

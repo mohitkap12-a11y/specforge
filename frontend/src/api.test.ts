@@ -48,6 +48,10 @@ describe("splitMarks", () => {
   it("marks the changed words and keeps the rest", () => {
     expect(splitMarks("A controller shall process each command", ["shall"])).toEqual([{ t: "A controller ", m: false }, { t: "shall", m: true }, { t: " process each command", m: false }]);
   });
+  it("matches backend tokens across punctuation and never inside a longer word", () => {
+    expect(splitMarks("a non-zero value", ["non - zero"])).toEqual([{ t: "a ", m: false }, { t: "non-zero", m: true }, { t: " value", m: false }]);
+    expect(splitMarks("10 and 1", ["1"])).toEqual([{ t: "10 and ", m: false }, { t: "1", m: true }]);
+  });
   it("returns the text whole when nothing changed and survives regex characters", () => {
     expect(splitMarks("plain", [])).toEqual([{ t: "plain", m: false }]);
     expect(splitMarks("value (A+B) here", ["(A+B)"]).some((p) => p.m && p.t === "(A+B)")).toBe(true);

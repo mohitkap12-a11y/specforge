@@ -30,6 +30,13 @@ function Strength({ s }: { s: string | null | undefined }) {
 
 function Details({ c }: { c: CompareChange }) {
   const d = c.details;
+  if (c.change === "moved" || c.change === "renamed") {
+    return (
+      <div className="body"><div className="muted">
+        {c.change === "renamed" ? `Renamed from “${c.title_from ?? ""}” to “${c.title}”` : `${c.kind === "table" ? "Figure" : "Section"} number changed from ${c.number_from} to ${c.number_to}`}
+        {d.how ? ` (matched by ${d.how.replace("+", " and ")}).` : "."} The content itself is unchanged.</div></div>
+    );
+  }
   if (c.kind === "section" && c.change === "modified") {
     return (
       <div className="body">
@@ -42,7 +49,7 @@ function Details({ c }: { c: CompareChange }) {
         {d.added?.map((s, i) => <div key={`a${i}`} className="diff-line add"><span className="lbl2">added</span>{s.text} <Strength s={s.strength} /></div>)}
         {d.removed?.map((s, i) => <div key={`r${i}`} className="diff-line del"><span className="lbl2">removed</span>{s.text} <Strength s={s.strength} /></div>)}
         {c.title_from && <div className="muted small">Renamed from “{c.title_from}”.</div>}
-        {d.truncated && <div className="muted small">Only the first changes are listed here; the export has the rest.</div>}
+        {d.truncated && <div className="muted small">Showing the first {Math.max(d.added?.length ?? 0, d.removed?.length ?? 0, d.modified?.length ?? 0)} of {d.counts?.added ?? 0} added, {d.counts?.removed ?? 0} removed and {d.counts?.modified ?? 0} modified sentences; the Markdown export may also omit some.</div>}
       </div>
     );
   }
@@ -62,6 +69,7 @@ function Details({ c }: { c: CompareChange }) {
         ))}
         {d.rows_added?.map((r, i) => <div key={`a${i}`} className="diff-line add"><span className="lbl2">row added</span>{r.join(" | ")}</div>)}
         {d.rows_removed?.map((r, i) => <div key={`r${i}`} className="diff-line del"><span className="lbl2">row removed</span>{r.join(" | ")}</div>)}
+        {d.truncated && <div className="muted small">Showing the first rows of {d.rows_changed_count ?? 0} changed, {d.rows_added_count ?? 0} added and {d.rows_removed_count ?? 0} removed; the Markdown export may also omit some.</div>}
       </div>
     );
   }

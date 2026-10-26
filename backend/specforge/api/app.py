@@ -178,7 +178,7 @@ def create_app() -> FastAPI:
             out.append({"doc_id": d["id"], "family": d["family"], "version": d["version"], "filename": d["filename"], "pages": d["pages"],
                         "run_id": r["id"] if r else None, "parsed": r is not None,
                         "outdated": bool(r and r["parser_version"] != config.PARSER_VERSION)})
-        out.sort(key=lambda o: (o["family"], [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", o["version"]) if t], o["doc_id"]))
+        out.sort(key=lambda o: (o["family"], [(0, int(t), "") if t.isdigit() else (1, 0, t.lower()) for t in re.split(r"(\d+)", o["version"]) if t], o["doc_id"]))
         return out
 
     @app.post("/api/compare")

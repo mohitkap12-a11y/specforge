@@ -42,7 +42,7 @@ export default function HomePage() {
         <Tool icon={GitCompareArrows} tone="compare" name="Spec Compare" tagline="Pick two versions, for example 2.3 and 2.4, and see what changed."
           points={["Finds new, removed and modified sections, tables and requirements, even when sections are renumbered", "Flags changes that can break implementations: a shall becoming a should, a field removed, a reserved bit defined", "Optional AI summary of what the new version brings"]}
           to="/compare" cta="Compare two versions" links={[{ to: "/specs", label: "Manage spec versions" }]}
-          foot={<>{parsed} parsed spec(s) in the library · {(comps.data ?? []).length} saved comparison(s)</>} />
+          foot={<>{parsed} parsed spec(s) in the library · {(comps.data ?? []).length >= 100 ? "100+" : (comps.data ?? []).length} saved comparison(s)</>} />
         <Tool icon={Gauge} tone="coverage" name="Coverage Tool" tagline="Which commands, fields and requirements do your tests actually cover?"
           points={["Builds the list of everything that can be covered from the specs", "Derives one scenario per executed test from your command log", "Covered / partial / not covered with evidence; Excel, HTML, CSV, JSON reports"]}
           to="/workflow" cta="Open the coverage workflow" links={[{ to: "/specs", label: "Specs" }, { to: "/coverage", label: "Coverage" }, { to: "/reports", label: "Reports" }]} />

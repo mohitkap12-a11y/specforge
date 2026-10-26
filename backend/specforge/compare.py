@@ -129,8 +129,9 @@ def _words(s: str) -> list[str]:
     return _WORD.findall(s)
 
 
-def word_delta(before: str, after: str) -> dict[str, list[str]]:
-    """The words removed from / added to a sentence, in order (what a reader would highlight)."""
+def word_delta(before: str, after: str, limit: int | None = 12) -> dict[str, list[str]]:
+    """The words removed from / added to a sentence, in order (what a reader would highlight). `limit` caps what is kept for display;
+    classification must use the full delta (limit=None)."""
     wa, wb = _words(before), _words(after)
     rem: list[str] = []
     add: list[str] = []
@@ -139,7 +140,7 @@ def word_delta(before: str, after: str) -> dict[str, list[str]]:
             rem.append(" ".join(wa[i1:i2]))
         if op in ("replace", "insert"):
             add.append(" ".join(wb[j1:j2]))
-    return {"removed": rem[:12], "added": add[:12]}
+    return {"removed": rem[:limit], "added": add[:limit]}
 
 
 def _norm_sentence(s: str) -> str:
@@ -190,8 +191,9 @@ def diff_text(a: str, b: str) -> dict[str, Any] | None:
                     best, best_r = k, r
             if best is not None and best_r >= 0.5:
                 used.add(best)
-                d = word_delta(o, new[best])
-                modified.append({"before": o, "after": new[best], "delta": d, "impact": _sentence_impact("modified", o, new[best], d),
+                full = word_delta(o, new[best], limit=None)
+                d = {k: v[:12] for k, v in full.items()}
+                modified.append({"before": o, "after": new[best], "delta": d, "impact": _sentence_impact("modified", o, new[best], full),
                                  "strength": [_strength(o), _strength(new[best])]})
             else:
                 removed.append({"text": o, "strength": _strength(o), "impact": _sentence_impact("removed", o, None, None)})
@@ -218,7 +220,7 @@ def _row_key(r: list[str]) -> str:
 def diff_table(ta: dict, tb: dict) -> dict[str, Any] | None:
     ha, hb = _cells(ta.get("header") or []), _cells(tb.get("header") or [])
     ra, rb = [_cells(r) for r in ta.get("rows") or []], [_cells(r) for r in tb.get("rows") or []]
-    header_changed = [c.lower() for c in ha] != [c.lower() for c in hb]
+    header_changed = ha != hb
     ka, kb = [_row_key(r) for r in ra], [_row_key(r) for r in rb]
     keyed = all(ka) and all(kb) and len(set(ka)) == len(ka) and len(set(kb)) == len(kb)
     added: list[list[str]] = []
@@ -229,11 +231,11 @@ def diff_table(ta: dict, tb: dict) -> dict[str, Any] | None:
         for k, r in da.items():
             if k not in db:
                 removed.append(r)
-            elif [c.lower() for c in r] != [c.lower() for c in db[k]]:
+            elif r != db[k]:                  # exact: a case-only edit (10 mW -> 10 MW) is a change
                 changed.append(_cell_changes(r, db[k], ha, hb))
         added = [r for k, r in db.items() if k not in da]
     else:       # no usable key column: align the rows as lines
-        la, lb = [" | ".join(r).lower() for r in ra], [" | ".join(r).lower() for r in rb]
+        la, lb = [" | ".join(r) for r in ra], [" | ".join(r) for r in rb]
         for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, la, lb, autojunk=False).get_opcodes():
             if op == "delete":
                 removed += ra[i1:i2]
@@ -263,34 +265,33 @@ def diff_table(ta: dict, tb: dict) -> dict[str, Any] | None:
     added = still_added
     if not (header_changed or added or removed or changed):
         return None
-    return {"header_before": ha, "header_after": hb, "header_changed": header_changed,
+    # classification flags come from the full rows, before the display limits are applied
+    flags = {"to_reserved": any(c.pop("to_reserved") for c in changed), "from_reserved": any(c.pop("from_reserved") for c in changed)}
+    return {"header_before": ha, "header_after": hb, "header_changed": header_changed, "flags": flags,
             "rows_added": added, "rows_removed": removed, "rows_changed": changed}
 
 
 def _cell_changes(x: list[str], y: list[str], ha: list[str], hb: list[str]) -> dict:
     cols = []
+    to_res = from_res = False
     for i in range(max(len(x), len(y))):
         bx, ay = (x[i] if i < len(x) else ""), (y[i] if i < len(y) else "")
-        if bx.lower() != ay.lower():
+        if bx != ay:
+            to_res = to_res or ("reserved" in ay.lower() and "reserved" not in bx.lower())
+            from_res = from_res or ("reserved" in bx.lower() and "reserved" not in ay.lower())
             name = (hb[i] if i < len(hb) else None) or (ha[i] if i < len(ha) else None) or f"col {i + 1}"
             cols.append({"column": name, "before": bx[:MAX_CELL], "after": ay[:MAX_CELL],
                          "delta": word_delta(bx, ay) if len(bx) + len(ay) > 40 else None})
-    return {"key": (y[0] if y else x[0] if x else ""), "key_before": x[0] if x else "", "cells": cols}
+    return {"key": (y[0] if y else x[0] if x else ""), "key_before": x[0] if x else "", "cells": cols,
+            "to_reserved": to_res, "from_reserved": from_res}
 
 
 def _table_impact(d: dict) -> str:
-    if d["rows_removed_count"]:
-        return "breaking"
-    defined = False
-    for c in d["rows_changed"]:
-        before = " ".join(cell["before"] for cell in c["cells"]).lower()
-        after = " ".join(cell["after"] for cell in c["cells"]).lower()
-        if "reserved" in after and "reserved" not in before:
-            return "breaking"            # a defined field became reserved
-        defined = defined or ("reserved" in before and "reserved" not in after)
-    if d["rows_added_count"] or defined:
-        return "new"                     # new rows, or a reserved field that is now defined
-    if d["rows_changed"] or d["header_changed"]:
+    if d["rows_removed_count"] or d["flags"]["to_reserved"]:
+        return "breaking"            # a row is gone, or a defined field became reserved
+    if d["rows_added_count"] or d["flags"]["from_reserved"]:
+        return "new"                 # new rows, or a reserved field that is now defined
+    if d["rows_changed_count"] or d["header_changed"]:
         return "changed"
     return "editorial"
 
@@ -311,8 +312,8 @@ def match_tables(a: dict[str, dict], b: dict[str, dict], sec_pairs: dict[str, st
     # 1. same caption inside matched sections
     by_a: dict[tuple, list[str]] = {}
     by_b: dict[tuple, list[str]] = {}
-    for k in a:
-        by_a.setdefault((sec_pairs.get(a[k].get("section") or "", None), _cap(a[k].get("caption"))), []).append(k)
+    for k in a:     # both sides are keyed by the section number *in A* (the one B's section was matched to)
+        by_a.setdefault((a[k].get("section") if a[k].get("section") in sec_pairs else None, _cap(a[k].get("caption"))), []).append(k)
     for k in b:
         by_b.setdefault((a_sec_of(b[k]), _cap(b[k].get("caption"))), []).append(k)
     for key, xs in by_a.items():
@@ -336,7 +337,7 @@ def match_tables(a: dict[str, dict], b: dict[str, dict], sec_pairs: dict[str, st
     ha: dict[tuple, list[str]] = {}
     hb: dict[tuple, list[str]] = {}
     for k in sorted(ua):
-        ha.setdefault((sec_pairs.get(a[k].get("section") or ""), tuple(c.lower() for c in _cells(a[k].get("header") or []))), []).append(k)
+        ha.setdefault((a[k].get("section") if a[k].get("section") in sec_pairs else None, tuple(c.lower() for c in _cells(a[k].get("header") or []))), []).append(k)
     for k in sorted(ub):
         hb.setdefault((a_sec_of(b[k]), tuple(c.lower() for c in _cells(b[k].get("header") or []))), []).append(k)
     for key, xs in ha.items():
@@ -404,25 +405,25 @@ def compare_irs(ira: dict, irb: dict) -> dict[str, Any]:
             continue
         impacts = [i["impact"] for k in ("added", "removed", "modified") for i in d[k]]
         impact = min(impacts, key=IMPACTS.index) if impacts else "clarification"
-        norm = sum(1 for k in ("added", "removed", "modified") for i in d[k]
-                   if (i.get("strength") if k != "modified" else (i["strength"][0] or i["strength"][1])))
-        n_items = len(d["added"]) + len(d["removed"]) + len(d["modified"])
+        nc = {"added": sum(1 for x in d["added"] if x["strength"]), "removed": sum(1 for x in d["removed"] if x["strength"]),
+              "strength_changed": sum(1 for m in d["modified"] if m["strength"][0] != m["strength"][1])}
+        norm = sum(1 for k in ("added", "removed") for x in d[k] if x["strength"]) + sum(1 for m in d["modified"] if m["strength"][0] or m["strength"][1])
         det = {"how": how, "ratio": d["ratio"], "counts": {"added": len(d["added"]), "removed": len(d["removed"]), "modified": len(d["modified"])},
                "added": d["added"][:MAX_DETAIL_ITEMS], "removed": d["removed"][:MAX_DETAIL_ITEMS], "modified": d["modified"][:MAX_DETAIL_ITEMS],
-               "truncated": n_items > 3 * MAX_DETAIL_ITEMS}
+               "truncated": any(len(d[k]) > MAX_DETAIL_ITEMS for k in ("added", "removed", "modified"))}
         add(kind="section", change="modified", impact=impact, chapter=_chapter(y), number_from=x, number_to=y, title=B["title"],
-            title_from=A["title"] if renamed else None, moved=moved, normative=norm, details=det)
+            title_from=A["title"] if renamed else None, moved=moved, normative=norm, norm=nc, details=det)
     for x in sa:
         if x not in a_to_b:
             A = sa[x]
             add(kind="section", change="removed", impact="breaking" if _normative_count(A["text"]) else "changed", chapter=_chapter(x),
                 number_from=x, number_to=None, title=A["title"], normative=_normative_count(A["text"]),
-                nested=bool(A["parent"] and A["parent"] not in a_to_b), details={"excerpt": _excerpt(A["text"])})
+                norm={"removed": _normative_count(A["text"])}, nested=bool(A["parent"] and A["parent"] not in a_to_b), details={"excerpt": _excerpt(A["text"])})
     for y in sb:
         if y not in b_to_a:
             B = sb[y]
             add(kind="section", change="added", impact="new", chapter=_chapter(y), number_from=None, number_to=y, title=B["title"],
-                normative=_normative_count(B["text"]), nested=bool(B["parent"] and B["parent"] not in b_to_a), details={"excerpt": _excerpt(B["text"])})
+                normative=_normative_count(B["text"]), norm={"added": _normative_count(B["text"])}, nested=bool(B["parent"] and B["parent"] not in b_to_a), details={"excerpt": _excerpt(B["text"])})
 
     # --- tables
     ta, tb = ira["tables"], irb["tables"]
@@ -443,6 +444,7 @@ def compare_irs(ira: dict, irb: dict) -> dict[str, Any]:
             d[k] = d[k][:MAX_DETAIL_ITEMS]
         d["rows_changed_count"] = len(d["rows_changed"])
         d["rows_changed"] = d["rows_changed"][:MAX_DETAIL_ITEMS]
+        d["truncated"] = any(d[k + "_count"] > MAX_DETAIL_ITEMS for k in ("rows_added", "rows_removed", "rows_changed"))
         impact = _table_impact(d)
         add(kind="table", change="modified", impact=impact, chapter=_chapter(B.get("section")), number_from=x, number_to=y,
             title=B.get("caption") or f"Table {y}", moved=relabel, normative=0, details=d)
@@ -490,13 +492,8 @@ def summarise(ira: dict, irb: dict, changes: list[dict], n_sections_matched: int
         ch["total"] += 1
         ch[c["impact"]] += 1
         ch["score"] += c["score"]
-        if c["kind"] == "section" and c["change"] == "modified":
-            d = c["details"]
-            norm["added"] += sum(1 for s in d.get("added", []) if s.get("strength"))
-            norm["removed"] += sum(1 for s in d.get("removed", []) if s.get("strength"))
-            norm["strength_changed"] += sum(1 for m in d.get("modified", []) if m["strength"][0] != m["strength"][1])
-        elif c["kind"] == "section" and c["change"] in ("added", "removed") and not c.get("nested"):
-            norm["added" if c["change"] == "added" else "removed"] += c.get("normative", 0)
+        for k, v in (c.get("norm") or {}).items():          # full counts, computed before any display limit
+            norm[k] += v
     titles = {}
     for ir in (ira, irb):
         for n, s in ir["sections"].items():
@@ -670,13 +667,14 @@ def export_markdown(conn: sqlite3.Connection, cid: int) -> str:
     out += ["## Changes", ""]
     page, off = 500, 0
     while True:
-        res = query_changes(conn, cid, nested=False, offset=off, limit=page)
+        res = query_changes(conn, cid, nested=True, offset=off, limit=page)
         for c in res["items"]:
             if c["impact"] == "editorial":
                 continue
             num = c.get("number_to") or c.get("number_from") or ""
             label = "Section" if c["kind"] == "section" else "Table"
-            out.append(f"### {label} {num}: {c['title']} — {c['change']} · {c['impact']}")
+            part = " (part of a new/removed section)" if c.get("nested") else ""
+            out.append(f"### {label} {num}: {c['title']} — {c['change']} · {c['impact']}{part}")
             d = c.get("details", {})
             if c["kind"] == "section" and c["change"] == "modified":
                 out += [_bullet_sentence(x, "added") for x in d.get("added", [])[:10]]

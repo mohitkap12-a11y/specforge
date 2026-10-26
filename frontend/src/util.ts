@@ -48,10 +48,25 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-/** Splits `text` into runs, marking the ones that equal one of `chunks` (the words a revision removed or added). */
+/** Splits `text` into runs, marking the ones that match a chunk (the words a revision removed or added).
+ *  Chunks come from the backend as space-joined tokens ("non - zero"), so spaces around punctuation are optional and a chunk that
+ *  starts or ends in a word character must not match inside a longer word (the 1 in 10). */
 export function splitMarks(text: string, chunks: string[]): { t: string; m: boolean }[] {
-  const parts = chunks.filter((c) => c.trim()).sort((a, b) => b.length - a.length);
-  if (!parts.length) return [{ t: text, m: false }];
-  const rx = new RegExp(`(${parts.map((p) => p.split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+")).join("|")})`, "g");
-  return text.split(rx).filter((t) => t !== "").map((t) => ({ t, m: parts.some((p) => p.replace(/\s+/g, " ") === t.replace(/\s+/g, " ")) }));
+  const esc = (w: string) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pats = chunks.map((c) => c.trim()).filter(Boolean).sort((a, b) => b.length - a.length).map((c) => {
+    const body = c.split(/\s+/).map(esc).join("\\s*");
+    return `${/^\w/.test(c) ? "(?<!\\w)" : ""}${body}${/\w$/.test(c) ? "(?!\\w)" : ""}`;
+  });
+  if (!pats.length) return [{ t: text, m: false }];
+  const rx = new RegExp(pats.join("|"), "g");
+  const out: { t: string; m: boolean }[] = [];
+  let last = 0;
+  for (const m of text.matchAll(rx)) {
+    if (!m[0]) continue;
+    if (m.index! > last) out.push({ t: text.slice(last, m.index), m: false });
+    out.push({ t: m[0], m: true });
+    last = m.index! + m[0].length;
+  }
+  if (last < text.length) out.push({ t: text.slice(last), m: false });
+  return out.length ? out : [{ t: text, m: false }];
 }

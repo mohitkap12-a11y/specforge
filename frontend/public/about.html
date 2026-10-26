@@ -266,7 +266,7 @@
 "<span class=p>$</span> specforge to-md \"NVMe Base 2.4.pdf\" --out ./md        <span class=cm># tool 1: convert</span>",
 "<span class=p>$</span> specforge make-demo ./demo",
 "<span class=p>$</span> specforge ingest demo/*.pdf --set demo",
-"<span class=p>$</span> specforge compare nvme-base 2.3 2.4 --out diff.md  <span class=cm># tool 2: compare</span>",
+"<span class=p>$</span> specforge compare nvme-base 2.3 2.4 --out diff.md  <span class=cm># tool 2: needs two ingested versions</span>",
 "<span class=p>$</span> specforge catalog 1",
 "<span class=p>$</span> specforge coverage 1 demo/demo-commands.db --out ./reports",
 "<span class=p>$</span> specforge serve   <span class=cm># UI + API on http://127.0.0.1:8000</span>"

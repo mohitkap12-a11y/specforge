@@ -313,3 +313,95 @@ def test_cli_compare_writes_report(ws, tmp_path, capsys):
     assert "## Changes" in (tmp_path / "r" / "report.md").read_text()
     with pytest.raises(SystemExit, match="no parsed spec"):
         main(["compare", "nvme-base", "2.3", "9.9"])
+
+
+# ----------------------------------------------------------------------------- review regressions
+
+def test_options_sort_survives_mixed_version_labels(client, tmp_path):
+    for ver in ("2.3", "draft", "2.10"):
+        d = write_docx(tmp_path / f"m{ver}.docx", base_spec() + [("p", f"Revision marker {ver}.")])    # distinct bytes: identical files are one document
+        with open(d, "rb") as f:
+            doc = client.post("/api/specs/upload", files=[("files", (d.name, f))]).json()
+        client.patch(f"/api/specs/{doc[0]['id']}", json={"family": "nvme-base", "version": ver})
+    out = client.get("/api/compare/options")
+    assert out.status_code == 200 and [o["version"] for o in out.json()] == ["2.3", "2.10", "draft"]
+
+
+def _t(rows, caption="Figure 1: T", section="1", header=("Name", "Value")):
+    return {"caption": caption, "header": list(header), "rows": rows, "section": section, "label": "1"}
+
+
+def test_tables_in_renumbered_sections_are_still_matched():
+    a = {"1": _t([["a", "1"]], section="5.3")}
+    b = {"2": _t([["a", "2"]], section="5.4")}
+    pairs = compare.match_tables(a, b, {"5.3": "5.4"})
+    assert pairs and pairs[0][:2] == ("1", "2") and pairs[0][2] == "section+caption"
+    # uncaptioned tables in renumbered sections are matched by header
+    a = {"x": _t([["a", "1"]], caption="", section="5.3")}
+    b = {"y": _t([["a", "2"]], caption="", section="5.4")}
+    assert compare.match_tables(a, b, {"5.3": "5.4"})[0][:2] == ("x", "y")
+
+
+def test_case_only_cell_edit_is_a_change():
+    d = compare.diff_table(_t([["Power", "10 mW"]]), _t([["Power", "10 MW"]]))
+    assert d and d["rows_changed"][0]["cells"][0]["before"] == "10 mW" and d["rows_changed"][0]["cells"][0]["after"] == "10 MW"
+    assert compare.diff_table(_t([["Power", "10 mW"]]), _t([["Power", "10 mW"]])) is None
+
+
+def test_classification_uses_the_full_diff_not_the_display_limit():
+    rows_a = [[f"{i:02d}h", "Reserved" if i == 59 else f"field {i}"] for i in range(60)]
+    rows_b = [[f"{i:02d}h", f"field {i} (v2)" if i != 59 else "Defined now"] for i in range(60)]
+    d = compare.diff_table(_t(rows_a), _t(rows_b))
+    assert d["flags"]["from_reserved"] and len(d["rows_changed"]) == 60            # row 59 is far past the 40 shown
+    d["rows_changed_count"], d["rows_added_count"], d["rows_removed_count"] = 60, 0, 0
+    assert compare._table_impact(d) == "new"
+    s1 = " ".join(f"Word{i} stays." for i in range(30)) + " The value is 5 and Foo bar."
+    s2 = " ".join(f"Word{i} stays." for i in range(30)) + " The value is 6 and Foo baz."
+    full = compare.word_delta("a b c d e f g h i j k l m 5", "a b c d e f g h i j k l m 6", limit=None)
+    assert compare._sentence_impact("modified", "x", "y", full) == "changed"
+    assert compare.diff_text(s1, s2)["modified"][0]["delta"]["removed"]
+
+
+def test_many_added_sentences_flag_truncation_and_counts(conn, tmp_path):
+    base = base_spec()
+    many = [("p", " ".join(f"Sentence number {i} of the new text." for i in range(60)))]
+    blocks = []
+    for b in base:
+        blocks.append(b)
+        if b[0] == "h" and b[2].startswith("1 Introduction"):
+            blocks += many
+    rids = []
+    for ver, bl in (("1", base), ("2", blocks)):
+        d = store.register_document(conn, write_docx(tmp_path / f"t{ver}.docx", bl), "nvme-base", ver)
+        rids.append(store.run_parse(conn, d["id"], workers=1, activate=True))
+    cid = compare.run_comparison(conn, *rids)
+    ch = compare.query_changes(conn, cid, q="Introduction")["items"][0]
+    assert ch["details"]["counts"]["added"] == 60 and len(ch["details"]["added"]) == compare.MAX_DETAIL_ITEMS and ch["details"]["truncated"]
+
+
+def test_normative_totals_cover_nested_children_and_export_lists_them(conn, tmp_path):
+    base = base_spec()
+    new = base + [("h", 1, "7 Brand new chapter"), ("h", 2, "7.1 Child section"), ("p", "The controller shall do a new thing. The host shall check it.")]
+    rids = []
+    for ver, bl in (("1", base), ("2", new)):
+        d = store.register_document(conn, write_docx(tmp_path / f"n{ver}.docx", bl), "nvme-base", ver)
+        rids.append(store.run_parse(conn, d["id"], workers=1, activate=True))
+    cid = compare.run_comparison(conn, *rids)
+    s = compare.get_comparison(conn, cid)["summary"]
+    assert s["normative"]["added"] == 2
+    md = compare.export_markdown(conn, cid)
+    assert "Child section — added · new (part of a new/removed section)" in md
+
+
+def test_ai_points_without_a_shown_ref_are_dropped_and_header_changes_are_described(conn, two_versions):
+    from llm_helpers import settings
+    from specforge import compare_ai
+    from specforge.llm.service import LLMService
+
+    cid, ch, comp = run(conn, two_versions)
+    compare_ai.summarize(conn, cid, LLMService(conn, settings(), provider=_fake_model()))
+    ai = compare.get_comparison(conn, cid)["ai"]
+    assert all(p["refs"] for c in ai["chapters"] for p in c["points"]) and ai["stats"]["dropped_points"] >= 1
+    t = {"kind": "table", "change": "modified", "impact": "changed", "title": "T", "number_to": "1",
+         "details": {"header_changed": True, "header_before": ["Name", "Value (mW)"], "header_after": ["Name", "Value (W)"], "rows_added": [], "rows_removed": [], "rows_changed": []}}
+    assert "columns: Name | Value (mW) -> Name | Value (W)" in compare_ai._describe(t)
