@@ -1,4 +1,4 @@
-import type { LogEvent, CatalogItem, CmdSource, DecodedCommand, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { MarkdownConversion, LogEvent, CatalogItem, CmdSource, DecodedCommand, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -38,6 +38,7 @@ export const qs = (o: Record<string, string | number | undefined | null>) => {
 export const api = {
   specs: () => req<SpecDoc[]>("GET", "/api/specs"),
   upload: (files: File[]) => { const f = new FormData(); files.forEach((x) => f.append("files", x)); return req<SpecDoc[]>("POST", "/api/specs/upload", f); },
+  toMarkdown: (file: File, frontMatter = true) => { const f = new FormData(); f.append("file", file); return req<MarkdownConversion>("POST", `/api/convert/markdown${qs({ front_matter: frontMatter ? undefined : "false" })}`, f); },
   patchSpec: (id: number, b: { family?: string; version?: string }) => req("PATCH", `/api/specs/${id}`, b),
   deleteSpec: (id: number) => req("DELETE", `/api/specs/${id}`),
   parse: (id: number, activate = false) => req<{ job: number }>("POST", `/api/specs/${id}/parse${qs({ activate: activate ? "true" : undefined })}`),

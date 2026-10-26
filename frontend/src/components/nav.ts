@@ -1,10 +1,11 @@
 import type { LucideIcon } from "lucide-react";
-import { Activity, BookOpen, Database, FileBarChart, FlaskConical, Gauge, Home, Layers, ListTree, Settings as Cog, FileText } from "lucide-react";
+import { Activity, BookOpen, Database, FileBarChart, FlaskConical, Gauge, Home, Layers, ListTree, Settings as Cog, FileText, FileDown } from "lucide-react";
 
 export interface NavItem { to: string; label: string; icon: LucideIcon; desc: string; group: "top" | "specs" | "test" | "system" }
 export const NAV: NavItem[] = [
   { to: "/", label: "Overview", icon: Home, desc: "Where things stand and what to do next", group: "top" },
   { to: "/specs", label: "Specs", icon: FileText, desc: "Upload and parse specification documents", group: "specs" },
+  { to: "/convert", label: "To Markdown", icon: FileDown, desc: "Convert a PDF, DOC or DOCX into a clean Markdown file", group: "specs" },
   { to: "/explorer", label: "Explorer", icon: BookOpen, desc: "Browse parsed sections, tables and requirements", group: "specs" },
   { to: "/sets", label: "Sets", icon: Layers, desc: "Group spec versions, resolve cross-references", group: "specs" },
   { to: "/catalog", label: "Catalog", icon: ListTree, desc: "Everything that can be covered", group: "specs" },

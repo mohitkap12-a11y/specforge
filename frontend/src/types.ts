@@ -96,3 +96,9 @@ export interface CrossUnit {
   related: { key: string; title: string; why: string; chars: number }[];
 }
 export interface SpecInSet { family: string; version: string; sections: number }
+
+export interface MarkdownConversion {
+  filename: string; title: string; format: "pdf" | "docx" | "doc"; markdown: string;
+  stats: { words: number; headings: number; tables: number; list_items: number; code_blocks: number; characters: number; pages?: number };
+  warnings: string[];
+}
