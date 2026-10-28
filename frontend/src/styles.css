@@ -329,3 +329,9 @@ table.t { width: 100%; border-collapse: collapse; }
 .diff-line .lbl2 { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); margin-right: 6px; }
 .ai-box { border: 1px solid color-mix(in srgb, var(--violet) 35%, var(--border)); background: color-mix(in srgb, var(--violet-bg) 40%, var(--surface)); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 16px; }
 .ai-box h3 { margin: 10px 0 4px; font-size: 13px; } .ai-box ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.entity-table { margin-top: 6px; } .entity-table + .entity-table { margin-top: 16px; }
+.entity-table h3 { margin: 0 0 6px; font-size: 13.5px; }
+.entity-table .table-scroll { overflow-x: auto; }
+.entity-table td:first-child { min-width: 140px; } .entity-table td:nth-last-child(2) { min-width: 260px; }
+.entity-table .nowrap { white-space: nowrap; }
+.entity-table ul.plain { margin: 0; padding-left: 16px; display: grid; gap: 2px; }

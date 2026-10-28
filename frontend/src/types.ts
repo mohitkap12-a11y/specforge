@@ -111,11 +111,18 @@ export interface CompareSummary {
   from: CompareSide; to: CompareSide; total: number; by_impact: Record<Impact, number>; by_change: Record<string, number>;
   roots: { sections_added: number; sections_removed: number; tables_added: number; tables_removed: number };
   matched: { sections: number; tables: number }; normative: { added: number; removed: number; strength_changed: number }; chapters: CompareChapter[];
+  entities?: Partial<Record<EntityGroup, { total: number; items: CompareEntity[] }>> | null;
+}
+export type EntityGroup = "commands_added" | "commands_modified" | "commands_removed" | "structures_added" | "structures_modified" | "structures_removed";
+export interface CompareEntity {
+  key: string; name: string; opcode: string; impact: Impact; where: string[]; change_count: number; change_ids: number[];
+  changes: { id: number; kind: string; number: string | null; impact: Impact; text: string }[];
 }
 export interface AIPoint { title: string; detail: string; impact: Impact; refs?: { id: number; kind: string; number: string | null; title: string }[] }
 export interface CompareAI {
   overview: string; highlights: AIPoint[]; breaking: string[]; upgrade_notes: string[];
   chapters: { chapter: string; title: string; headline: string; points: AIPoint[]; changes: number }[];
+  entities?: Partial<Record<EntityGroup, Record<string, string>>>;
   meta: { provider?: string; model?: string; prompt_version?: string }; stats: Record<string, number>;
 }
 export interface Comparison { id: number; created: string; summary: CompareSummary; overview: string; ai: CompareAI | null }

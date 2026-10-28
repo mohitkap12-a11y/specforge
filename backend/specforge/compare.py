@@ -21,6 +21,7 @@ import re
 import sqlite3
 from typing import Any
 
+from . import compare_entities
 from .core.db import jloads, row, rows
 from .ingest import store
 from .ingest.normalize import normative_info, split_sentences
@@ -491,7 +492,9 @@ def compare_irs(ira: dict, irb: dict) -> dict[str, Any]:
     changes.sort(key=sort_key)
     for i, c in enumerate(changes, 1):
         c["ord"] = i
-    return {"summary": summarise(ira, irb, changes, len(pairs), len(tpairs)), "changes": changes}
+    summary = summarise(ira, irb, changes, len(pairs), len(tpairs))
+    summary["entities"] = compare_entities.build(ira, irb, changes)
+    return {"summary": summary, "changes": changes}
 
 
 def summarise(ira: dict, irb: dict, changes: list[dict], n_sections_matched: int, n_tables_matched: int) -> dict[str, Any]:
@@ -598,7 +601,7 @@ def run_comparison(conn: sqlite3.Connection, run_a: int, run_b: int, progress=No
         "INSERT INTO compare_change(compare_id,ord,kind,change,impact,score,chapter,number_from,number_to,title,nested,detail_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
         [(cid, c["ord"], c["kind"], c["change"], c["impact"], c["score"], c["chapter"], c.get("number_from"), c.get("number_to"), c["title"],
           1 if c.get("nested") else 0,
-          json.dumps({k: v for k, v in c.items() if k in ("details", "title_from", "moved", "normative")})) for c in res["changes"]])
+          json.dumps({k: v for k, v in c.items() if k in ("details", "title_from", "moved", "normative", "norm")})) for c in res["changes"]])
     conn.commit()
     return cid
 
@@ -617,13 +620,39 @@ def get_comparison(conn: sqlite3.Connection, cid: int) -> dict | None:
     if not r:
         return None
     summary = jloads(r["summary_json"], {})
+    if "entities" not in summary:       # stored before the command / structure tables existed: derive them once and keep them
+        summary["entities"] = _backfill_entities(conn, cid, r["run_a"], r["run_b"])
+        if summary["entities"] is not None:
+            conn.execute("UPDATE spec_compare SET summary_json=? WHERE id=?", (json.dumps(summary), cid))
+            conn.commit()
     return {"id": cid, "created": r["created"], "summary": summary, "overview": quick_overview(summary), "ai": jloads(r["ai_json"], None)}
+
+
+def _backfill_entities(conn: sqlite3.Connection, cid: int, run_a: int, run_b: int) -> dict | None:
+    try:
+        ira, irb = store.load_ir(conn, run_a), store.load_ir(conn, run_b)
+    except KeyError:            # a parse run was deleted since: the tables cannot be derived any more
+        return None
+    return compare_entities.build(ira, irb, all_changes(conn, cid))
+
+
+def all_changes(conn: sqlite3.Connection, cid: int) -> list[dict]:
+    out, off = [], 0
+    while True:
+        res = query_changes(conn, cid, offset=off, limit=1000)
+        out += res["items"]
+        off += 1000
+        if off >= res["total"]:
+            return out
 
 
 def query_changes(conn: sqlite3.Connection, cid: int, kind: str | None = None, impact: str | None = None, change: str | None = None,
                   chapter: str | None = None, q: str | None = None, nested: bool = True, offset: int = 0, limit: int = 50,
-                  sort: str = "document") -> dict[str, Any]:
+                  sort: str = "document", ids: list[int] | None = None) -> dict[str, Any]:
     where, args = ["compare_id=?"], [cid]
+    if ids is not None:
+        where.append(f"ord IN ({','.join('?' * len(ids))})" if ids else "0")
+        args += list(ids)
     for col, val in (("kind", kind), ("impact", impact), ("change", change), ("chapter", chapter)):
         if val:
             where.append(f"{col}=?")
@@ -658,6 +687,40 @@ def _bullet_sentence(s: dict, kind: str) -> str:
     return f"- **{kind}**{' (' + s['strength'] + ')' if s.get('strength') else ''}: {s['text']}"
 
 
+ENTITY_TITLES = {"commands_added": "New commands", "commands_modified": "Commands modified", "commands_removed": "Commands removed",
+                 "structures_added": "New data structures", "structures_modified": "Data structures modified",
+                 "structures_removed": "Data structures removed"}
+
+
+def _md_cell(s: str) -> str:
+    return re.sub(r"\s+", " ", str(s or "")).replace("|", "\\|").strip()
+
+
+def _entity_markdown(entities: dict | None, ai: dict) -> list[str]:
+    if not entities:
+        return []
+    out = ["## Commands and data structures", ""]
+    for g, title in ENTITY_TITLES.items():
+        grp = entities.get(g) or {"total": 0, "items": []}
+        if g.endswith("_removed") and not grp["total"]:
+            continue
+        out += [f"### {title} ({grp['total']})", ""]
+        if not grp["items"]:
+            out += ["None.", ""]
+            continue
+        cmd = g.startswith("commands")
+        out += [f"| {'Command' if cmd else 'Structure'} |{' Opcode |' if cmd else ''} Impact | What changed | Where |",
+                f"| --- |{' --- |' if cmd else ''} --- | --- | --- |"]
+        for e in grp["items"]:
+            what = (ai.get(g) or {}).get(e["key"]) or "; ".join(c["text"] for c in e["changes"][:4])
+            out.append(f"| {_md_cell(e['name'])} |{(' ' + _md_cell(e['opcode']) + ' |') if cmd else ''} {e['impact']} | {_md_cell(what)} | "
+                       f"{_md_cell(', '.join(e['where'][:6]))} |")
+        if grp["total"] > len(grp["items"]):
+            out.append(f"\n_Only the first {len(grp['items'])} of {grp['total']} are listed._")
+        out.append("")
+    return out
+
+
 def export_markdown(conn: sqlite3.Connection, cid: int) -> str:
     comp = get_comparison(conn, cid)
     if comp is None:
@@ -675,6 +738,7 @@ def export_markdown(conn: sqlite3.Connection, cid: int) -> str:
         if ai.get("upgrade_notes"):
             out += ["### What to do next", ""] + [f"- {u}" for u in ai["upgrade_notes"]] + [""]
         out += ["_AI summaries describe the detected changes; the lists below are the authoritative record._", ""]
+    out += _entity_markdown(s.get("entities"), (ai or {}).get("entities") or {})
     bi = s["by_impact"]
     out += ["## Counts", "", "| Impact | Changes |", "| --- | --- |"] + [f"| {i} | {bi[i]} |" for i in IMPACTS] + [""]
     out += ["## By chapter", "", "| Chapter | Title | Changes | Breaking | New | Changed |", "| --- | --- | --- | --- | --- | --- |"]

@@ -537,3 +537,200 @@ def test_ai_digest_includes_changes_inside_new_sections(conn, tmp_path):
 
     compare_ai.summarize(conn, cid, LLMService(conn, settings(), provider=Fake([reply])))
     assert any("Child section" in m and "shall do a new thing" in m for m in seen)
+
+
+# ----------------------------------------------------------------------------- commands and data structures
+
+def v_entities():
+    """v_new plus command and structure level changes: an opcode added (with its section), one removed and one edited, a field added
+    to a data structure and a new data structure."""
+    out = []
+    for b in v_new():
+        if b[0] == "table" and b[1].startswith("Figure 100"):
+            rows = [list(r) for r in b[3] if r[2] != "Abort"]
+            rows = [["0Dh", "M", "Namespace Management"] if r[0] == "0Dh" else r for r in rows] + [["19h", "O", "Directive Send"]]
+            out.append(("table", b[1], b[2], rows, b[4]))
+        elif b[0] == "table" and b[1].startswith("Figure 104"):
+            rows = [list(r) for r in b[3]] + [["23:16", "M", "Namespace Utilization (NUSE): This field indicates the current number of logical blocks allocated."]]
+            out.append(("table", b[1], b[2], rows, b[4]))
+            out += [("h", 3, "5.2.2 Identify Controller data structure"),
+                    ("p", "The Identify Controller data structure describes the controller."),
+                    ("table", "Figure 105: Identify Controller Data Structure", ["Bytes", "O/M", "Description"],
+                     [["01:00", "M", "PCI Vendor ID (VID): The vendor identifier."], ["03:02", "M", "PCI Subsystem Vendor ID (SSVID): The subsystem vendor."]], None)]
+        else:
+            out.append(b)
+    out += [("h", 2, "5.7 Directive Send command"),
+            ("p", "The Directive Send command transfers data related to a specific directive. The controller shall abort an unsupported directive."),
+            ("table", "Figure 150: Directive Send – Command Dword 11", ["Bits", "Description"],
+             [["15:08", "Directive Type (DTYPE): This field specifies the directive type."], ["07:00", "Directive Operation (DOPER): The operation."]], None)]
+    return out
+
+
+@pytest.fixture()
+def entity_versions(conn, tmp_path):
+    ids = {}
+    for ver, blocks in (("2.3", base_spec()), ("2.4", v_entities())):
+        p = write_docx(tmp_path / f"ent-{ver}.docx", blocks, numbered_text=True)
+        d = store.register_document(conn, p, "nvme-base", ver)
+        ids[ver] = store.run_parse(conn, d["id"], workers=1, activate=True)
+    return ids
+
+
+def _names(ent, group):
+    return {e["name"]: e for e in ent[group]["items"]}
+
+
+def test_command_and_structure_tables(conn, entity_versions):
+    cid, ch, comp = run(conn, entity_versions)
+    ent = comp["summary"]["entities"]
+    added = _names(ent, "commands_added")
+    assert set(added) == {"Directive Send"}
+    ds = added["Directive Send"]
+    assert ds["opcode"] == "Admin 19h" and ds["impact"] == "new" and {"Fig 100", "§5.7", "Fig 150"} <= set(ds["where"])
+    assert any("opcode 19h added" in c["text"] for c in ds["changes"])
+    assert set(_names(ent, "commands_removed")) == {"Abort"}
+    mod = _names(ent, "commands_modified")
+    assert {"Identify", "Namespace Management", "Namespace Attachment"} <= set(mod)
+    assert mod["Identify"]["impact"] == "breaking"                        # a CDW11 field was removed
+    assert {"Fig 101", "Fig 102", "Fig 103", "§5.2"} <= set(mod["Identify"]["where"])
+    assert any("O/M: O → M" in c["text"] for c in mod["Namespace Management"]["changes"])
+    assert mod["Namespace Management"]["impact"] == "changed"           # not the opcode table's overall impact (a row was removed)
+    assert "Get Log Page" not in mod and "Set Features" not in mod        # only renumbered: not a change to the command
+    s_add = _names(ent, "structures_added")
+    assert set(s_add) == {"Identify Controller Data Structure"}           # its section and its table are one structure
+    assert {"§5.2.2", "Fig 105"} <= set(s_add["Identify Controller Data Structure"]["where"])
+    s_mod = _names(ent, "structures_modified")
+    assert set(s_mod) == {"Identify Namespace Data Structure"}
+    assert "rows added: 23:16" in s_mod["Identify Namespace Data Structure"]["changes"][0]["text"]
+    assert "Identify Namespace Data Structure" not in {e["name"] for g in ("commands_modified",) for e in ent[g]["items"]}
+    # every cited change exists in the change list
+    ids = {c["id"] for c in ch}
+    assert all(r["id"] in ids for g in ent.values() for e in g["items"] for r in e["changes"])
+    shown = compare.query_changes(conn, cid, ids=[r["id"] for r in ds["changes"]])
+    assert shown["total"] == len(ds["changes"])
+    md = compare.export_markdown(conn, cid)
+    assert "### New commands (1)" in md and "| Directive Send | Admin 19h | new |" in md
+    assert "### Data structures modified (1)" in md and "### Commands removed (1)" in md
+
+
+def test_entity_tables_are_backfilled_for_older_comparisons(conn, entity_versions):
+    import json as _json
+    cid, ch, comp = run(conn, entity_versions)
+    s = comp["summary"]
+    expected = s.pop("entities")
+    conn.execute("UPDATE spec_compare SET summary_json=? WHERE id=?", (_json.dumps(s), cid))
+    conn.commit()
+    again = compare.get_comparison(conn, cid)["summary"]["entities"]
+    assert again == expected
+    assert "entities" in _json.loads(conn.execute("SELECT summary_json FROM spec_compare WHERE id=?", (cid,)).fetchone()[0])
+
+
+def test_ai_describes_entity_rows_and_drops_unknown_ids(conn, entity_versions):
+    from llm_helpers import Fake, settings
+    from specforge import compare_ai
+    from specforge.llm.service import LLMService
+
+    cid, ch, comp = run(conn, entity_versions)
+    base = _fake_model().replies[0]
+    seen = []
+
+    def reply(messages):
+        if messages[0]["content"].startswith("You describe the commands"):
+            seen.append(messages[1]["content"])
+            return json.dumps({"rows": [{"id": "E1", "summary": "Described by the model."}, {"id": "E99", "summary": "invented"}]})
+        return base(messages)
+
+    stats = compare_ai.summarize(conn, cid, LLMService(conn, settings(), provider=Fake([reply])))
+    assert stats["failed"] == 0 and stats["entities_described"] == 4
+    assert any("NEW command 'Directive Send' (opcode Admin 19h)" in s for s in seen)
+    assert any("+ row: 23:16" in s for s in seen)                         # the structure digest shows the edit itself
+    ai = compare.get_comparison(conn, cid)["ai"]["entities"]
+    ent = comp["summary"]["entities"]
+    assert ai["commands_added"] == {ent["commands_added"]["items"][0]["key"]: "Described by the model."}
+    assert set(ai) == {"commands_added", "commands_modified", "structures_added", "structures_modified"}
+    md = compare.export_markdown(conn, cid)
+    assert "| Directive Send | Admin 19h | new | Described by the model. |" in md
+
+
+def test_entity_description_failure_keeps_the_summary(conn, entity_versions):
+    from llm_helpers import Fake, settings
+    from specforge import compare_ai
+    from specforge.llm.service import LLMService
+
+    cid, ch, comp = run(conn, entity_versions)
+    base = _fake_model().replies[0]
+    reply = lambda m: "not json" if m[0]["content"].startswith("You describe the commands") else base(m)  # noqa: E731
+    stats = compare_ai.summarize(conn, cid, LLMService(conn, settings(), provider=Fake([reply])))
+    assert stats["failed"] == 4 and stats["summarised"] >= 1
+    ai = compare.get_comparison(conn, cid)["ai"]
+    assert ai["overview"] and ai["entities"] == {}
+
+
+def test_api_change_ids_filter(client, tmp_path):
+    r = client.get("/api/compare/1/changes?ids=1,x")
+    assert r.status_code in (404, 422)
+
+
+def _ir(sections, tables, version):
+    secs = {n: {"number": n, "title": t, "text": txt, "parent": n.rsplit(".", 1)[0] if "." in n else None} for n, t, txt in sections}
+    tabs = {lbl: {"label": lbl, "caption": cap, "header": h, "rows": r, "section": sec} for lbl, cap, h, r, sec in tables}
+    return {"run_id": 1 if version == "a" else 2, "family": "nvme-base", "version": version, "sections": secs, "section_order": list(secs),
+            "tables": tabs, "requirements": []}
+
+
+def _ent(ira, irb):
+    return compare.compare_irs(ira, irb)["summary"]["entities"]
+
+
+OPC_HDR = ["Opcode", "O/M", "Command"]
+
+
+def test_entity_review_round_opcode_tables_from_full_rows():
+    many = [[f"{i:02X}h", "O", f"Test Command N{i}"] for i in range(0x20, 0x20 + 60)]
+    a = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", OPC_HDR,
+                                                [["06h", "M", "Identify"], ["08h", "M", "Abort"]], "5")], "a")
+    b = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", OPC_HDR,
+                                                [["06h", "M", "Identify"], ["08h", "M", "Reserved"]] + many, "5")], "b")
+    ent = _ent(a, b)
+    assert ent["commands_added"]["total"] == 60                              # more rows than the change details keep (40)
+    assert {e["name"] for e in ent["commands_removed"]["items"]} == {"Abort"}   # an opcode that became Reserved is a removed command
+
+
+def test_entity_review_round_command_first_layout_and_padded_rows():
+    hdr = ["Command", "Opcode", "O/M"]
+    a = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", hdr, [["Identify", "06h", "O"]], "5")], "a")
+    b = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", hdr, [["Identify", "06h", "M"]], "5")], "b")
+    mod = {e["name"]: e for e in _ent(a, b)["commands_modified"]["items"]}
+    assert "O/M: O → M" in mod["Identify"]["changes"][0]["text"]
+    pad = ["", "Opcode", "O/M", "Command"]          # merged-cell padding: an always-empty first column
+    a = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", pad, [["", "06h", "M", "Identify"]], "5")], "a")
+    b = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", pad,
+                                                [["", "06h", "M", "Identify"], ["", "19h", "O", "Directive Send"]], "5")], "b")
+    assert {e["name"] for e in _ent(a, b)["commands_added"]["items"]} == {"Directive Send"}
+
+
+def test_entity_review_round_added_opcode_table_and_set_commands():
+    a = _ir([("5", "Admin Command Set", ""), ("5.4", "Set Features command", "The Set Features command sets a feature.")], [], "a")
+    b = _ir([("5", "Admin Command Set", ""), ("5.4", "Set Features command", "The Set Features command sets a feature. The controller shall save it.")],
+            [("100", "Figure 100: Opcodes for Admin Commands", OPC_HDR, [["09h", "M", "Set Features"], ["19h", "O", "Directive Send"]], "5")], "b")
+    ent = _ent(a, b)
+    assert {e["name"] for e in ent["commands_added"]["items"]} == {"Directive Send"}   # from an opcode table that is new as a whole
+    mod = {e["name"]: e for e in ent["commands_modified"]["items"]}
+    assert "§5.4" in mod["Set Features"]["where"]                         # 'Set' in a command name is not a command-set heading
+
+
+def test_entity_review_round_renamed_and_edited_command_section_is_modified():
+    a = _ir([("5", "Admin Command Set", ""), ("5.9", "Namespace Mgmt command", "The command manages namespaces. It may fail.")], [], "a")
+    b = _ir([("5", "Admin Command Set", ""), ("5.9", "Namespace Mgmt. command", "The command manages namespaces. The controller shall log it.")], [], "b")
+    ent = _ent(a, b)
+    assert not ent["commands_added"]["items"] and ent["commands_modified"]["total"] == 1     # punctuation is not a new name
+    b["sections"]["5.9"]["title"] = "Namespace Management command"
+    ent = _ent(a, b)
+    assert not ent["commands_added"]["items"] and ent["commands_modified"]["total"] == 1
+
+
+def test_entity_review_round_renumbered_opcode_table():
+    a = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", OPC_HDR, [["06h", "M", "Identify"], ["08h", "M", "Abort"]], "5")], "a")
+    b = _ir([("5", "Admin Command Set", "")], [("110", "Figure 110: Opcodes for Admin Commands", OPC_HDR, [["06h", "M", "Identify"]], "5")], "b")
+    removed = _ent(a, b)["commands_removed"]["items"]
+    assert [e["name"] for e in removed] == ["Abort"] and "Fig 110" in removed[0]["where"]

@@ -210,9 +210,11 @@ def create_app() -> FastAPI:
     @app.get("/api/compare/{cid}/changes")
     def compare_changes(cid: int, kind: str | None = None, impact: str | None = None, change: str | None = None, chapter: str | None = None,
                         q: str | None = None, nested: bool = True, sort: str = Query("document", pattern="^(document|importance)$"),
-                        offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500)):
+                        offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500),
+                        ids: str | None = Query(None, pattern=r"^\d+(,\d+)*$", description="only these change ids (comma separated)")):
         _compare_or_404(cid)
-        return compare.query_changes(conn(), cid, kind, impact, change, chapter, q, nested, offset, limit, sort)
+        return compare.query_changes(conn(), cid, kind, impact, change, chapter, q, nested, offset, limit, sort,
+                                     [int(x) for x in ids.split(",")] if ids else None)
 
     @app.get("/api/compare/{cid}/export")
     def compare_export(cid: int):
