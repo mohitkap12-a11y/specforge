@@ -14,7 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from . import compare, eventlog
+from . import compare, compare_entities, eventlog
 from .llm.base import LLMError
 from .llm.service import LLMService
 
@@ -23,6 +23,10 @@ MAX_CHAPTERS = 30           # chapters summarised individually (the most affecte
 PER_CHAPTER = 25            # changes shown to the model per chapter
 CHAPTER_CHARS = 9000
 OVERALL_CHARS = 9000
+ENTITY_PROMPT_VERSION = "compare-entities-v1"
+ENTITY_GROUPS = ("commands_added", "commands_modified", "structures_added", "structures_modified")
+ENTITY_ROWS = 30            # rows described per table (the most important first); the rest keep their factual line
+ENTITY_CHARS = 9000
 
 Impact = Literal["breaking", "new", "changed", "clarification"]
 
@@ -44,6 +48,15 @@ class OverallSummary(BaseModel):
     highlights: list[Point] = []
     breaking: list[str] = Field(default=[], description="changes that can break existing implementations or tests, one line each")
     upgrade_notes: list[str] = Field(default=[], description="what an implementer or test author should review or update, one line each")
+
+
+class EntityLine(BaseModel):
+    id: str = Field(description="the row id (E1, E2 ...)")
+    summary: str = Field(description="one or two sentences: what is new or what changed, with exact field names and values")
+
+
+class EntityLines(BaseModel):
+    rows: list[EntityLine] = []
 
 
 CHAPTER_SYSTEM = """You compare two versions of a technical standard (storage/NVMe) and explain the differences for engineers.
@@ -72,6 +85,16 @@ Reply with one JSON object:
 - "upgrade_notes": what an implementer or test author should review or update, one line each.
 
 Rules: use only what CHAPTERS states; do not add facts. Output JSON only."""
+
+
+ENTITY_SYSTEM = """You describe the commands and data structures that changed between two versions of a technical standard (storage/NVMe).
+
+You are given ROWS: numbered items (E1, E2 ...), each a command or data structure, with the detected changes it is built from.
+Reply with one JSON object: {"rows": [{"id": "E1", "summary": "..."}, ...]}, one entry per row you were given.
+Each summary is 1-2 sentences for an implementer or test author: for a NEW item what it is for and its main fields; for a
+MODIFIED item exactly what is different (fields added, removed, made reserved, values or requirement levels changed).
+
+Rules: describe only what the changes show; never invent a field, value or opcode. Quote names and values exactly. Output JSON only."""
 
 
 def _clip(s: str, n: int) -> str:
@@ -139,13 +162,13 @@ def summarize(conn: sqlite3.Connection, cid: int, svc: LLMService, redo: bool = 
     s = comp["summary"]
     cfg = svc.task_cfg("generate")
     chapters = [c for c in s["chapters"] if c["total"] - c["editorial"] > 0][:MAX_CHAPTERS]
-    stats = {"chapters": len(chapters), "summarised": 0, "failed": 0, "dropped_refs": 0, "dropped_points": 0}
+    stats = {"chapters": len(chapters), "summarised": 0, "failed": 0, "dropped_refs": 0, "dropped_points": 0, "entities_described": 0}
     eventlog.emit("info", "agent", f"Compare summariser starting: {len(chapters)} chapter(s), model {cfg['provider']}/{cfg['model'] or '(unset)'}", compare_id=cid)
     done: list[dict] = []
     meta: dict = {}
     for n, ch in enumerate(chapters):
         if progress:
-            progress(f"summarising chapter {ch['chapter']}", n, len(chapters) + 1)
+            progress(f"summarising chapter {ch['chapter']}", n, len(chapters) + 2)
         items = compare.query_changes(conn, cid, chapter=ch["chapter"], nested=True, sort="importance", limit=PER_CHAPTER * 3)["items"]
         items = [c for c in items if c["impact"] != "editorial"][:PER_CHAPTER]
         if not items:
@@ -175,7 +198,7 @@ def summarize(conn: sqlite3.Connection, cid: int, svc: LLMService, redo: bool = 
                      "changes": ch["total"]})
         stats["summarised"] += 1
     if progress:
-        progress("writing the overall summary", len(chapters), len(chapters) + 1)
+        progress("writing the overall summary", len(chapters), len(chapters) + 2)
     overall = {"overview": "", "highlights": [], "breaking": [], "upgrade_notes": []}
     if done:
         lines = []
@@ -205,7 +228,9 @@ def summarize(conn: sqlite3.Connection, cid: int, svc: LLMService, redo: bool = 
         raise LLMError("the model produced no summary (see the Activity log for the errors)")
     if not overall["overview"]:     # the reduce step failed: fall back to the chapter headlines so the work is not lost
         overall["overview"] = " ".join(ch["headline"] for ch in done[:6])
-    ai = {**overall, "chapters": done, "meta": {**meta, "prompt_version": PROMPT_VERSION}, "stats": stats}
+    entities = _describe_entities(conn, cid, comp["summary"].get("entities") or {}, svc, stats,
+                                  (lambda m, _i, _t: progress(m, len(chapters) + 1, len(chapters) + 2)) if progress else None)
+    ai = {**overall, "chapters": done, "entities": entities, "meta": {**meta, "prompt_version": PROMPT_VERSION}, "stats": stats}
     conn.execute("UPDATE spec_compare SET ai_json=? WHERE id=?", (json.dumps(ai), cid))
     conn.commit()
     eventlog.emit("info" if not stats["failed"] else "warn", "agent", "Compare summariser finished: " + ", ".join(f"{v} {k}" for k, v in stats.items()), **stats)
@@ -214,3 +239,50 @@ def summarize(conn: sqlite3.Connection, cid: int, svc: LLMService, redo: bool = 
 
 def _clip_block(text: str, n: int) -> str:
     return text if len(text) <= n else text[:n].rsplit("\n", 1)[0]
+
+
+def _entity_digest(group: str, items: list[dict], by_id: dict[int, dict]) -> tuple[str, list[dict]]:
+    verb = "NEW" if group.endswith("_added") else "MODIFIED"
+    out, shown, total = [], [], 0
+    for e in items[:ENTITY_ROWS]:
+        lines = [f"E{len(shown) + 1}: {verb} {'command' if group.startswith('commands') else 'structure'} '{e['name']}'"
+                 + (f" (opcode {e['opcode']})" if e.get("opcode") else "") + f" [{e['impact']}]"]
+        for ref in e["changes"][:4]:
+            c = by_id.get(ref["id"])
+            lines.append("  " + ref["text"])
+            if c is not None and ref["text"] == compare_entities.describe(c):      # the change itself: show what it says
+                lines += ["    " + ln for ln in _describe(c).split("\n")[1:6]]
+        txt = "\n".join(lines)
+        if total + len(txt) > ENTITY_CHARS and shown:
+            break
+        shown.append(e)
+        out.append(txt)
+        total += len(txt)
+    return "\n".join(out), shown
+
+
+def _describe_entities(conn: sqlite3.Connection, cid: int, entities: dict, svc: LLMService, stats: dict, progress=None) -> dict[str, dict[str, str]]:
+    """{group: {row key: one-line description}} for the command / structure tables. A failure leaves the factual lines in place."""
+    groups = [g for g in ENTITY_GROUPS if (entities.get(g) or {}).get("items")]
+    if not groups:
+        return {}
+    want = {ref["id"] for g in groups for e in entities[g]["items"][:ENTITY_ROWS] for ref in e["changes"][:4]}
+    by_id = {c["id"]: c for c in compare.query_changes(conn, cid, ids=sorted(want), limit=max(len(want), 1))["items"]} if want else {}
+    out: dict[str, dict[str, str]] = {}
+    for n, g in enumerate(groups):
+        if progress:
+            progress(f"describing {g.replace('_', ' ')}", n, len(groups))
+        text, shown = _entity_digest(g, entities[g]["items"], by_id)
+        try:
+            res, _meta = svc.generate_model("generate", [{"role": "system", "content": ENTITY_SYSTEM}, {"role": "user", "content": f"ROWS:\n{text}"}],
+                                            EntityLines, ENTITY_PROMPT_VERSION)
+        except LLMError as e:
+            stats["failed"] += 1
+            eventlog.emit("error", "agent", f"{g.replace('_', ' ')}: model failed: {str(e)[:200]}", compare_id=cid, error=str(e))
+            continue
+        keys = {f"E{i}": e["key"] for i, e in enumerate(shown, 1)}
+        got = {keys[r.id.strip().upper()]: _clip(r.summary, 600) for r in res.rows if r.id.strip().upper() in keys and r.summary.strip()}
+        stats["dropped_refs"] += sum(1 for r in res.rows if r.id.strip().upper() not in keys)
+        stats["entities_described"] += len(got)
+        out[g] = got
+    return out

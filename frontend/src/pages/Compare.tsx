@@ -6,7 +6,7 @@ import { api } from "../api";
 import { Empty, ErrorNote, Loading, PageHeader, Pager, Switch } from "../components/ui";
 import { useJobs } from "../components/jobs";
 import { compareVersions, splitMarks } from "../util";
-import type { AIPoint, CompareChange, CompareOption, Comparison, Impact } from "../types";
+import type { AIPoint, CompareChange, CompareEntity, CompareOption, Comparison, EntityGroup, Impact } from "../types";
 
 const IMPACTS: { key: Impact; label: string; hint: string }[] = [
   { key: "breaking", label: "Breaking", hint: "May break implementations or tests: a shall weakened or removed, a field removed or made reserved" },
@@ -141,6 +141,67 @@ function Summary({ comp }: { comp: Comparison }) {
   );
 }
 
+const ENTITY_TABLES: { group: EntityGroup; title: string; empty: string }[] = [
+  { group: "commands_added", title: "New commands", empty: "No command was added." },
+  { group: "commands_modified", title: "Commands modified", empty: "No existing command changed." },
+  { group: "structures_added", title: "New data structures", empty: "No data structure was added." },
+  { group: "structures_modified", title: "Data structures modified", empty: "No existing data structure changed." },
+  { group: "commands_removed", title: "Commands removed", empty: "" },
+  { group: "structures_removed", title: "Data structures removed", empty: "" },
+];
+
+function EntityTables({ comp, selected, onSelect }: { comp: Comparison; selected: string; onSelect: (key: string, e: CompareEntity | null) => void }) {
+  const ent = comp.summary.entities;
+  if (!ent) {
+    return <div className="card"><div className="card-head"><h2 style={{ margin: 0 }}>Commands and data structures</h2></div>
+      <div className="muted small">Not available: one of the compared parse runs no longer exists. Compare the versions again to get these tables.</div></div>;
+  }
+  const ai = comp.ai?.entities ?? {};
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2 style={{ margin: 0 }}>Commands and data structures</h2>
+      </div>
+      <p className="muted small" style={{ margin: "0 0 10px" }}>
+        {comp.ai?.entities ? "Descriptions written by AI from the changes they list. " : "Generate the AI summary to get a written description of each row. "}
+        Select a row to list its changes below.</p>
+      {ENTITY_TABLES.map(({ group, title, empty }) => {
+        const g = ent[group] ?? { total: 0, items: [] };
+        if (!empty && !g.total) return null;
+        const cmd = group.startsWith("commands");
+        return (
+          <div key={group} className="entity-table">
+            <h3>{title} <span className="muted">({g.total})</span></h3>
+            {g.items.length === 0 ? <div className="muted small">{empty}</div> : (
+              <div className="table-scroll">
+                <table className="t">
+                  <thead><tr><th>{cmd ? "Command" : "Structure"}</th>{cmd && <th>Opcode</th>}<th>Impact</th><th>{group.endsWith("_added") ? "What it is" : "What changed"}</th><th>Where</th></tr></thead>
+                  <tbody>{g.items.map((e) => {
+                    const sel = `${group}:${e.key}`;
+                    const text = ai[group]?.[e.key];
+                    return (
+                      <tr key={e.key} className={`click ${selected === sel ? "sel" : ""}`} aria-selected={selected === sel}
+                        onClick={() => onSelect(selected === sel ? "" : sel, selected === sel ? null : e)}>
+                        <td><strong>{e.name}</strong></td>{cmd && <td className="nowrap">{e.opcode || "—"}</td>}
+                        <td><ImpactBadge impact={e.impact} /></td>
+                        <td>{text ? <>{text}<div className="muted small">{e.change_count} change(s)</div></> : (
+                          <ul className="plain">{e.changes.slice(0, 4).map((c, i) => <li key={i}>{c.text}</li>)}
+                            {e.change_count > 4 && <li className="muted small">+{e.change_count - 4} more</li>}</ul>)}</td>
+                        <td className="small">{e.where.slice(0, 6).join(", ")}{e.where.length > 6 ? " …" : ""}</td>
+                      </tr>
+                    );
+                  })}</tbody>
+                </table>
+              </div>
+            )}
+            {g.total > g.items.length && <div className="muted small">Showing the first {g.items.length} of {g.total}.</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function Result({ id }: { id: number }) {
   const comp = useQuery({ queryKey: ["comparison", id], queryFn: () => api.comparison(id) });
   const [impact, setImpact] = useState<Impact | "">("");
@@ -150,8 +211,10 @@ function Result({ id }: { id: number }) {
   const [sort, setSort] = useState<"document" | "importance">("importance");
   const [flat, setFlat] = useState(false);       // include changes that are part of an added/removed parent
   const [offset, setOffset] = useState(0);
-  useEffect(() => { setOffset(0); }, [impact, kind, chapter, q, sort, flat, id]);
-  const params = { impact: impact || undefined, kind: kind || undefined, chapter: chapter || undefined, q: q || undefined, sort, nested: flat ? "true" : "false", offset, limit: PAGE };
+  const [entity, setEntity] = useState<{ key: string; name: string; ids: number[] } | null>(null);   // changes of one table row
+  useEffect(() => { setOffset(0); }, [impact, kind, chapter, q, sort, flat, id, entity]);
+  useEffect(() => { setEntity(null); }, [id]);
+  const params = entity ? { ids: entity.ids.join(","), sort, offset, limit: PAGE } : { impact: impact || undefined, kind: kind || undefined, chapter: chapter || undefined, q: q || undefined, sort, nested: flat ? "true" : "false", offset, limit: PAGE };
   const list = useQuery({ queryKey: ["compare-changes", id, params], queryFn: () => api.compareChanges(id, params), placeholderData: (p) => p });
   if (comp.isLoading) return <Loading q={comp} />;
   if (!comp.data) return <ErrorNote error={comp.error} />;
@@ -160,6 +223,10 @@ function Result({ id }: { id: number }) {
     <>
       <h2 style={{ margin: "20px 0 10px" }}>{s.to.family}: {s.from.version} → {s.to.version}</h2>
       <Summary comp={comp.data} />
+      <EntityTables comp={comp.data} selected={entity?.key ?? ""} onSelect={(key, e) => {
+        setEntity(e ? { key, name: e.name, ids: e.change_ids ?? e.changes.map((c) => c.id) } : null);
+        if (e) setTimeout(() => document.getElementById("cmp-changes")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+      }} />
       <div className="impacts">
         {IMPACTS.map((i) => (
           <button key={i.key} className={`impact-card ${i.key} ${impact === i.key ? "on" : ""}`} title={i.hint} aria-pressed={impact === i.key}
@@ -176,14 +243,20 @@ function Result({ id }: { id: number }) {
             </tr>))}</tbody>
         </table>
       </div>
-      <div className="cmp-filters">
+      {entity && (
+        <div className="cmp-filters" id="cmp-changes">
+          <span>Changes behind <strong>{entity.name}</strong></span><span className="grow" />
+          <button className="sm" onClick={() => setEntity(null)}>Show all changes</button>
+        </div>
+      )}
+      {!entity && <div className="cmp-filters" id="cmp-changes">
         <select aria-label="Kind" value={kind} onChange={(e) => setKind(e.target.value)}><option value="">Sections and tables</option><option value="section">Sections</option><option value="table">Tables / figures</option></select>
         <select aria-label="Chapter" value={chapter} onChange={(e) => setChapter(e.target.value)}><option value="">All chapters</option>{s.chapters.map((c) => <option key={c.chapter} value={c.chapter}>{c.chapter} {c.title}</option>)}</select>
         <input aria-label="Search changes" placeholder="Search title, number or text…" value={q} onChange={(e) => setQ(e.target.value)} />
         <select aria-label="Order" value={sort} onChange={(e) => setSort(e.target.value as "document" | "importance")}><option value="importance">Most important first</option><option value="document">Document order</option></select>
         <Switch checked={flat} onChange={setFlat} label="Include parts of new/removed sections" />
         <span className="grow" /><span className="muted small">{list.data?.total ?? 0} change(s)</span>
-      </div>
+      </div>}
       <ErrorNote error={list.error} />
       {list.data?.items.map((c) => <ChangeRow key={c.id} c={c} />)}
       {list.data && list.data.total === 0 && <Empty title="No changes match">{s.total === 0 ? "The two versions have the same content." : "Clear a filter to see more."}</Empty>}
