@@ -669,3 +669,68 @@ def test_entity_description_failure_keeps_the_summary(conn, entity_versions):
 def test_api_change_ids_filter(client, tmp_path):
     r = client.get("/api/compare/1/changes?ids=1,x")
     assert r.status_code in (404, 422)
+
+
+def _ir(sections, tables, version):
+    secs = {n: {"number": n, "title": t, "text": txt, "parent": n.rsplit(".", 1)[0] if "." in n else None} for n, t, txt in sections}
+    tabs = {lbl: {"label": lbl, "caption": cap, "header": h, "rows": r, "section": sec} for lbl, cap, h, r, sec in tables}
+    return {"run_id": 1 if version == "a" else 2, "family": "nvme-base", "version": version, "sections": secs, "section_order": list(secs),
+            "tables": tabs, "requirements": []}
+
+
+def _ent(ira, irb):
+    return compare.compare_irs(ira, irb)["summary"]["entities"]
+
+
+OPC_HDR = ["Opcode", "O/M", "Command"]
+
+
+def test_entity_review_round_opcode_tables_from_full_rows():
+    many = [[f"{i:02X}h", "O", f"Test Command N{i}"] for i in range(0x20, 0x20 + 60)]
+    a = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", OPC_HDR,
+                                                [["06h", "M", "Identify"], ["08h", "M", "Abort"]], "5")], "a")
+    b = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", OPC_HDR,
+                                                [["06h", "M", "Identify"], ["08h", "M", "Reserved"]] + many, "5")], "b")
+    ent = _ent(a, b)
+    assert ent["commands_added"]["total"] == 60                              # more rows than the change details keep (40)
+    assert {e["name"] for e in ent["commands_removed"]["items"]} == {"Abort"}   # an opcode that became Reserved is a removed command
+
+
+def test_entity_review_round_command_first_layout_and_padded_rows():
+    hdr = ["Command", "Opcode", "O/M"]
+    a = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", hdr, [["Identify", "06h", "O"]], "5")], "a")
+    b = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", hdr, [["Identify", "06h", "M"]], "5")], "b")
+    mod = {e["name"]: e for e in _ent(a, b)["commands_modified"]["items"]}
+    assert "O/M: O → M" in mod["Identify"]["changes"][0]["text"]
+    pad = ["", "Opcode", "O/M", "Command"]          # merged-cell padding: an always-empty first column
+    a = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", pad, [["", "06h", "M", "Identify"]], "5")], "a")
+    b = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", pad,
+                                                [["", "06h", "M", "Identify"], ["", "19h", "O", "Directive Send"]], "5")], "b")
+    assert {e["name"] for e in _ent(a, b)["commands_added"]["items"]} == {"Directive Send"}
+
+
+def test_entity_review_round_added_opcode_table_and_set_commands():
+    a = _ir([("5", "Admin Command Set", ""), ("5.4", "Set Features command", "The Set Features command sets a feature.")], [], "a")
+    b = _ir([("5", "Admin Command Set", ""), ("5.4", "Set Features command", "The Set Features command sets a feature. The controller shall save it.")],
+            [("100", "Figure 100: Opcodes for Admin Commands", OPC_HDR, [["09h", "M", "Set Features"], ["19h", "O", "Directive Send"]], "5")], "b")
+    ent = _ent(a, b)
+    assert {e["name"] for e in ent["commands_added"]["items"]} == {"Directive Send"}   # from an opcode table that is new as a whole
+    mod = {e["name"]: e for e in ent["commands_modified"]["items"]}
+    assert "§5.4" in mod["Set Features"]["where"]                         # 'Set' in a command name is not a command-set heading
+
+
+def test_entity_review_round_renamed_and_edited_command_section_is_modified():
+    a = _ir([("5", "Admin Command Set", ""), ("5.9", "Namespace Mgmt command", "The command manages namespaces. It may fail.")], [], "a")
+    b = _ir([("5", "Admin Command Set", ""), ("5.9", "Namespace Mgmt. command", "The command manages namespaces. The controller shall log it.")], [], "b")
+    ent = _ent(a, b)
+    assert not ent["commands_added"]["items"] and ent["commands_modified"]["total"] == 1     # punctuation is not a new name
+    b["sections"]["5.9"]["title"] = "Namespace Management command"
+    ent = _ent(a, b)
+    assert not ent["commands_added"]["items"] and ent["commands_modified"]["total"] == 1
+
+
+def test_entity_review_round_renumbered_opcode_table():
+    a = _ir([("5", "Admin Command Set", "")], [("100", "Figure 100: Opcodes for Admin Commands", OPC_HDR, [["06h", "M", "Identify"], ["08h", "M", "Abort"]], "5")], "a")
+    b = _ir([("5", "Admin Command Set", "")], [("110", "Figure 110: Opcodes for Admin Commands", OPC_HDR, [["06h", "M", "Identify"]], "5")], "b")
+    removed = _ent(a, b)["commands_removed"]["items"]
+    assert [e["name"] for e in removed] == ["Abort"] and "Fig 110" in removed[0]["where"]

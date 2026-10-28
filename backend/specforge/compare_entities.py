@@ -37,6 +37,11 @@ def _key(name: str) -> str:
     return re.sub(r"[\W_]+", " ", (name or "").lower()).strip()
 
 
+def _ck(name: str) -> str:
+    """Command identity: its name without 'command', case and punctuation ('Namespace Mgmt.' is 'Namespace Mgmt')."""
+    return _key(_cmd_norm(name))
+
+
 def _route_label(iface: str, queue: str, cs: str) -> str:
     if iface == "mi":
         return "MI"
@@ -53,6 +58,7 @@ class _Version:
         self.cmds: dict[str, dict] = {}             # normalised command name -> {name, opcode, route}
         self.by_opcode: dict[tuple, str] = {}       # (route, opcode) -> normalised name
         self.opcode_tables: dict[str, tuple[int, int, str]] = {}   # table label -> (opcode col, name col, route label)
+        self.opcode_rows: dict[tuple, dict] = {}    # (route, opcode) -> {name, table, header, cells}: every command row, compacted
         self.structs: dict[str, str] = {}           # key -> display name
         for label, t in ir["tables"].items():
             if not self._is_opcode_table(t):
@@ -68,14 +74,16 @@ class _Version:
             for r in data:
                 name, opc = self._opcode_row(r, oc, nc)
                 if name:
-                    k = _cmd_norm(name)
+                    k = _ck(name)
                     self.cmds.setdefault(k, {"name": name, "opcode": f"{rl} {opc}", "route": rl})
                     self.by_opcode[(rl, opc)] = k
+                    self.opcode_rows.setdefault((rl, opc), {"name": name, "table": label, "header": header, "cells": [clean(x) for x in r],
+                                                            "cols": (oc, nc)})
         self.cmd_section: dict[str, str] = {}       # section number -> normalised command name that section is about
         for n, s in ir["sections"].items():
             m = _CMD_SECTION.match(clean(s["title"]))
-            if m and not re.search(r"\b(set|sets|overview)\b", m.group("name"), re.I):
-                k = _cmd_norm(s["title"])
+            if m and not re.search(r"\b(?:command\s+sets?|overview)\b", m.group("name"), re.I):
+                k = _ck(s["title"])
                 self.cmds.setdefault(k, {"name": clean(m.group("name")), "opcode": "", "route": ""})
                 self.cmds[k].setdefault("section", n)
                 self.cmd_section[n] = k
@@ -122,8 +130,8 @@ class _Version:
 
     def command_of_table(self, t: dict) -> str | None:
         m = _CAP_CMD.match(norm_title(_name_of(t.get("caption"))))
-        if m and _cmd_norm(m.group("name")) in self.cmds:
-            return _cmd_norm(m.group("name"))
+        if m and _ck(m.group("name")) in self.cmds:
+            return _ck(m.group("name"))
         return self.command_of_section(t.get("section"))
 
     def has_command(self, k: str, opcode_key: tuple | None = None) -> bool:
@@ -227,6 +235,7 @@ def build(ira: dict, irb: dict, changes: list[dict]) -> dict[str, Any]:
         e = entry(group, k, name=name)
         cite(e, c)
 
+    opcode_changes: list[dict] = []
     for c in changes:
         side_b = c["change"] != "removed"
         V, num = (B, c.get("number_to")) if side_b else (A, c.get("number_from"))
@@ -234,8 +243,8 @@ def build(ira: dict, irb: dict, changes: list[dict]) -> dict[str, Any]:
             t = V.ir["tables"].get(num)
             if t is None:
                 continue
-            if num in V.opcode_tables and c["change"] == "modified":
-                _opcode_rows(A, B, c, command)
+            if num in V.opcode_tables:
+                opcode_changes.append(c)
                 continue
             if V.is_struct_table(t):
                 if c["change"] in ("renamed", "modified") and c.get("title_from"):
@@ -252,8 +261,8 @@ def build(ira: dict, irb: dict, changes: list[dict]) -> dict[str, Any]:
         # sections
         if num in V.cmd_section:
             k = V.cmd_section[num]
-            if c["change"] == "renamed" and c.get("title_from"):
-                k_old = _cmd_norm(c["title_from"])
+            if c["change"] in ("renamed", "modified") and c.get("title_from"):
+                k_old = _ck(c["title_from"])
                 if k_old in A.cmds and k not in A.cmds:
                     A.cmds[k] = A.cmds[k_old]
             command(k, c)
@@ -269,6 +278,9 @@ def build(ira: dict, irb: dict, changes: list[dict]) -> dict[str, Any]:
         k = V.command_of_section(num)
         if k:
             command(k, c)
+
+    if opcode_changes:
+        _opcode_rows(A, B, opcode_changes, command)
 
     out: dict[str, Any] = {}
     for g in GROUPS:
@@ -287,28 +299,43 @@ def build(ira: dict, irb: dict, changes: list[dict]) -> dict[str, Any]:
     return out
 
 
-def _opcode_rows(A: _Version, B: _Version, c: dict, command) -> None:
-    """Rows added to / removed from / changed in an opcode table are commands added, removed or changed."""
-    d = c.get("details") or {}
-    num = c.get("number_to")
-    oc, nc, rl = B.opcode_tables[num]
-    fig = f"Fig {num}"
-    for r in d.get("rows_added") or []:
-        name, opc = _Version._opcode_row(r, oc, nc)
-        if name:
-            command(_cmd_norm(name), {**c, "impact": "new"}, f"{fig}: opcode {opc} added", (rl, opc), name, f"{rl} {opc}")
-    a_cols = A.opcode_tables.get(c.get("number_from") or "", (oc, nc, rl))
-    for r in d.get("rows_removed") or []:
-        name, opc = _Version._opcode_row(r, a_cols[0], a_cols[1])
-        if name:
-            command(_cmd_norm(name), {**c, "impact": "breaking"}, f"{fig}: opcode {opc} removed", (rl, opc), name, f"{rl} {opc}")
-    for r in d.get("rows_changed") or []:
-        opc = clean(r.get("key", ""))
-        rg = parse_value_range(opc) if _HEX.match(opc) else None
-        opc_label = (f"{rg[0]:02X}h" if rg and rg[0] == rg[1] else opc)
-        k = B.by_opcode.get((rl, opc_label))
-        if not k:
-            continue
-        cells = "; ".join(f"{x['column']}: {x['before'] or '∅'} → {x['after'] or '∅'}" for x in r.get("cells", [])[:3])
-        info = B.cmds[k]
-        command(k, {**c, "impact": "changed"}, f"{fig}: opcode {opc_label} {cells}", (rl, opc_label), info["name"], info["opcode"])
+def _opcode_rows(A: _Version, B: _Version, changes: list[dict], command) -> None:
+    """Commands added to, removed from or changed in the opcode tables. Compared from the full tables of both versions (the change
+    details are capped for display, and an opcode table can be added or removed as a whole); each finding cites the change of the
+    opcode table it is in."""
+    by_table: dict[tuple[str, str], dict] = {}
+    for c in changes:           # a matched table may carry a different number in each version
+        if c.get("number_from"):
+            by_table[("a", c["number_from"])] = c
+        if c.get("number_to"):
+            by_table[("b", c["number_to"])] = c
+
+    def change_for(side: str, label: str) -> dict | None:
+        return by_table.get((side, label))
+
+    for key in sorted(set(A.opcode_rows) | set(B.opcode_rows)):
+        ra, rb = A.opcode_rows.get(key), B.opcode_rows.get(key)
+        rl, opc = key
+        if rb and not ra:
+            c = change_for("b", rb["table"])
+            if c:
+                command(_ck(rb["name"]), {**c, "impact": "new"}, f"Fig {rb['table']}: opcode {opc} added", key, rb["name"], f"{rl} {opc}")
+        elif ra and not rb:
+            c = change_for("a", ra["table"])
+            if c:
+                command(_ck(ra["name"]), {**c, "impact": "breaking"}, f"Fig {c.get('number_to') or ra['table']}: opcode {opc} removed",
+                        key, ra["name"], f"{rl} {opc}")
+        elif ra and rb and ra["cells"] != rb["cells"]:
+            c = change_for("b", rb["table"])
+            if not c:
+                continue
+            diffs = []
+            for i in range(max(len(ra["cells"]), len(rb["cells"]))):
+                x = ra["cells"][i] if i < len(ra["cells"]) else ""
+                y = rb["cells"][i] if i < len(rb["cells"]) else ""
+                if x != y:
+                    col = (rb["header"][i] if i < len(rb["header"]) else "") or f"col {i + 1}"
+                    diffs.append(f"{clean(col)}: {x or '∅'} → {y or '∅'}")
+            k = _ck(rb["name"])
+            info = B.cmds.get(k, {})
+            command(k, {**c, "impact": "changed"}, f"Fig {rb['table']}: opcode {opc} " + "; ".join(diffs[:3]), key, rb["name"], info.get("opcode") or f"{rl} {opc}")

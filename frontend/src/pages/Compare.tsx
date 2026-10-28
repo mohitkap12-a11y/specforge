@@ -213,7 +213,7 @@ function Result({ id }: { id: number }) {
   const [offset, setOffset] = useState(0);
   const [entity, setEntity] = useState<{ key: string; name: string; ids: number[] } | null>(null);   // changes of one table row
   useEffect(() => { setOffset(0); }, [impact, kind, chapter, q, sort, flat, id, entity]);
-  useEffect(() => { setEntity(null); }, [id]);
+  useEffect(() => { setEntity(null); }, [id, impact, chapter]);     // the impact cards and chapter rows filter the full list
   const params = entity ? { ids: entity.ids.join(","), sort, offset, limit: PAGE } : { impact: impact || undefined, kind: kind || undefined, chapter: chapter || undefined, q: q || undefined, sort, nested: flat ? "true" : "false", offset, limit: PAGE };
   const list = useQuery({ queryKey: ["compare-changes", id, params], queryFn: () => api.compareChanges(id, params), placeholderData: (p) => p });
   if (comp.isLoading) return <Loading q={comp} />;
