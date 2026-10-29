@@ -9,6 +9,7 @@ import re
 import shutil
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -18,9 +19,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from .. import __version__, auth, catalog, cmddb, compare, compare_ai, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
+from .. import __version__, auth, catalog, cmddb, compare, compare_ai, convert, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
 from ..crossgen import generate_cross_scenarios
-from ..convert import ConversionError, SUPPORTED, convert_file, output_name
+from ..convert import ENGINES, ConversionError, SUPPORTED, convert_file, output_name
 from ..core import config
 from ..core.db import get_conn, jloads, row, rows
 from ..ingest import store
@@ -322,6 +323,7 @@ def create_app() -> FastAPI:
             counts[table] = c.execute(f"DELETE FROM {table}").rowcount    # parse runs, nodes, catalogs, scenarios and coverage go with these via ON DELETE CASCADE
         c.commit()
         files = 0
+        shutil.rmtree(config.workspace_dir() / "conversions", ignore_errors=True)
         for sub in ("specs", "uploads"):
             for f in (config.workspace_dir() / sub).iterdir():
                 if f.is_file():
@@ -341,15 +343,23 @@ def create_app() -> FastAPI:
             audit(f"Connection test: {name} failed: {e}", "warn", provider=name)
             return {"ok": False, "error": str(e), "models": []}
 
-    # ------------------------------------------------------------------ spec -> markdown (stateless: nothing is stored)
-    @app.post("/api/convert/markdown")
-    def convert_markdown(file: UploadFile = File(...), front_matter: bool = Query(True), download: bool = Query(False)):
+    # ------------------------------------------------------------------ spec -> markdown
+    # Conversions run one at a time on the converter's own thread. The UI uses the job endpoint (a large spec takes
+    # minutes to hours with Docling, longer than a proxy keeps a request open); its result is kept for a day.
+    CONVERT_KEEP_SECONDS = 24 * 3600
+
+    def _convert_params(file: UploadFile, engine: str | None) -> tuple[str, str]:
+        if engine is not None and engine not in ENGINES:
+            raise HTTPException(400, f"Unknown engine '{engine}'; use one of: {', '.join(ENGINES)}.")
         name = os.path.basename(file.filename or "document")
         suffix = Path(name).suffix.lower()
         if suffix not in SUPPORTED:
             raise HTTPException(400, f"Unsupported file type: {name}. Upload a PDF, DOC or DOCX file.")
+        return name, suffix
+
+    def _save_upload(file: UploadFile, suffix: str, folder: Path | None = None) -> str:
         size = 0
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=folder) as tmp:
             try:
                 while chunk := file.file.read(1024 * 1024):
                     size += len(chunk)
@@ -360,19 +370,85 @@ def create_app() -> FastAPI:
                 tmp.close()
                 os.unlink(tmp.name)
                 raise
+        return tmp.name
+
+    def _conversion_json(name: str, res) -> dict:
+        return {"filename": output_name(name), "title": res.title, "format": res.source_format, "engine": res.engine,
+                "stats": res.stats, "warnings": res.warnings}
+
+    def _conversions_dir() -> Path:
+        d = config.workspace_dir() / "conversions"
+        d.mkdir(exist_ok=True)
+        return d
+
+    def _prune_conversions() -> None:
+        cutoff = time.time() - CONVERT_KEEP_SECONDS
+        for d in _conversions_dir().iterdir():
+            if d.is_dir() and d.stat().st_mtime < cutoff:
+                shutil.rmtree(d, ignore_errors=True)
+
+    @app.post("/api/convert/markdown")
+    async def convert_markdown(file: UploadFile = File(...), front_matter: bool = Query(True), download: bool = Query(False),
+                               engine: str | None = Query(None)):
+        """Synchronous conversion (scripts, small files); waits on the conversion thread without holding a worker thread."""
+        name, suffix = _convert_params(file, engine)
+        path = await run_in_threadpool(_save_upload, file, suffix)
         try:
-            res = convert_file(tmp.name, filename=name, front_matter=front_matter)
+            res = await asyncio.wrap_future(convert.submit(path, filename=name, front_matter=front_matter, engine=engine))
         except ConversionError as e:
             raise HTTPException(422, str(e)) from e
         finally:
-            os.unlink(tmp.name)
+            os.unlink(path)
         out = output_name(name)
-        audit(f"Converted {name} to Markdown", format=res.source_format, **res.stats)
+        audit(f"Converted {name} to Markdown", format=res.source_format, engine=res.engine, **res.stats)
         if download:
             return Response(res.markdown, media_type="text/markdown; charset=utf-8",
                             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(out)}"})
-        return {"filename": out, "title": res.title, "format": res.source_format, "markdown": res.markdown,
-                "stats": res.stats, "warnings": res.warnings}
+        return {**_conversion_json(name, res), "markdown": res.markdown}
+
+    @app.post("/api/convert/markdown/jobs")
+    def convert_markdown_job(file: UploadFile = File(...), front_matter: bool = Query(True), engine: str | None = Query(None)):
+        """Background conversion: returns {job}; fetch the result from /api/convert/markdown/jobs/{job} once it is done."""
+        name, suffix = _convert_params(file, engine)
+        _prune_conversions()
+        folder = Path(tempfile.mkdtemp(dir=_conversions_dir()))
+        try:
+            path = _save_upload(file, suffix, folder)
+        except BaseException:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
+        user = me()["username"]
+
+        def work(c, prog):
+            try:
+                prog(f"Converting {name} to Markdown")
+                res = convert_file(path, filename=name, front_matter=front_matter, engine=engine)
+                (folder / "out.md").write_text(res.markdown, encoding="utf-8")
+            finally:
+                Path(path).unlink(missing_ok=True)
+            eventlog.emit("info", "api", f"Converted {name} to Markdown", user=user, format=res.source_format, engine=res.engine, **res.stats)
+            return {**_conversion_json(name, res), "dir": folder.name}
+        job = jobs.submit(conn(), "convert-markdown", work, {"filename": name, "user": user, "engine": engine}, DB, pool=convert.serial_pool())
+        audit(f"Conversion of {name} to Markdown queued", job_id=job, engine=engine or convert.default_engine())
+        return {"job": job}
+
+    @app.get("/api/convert/markdown/jobs/{job_id}")
+    def convert_markdown_result(job_id: int, download: bool = Query(False)):
+        j = jobs.get(conn(), job_id)
+        payload = jloads(j["payload_json"], {}) if j else {}
+        if not j or j["type"] != "convert-markdown" or (payload.get("user") != me()["username"] and me()["role"] != "admin"):
+            raise HTTPException(404, "conversion not found")
+        if j["state"] != "done":
+            raise HTTPException(409, f"the conversion is {j['state']}")
+        res = jloads(j["result_json"], {})
+        md_file = safe_join(_conversions_dir(), f"{res.get('dir', '')}/out.md")
+        if md_file is None:
+            raise HTTPException(410, "the converted file has expired; convert it again")
+        markdown = md_file.read_text(encoding="utf-8")
+        if download:
+            return Response(markdown, media_type="text/markdown; charset=utf-8",
+                            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(res['filename'])}"})
+        return {**{k: v for k, v in res.items() if k != "dir"}, "markdown": markdown}
 
     # ------------------------------------------------------------------ compare two spec versions
     _summary_lock = threading.Lock()

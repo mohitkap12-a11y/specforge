@@ -49,7 +49,9 @@ class Progress:
             eventlog.emit("debug", "job", message, done=done, total=total)
 
 
-def submit(conn, type_: str, fn: Callable[..., Any], payload: dict | None = None, db_file: str | None = None) -> int:
+def submit(conn, type_: str, fn: Callable[..., Any], payload: dict | None = None, db_file: str | None = None,
+           pool: ThreadPoolExecutor | None = None) -> int:
+    """Queue fn(conn, progress) as a job; `pool` runs it on a dedicated executor instead of the shared one."""
     cur = conn.execute("INSERT INTO job(type,state,payload_json) VALUES(?, 'queued', ?)", (type_, json.dumps(payload or {})))
     conn.commit()
     job_id = cur.lastrowid
@@ -90,7 +92,7 @@ def submit(conn, type_: str, fn: Callable[..., Any], payload: dict | None = None
                 _cancel.pop(key, None)
                 _progress.pop(key, None)
 
-    _pool.submit(run)
+    (pool or _pool).submit(run)
     return job_id  # type: ignore[return-value]
 
 
