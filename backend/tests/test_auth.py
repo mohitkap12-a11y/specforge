@@ -136,3 +136,60 @@ def test_no_auth_mode_is_local_admin(ws):
         me = c.get("/api/auth/me").json()
         assert me["auth"] is False and me["user"]["role"] == "admin"
         assert c.post("/api/auth/register", json={"username": "x" * 4, "password": "y" * 8}).status_code == 409
+
+
+def test_null_origin_writes_are_refused(app, ws, monkeypatch):
+    with client(app) as c:
+        login(c, "root", "rootpass1")
+        assert c.post("/api/sets", json={"name": "x", "document_ids": []}, headers={"Origin": "null"}).status_code == 403
+    monkeypatch.setenv("SPECFORGE_AUTH", "0")             # no cookie to protect, so the origin check is all there is
+    from specforge.api.app import create_app
+
+    with TestClient(create_app()) as c:
+        assert c.post("/api/reset", headers={"Origin": "null"}).status_code == 403
+
+
+def test_extended_session_resends_the_cookie(app):
+    from specforge.core.db import get_conn
+
+    with client(app) as c:
+        login(c, "root", "rootpass1")
+        assert "set-cookie" not in c.get("/api/specs").headers          # within the minute: nothing to extend
+        get_conn().execute("UPDATE user_session SET last_seen='2000-01-01 00:00:00'")
+        get_conn().commit()
+        r = c.get("/api/specs")
+        assert r.status_code == 200 and "sf_session=" in r.headers["set-cookie"] and "Max-Age=604800" in r.headers["set-cookie"]
+
+
+def test_admin_resetting_own_password_stays_signed_in(app):
+    with client(app) as c, client(app) as other:
+        login(c, "root", "rootpass1"); login(other, "root", "rootpass1")
+        me = c.get("/api/auth/me").json()["user"]["id"]
+        assert c.post(f"/api/users/{me}/password", json={"password": "rootpass9"}).status_code == 200
+        assert c.get("/api/specs").status_code == 200
+        assert other.get("/api/specs").status_code == 401
+
+
+def test_throttle_keys_on_the_proxied_client_address():
+    from starlette.requests import Request
+
+    from specforge.api.app import client_ip
+
+    def req(peer, fwd=None):
+        headers = [(b"x-forwarded-for", fwd.encode())] if fwd else []
+        return Request({"type": "http", "client": (peer, 1), "headers": headers})
+
+    assert client_ip(req("127.0.0.1", "10.0.0.9, 10.1.2.3")) == "10.1.2.3"      # rightmost: what the local proxy saw
+    assert client_ip(req("10.1.2.3", "1.2.3.4")) == "10.1.2.3"                 # not from a local proxy: header ignored
+    assert client_ip(req("127.0.0.1")) == "127.0.0.1"
+
+
+def test_sign_in_off_needs_a_localhost_host(ws, monkeypatch):
+    from specforge import cli
+
+    monkeypatch.setenv("SPECFORGE_AUTH", "0")
+    with pytest.raises(SystemExit, match="localhost"):
+        cli.main(["serve", "--host", "0.0.0.0"])
+    monkeypatch.setenv("SPECFORGE_AUTH", "1")
+    with pytest.raises(SystemExit, match="localhost"):
+        cli.main(["serve", "--host", "0.0.0.0", "--no-auth"])

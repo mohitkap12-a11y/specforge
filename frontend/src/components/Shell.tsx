@@ -19,8 +19,8 @@ export function Shell({ children }: { children: ReactNode }) {
   const [palette, setPalette] = useState(false);
   const [theme, setTheme] = useTheme();
   const { active } = useJobs();
-  const { me, user, isAdmin, signOut } = useAuth();
-  const pages = navFor(isAdmin);
+  const { me, user, isAdmin, canManageUsers, signOut } = useAuth();
+  const pages = navFor(canManageUsers);
   const health = useQuery({ queryKey: ["health"], queryFn: api.health, staleTime: 60_000 });
   const running = active.filter((j) => j.state === "running" || j.state === "queued").length;
   const tool = GROUPS.find((g) => g.key === NAV.find((n) => (n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to)))?.group)?.title ?? null;

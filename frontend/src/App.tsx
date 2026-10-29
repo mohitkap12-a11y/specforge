@@ -22,7 +22,7 @@ import { useAuth } from "./components/auth";
 
 export default function App() {
   const { push } = useToast();
-  const { isAdmin } = useAuth();
+  const { canManageUsers } = useAuth();
   return (
     <Shell>
       <JobToasts push={push} />
@@ -43,7 +43,7 @@ export default function App() {
         <Route path="/activity" element={<ActivityPage />} />
         <Route path="/jobs" element={<Navigate to="/activity?tab=jobs" replace />} />
         <Route path="/settings" element={<SettingsPage />} />
-        <Route path="/users" element={isAdmin ? <UsersPage /> : <Navigate to="/" replace />} />
+        <Route path="/users" element={canManageUsers ? <UsersPage /> : <Navigate to="/" replace />} />
         <Route path="/account" element={<AccountPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

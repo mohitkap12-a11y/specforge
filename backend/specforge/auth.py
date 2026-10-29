@@ -222,24 +222,30 @@ def create_session(conn: sqlite3.Connection, user_id: int, ip: str | None = None
     return token
 
 
-def session_user(conn: sqlite3.Connection, token: str | None) -> dict | None:
-    """The active user behind a session token, or None. Extends the session at most once a minute (a write per request
-    would contend with long-running jobs for the database lock)."""
+def lookup_session(conn: sqlite3.Connection, token: str | None) -> tuple[dict | None, bool]:
+    """(the active user behind a session token or None, whether the session was just extended). Extends the session at
+    most once a minute (a write per request would contend with long-running jobs for the database lock); the caller
+    re-sends the cookie when it was extended, so the browser's expiry slides along with the server's."""
     if not token:
-        return None
+        return None, False
     th = _token_hash(token)
     now = _now()
     s = row(conn, "SELECT user_id,last_seen,expires FROM user_session WHERE token_hash=?", (th,))
     if not s or s["expires"] < _ts(now):
-        return None
+        return None, False
     u = get_user(conn, s["user_id"])
     if not u or u["status"] != "active":
-        return None
+        return None, False
     if s["last_seen"] < _ts(now - timedelta(minutes=1)):
         conn.execute("UPDATE user_session SET last_seen=?, expires=? WHERE token_hash=?",
                      (_ts(now), _ts(now + timedelta(days=SESSION_DAYS)), th))
         conn.commit()
-    return u
+        return u, True
+    return u, False
+
+
+def session_user(conn: sqlite3.Connection, token: str | None) -> dict | None:
+    return lookup_session(conn, token)[0]
 
 
 def end_session(conn: sqlite3.Connection, token: str | None) -> None:

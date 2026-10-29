@@ -27,9 +27,10 @@ def cmd_serve(a):
     from . import auth
 
     if a.no_auth:
-        if a.host not in LOOPBACK:
-            sys.exit("--no-auth is only allowed with a localhost --host: anyone on the network would be an admin")
         os.environ["SPECFORGE_AUTH"] = "0"
+    if not config.auth_enabled() and a.host not in LOOPBACK:      # --no-auth, or SPECFORGE_AUTH=0 left in the environment
+        sys.exit("sign-in is off (--no-auth / SPECFORGE_AUTH=0): only allowed with a localhost --host, "
+                 "otherwise anyone on the network would be an admin")
     print(f"SpecForge workspace: {config.workspace_dir()}")
     if config.auth_enabled():
         conn = _conn()

@@ -21,8 +21,8 @@ export const NAV: NavItem[] = [
   { to: "/users", label: "Users", icon: Users, desc: "Approve access requests, add users, roles, passwords (admins)", group: "system", adminOnly: true },
   { to: "/settings", label: "Settings", icon: Cog, desc: "AI providers, models, parser, logging, theme", group: "system" },
 ];
-/** The pages this user may open: admin-only pages are hidden from everyone else. */
-export const navFor = (isAdmin: boolean) => NAV.filter((n) => isAdmin || !n.adminOnly);
+/** The pages this user may open: admin-only pages (user management) only for an admin of a server with sign-in. */
+export const navFor = (canManageUsers: boolean) => NAV.filter((n) => canManageUsers || !n.adminOnly);
 export const GROUPS: { key: NavGroup; title: string | null; blurb?: string }[] = [
   { key: "home", title: null },
   { key: "convert", title: "Spec Converter", blurb: "PDF / DOC / DOCX to Markdown" },

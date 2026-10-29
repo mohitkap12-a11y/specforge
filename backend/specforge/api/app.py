@@ -59,6 +59,30 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 LOCAL_USER = {"id": 0, "username": "local", "display_name": None, "role": "admin", "status": "active"}
 
 
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+def is_https(req: Request) -> bool:
+    return req.url.scheme == "https" or req.headers.get("x-forwarded-proto") == "https"
+
+
+def session_cookie(token: str, https: bool) -> tuple[bytes, bytes]:
+    """The Set-Cookie header for a session token (also re-sent whenever the server extends the session)."""
+    r = Response()
+    r.set_cookie(auth.COOKIE, token, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="strict", secure=https, path="/")
+    return next((k, v) for k, v in r.raw_headers if k == b"set-cookie")
+
+
+def client_ip(req: Request) -> str:
+    """The caller's address for throttling. Behind a reverse proxy on this machine (peer is loopback), the address the
+    proxy saw: the rightmost X-Forwarded-For entry, which the proxy appends and the client cannot forge."""
+    peer = req.client.host if req.client else "?"
+    fwd = req.headers.get("x-forwarded-for")
+    if peer in LOOPBACK and fwd:
+        return fwd.split(",")[-1].strip() or peer
+    return peer
+
+
 def admin_only(method: str, path: str) -> bool:
     return (method, path) in ADMIN_ONLY or path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/")
 
@@ -78,20 +102,29 @@ class AuthGate:
             return await self.app(scope, receive, send)
         req = Request(scope)
         method = scope["method"]
-        if method not in SAFE_METHODS and (origin := req.headers.get("origin")) and origin != "null":
-            # a page on another site, or on another port of this host, must not drive the API with the user's cookie
+        if method not in SAFE_METHODS and (origin := req.headers.get("origin")):
+            # a page on another site, on another port of this host, or sandboxed / opaque ("null"), must not drive the API
             hosts = {req.headers.get("host"), req.headers.get("x-forwarded-host")}
             if urlsplit(origin).netloc not in hosts:
                 return await JSONResponse({"detail": "cross-origin request refused"}, 403)(scope, receive, send)
+        renewed = False
         if self.enabled:
             token = req.cookies.get(auth.COOKIE)
-            user = await run_in_threadpool(lambda: auth.session_user(get_conn(), token)) if token else None
+            user, renewed = await run_in_threadpool(lambda: auth.lookup_session(get_conn(), token)) if token else (None, False)
         else:
             user = LOCAL_USER
         if user is None and (method, path) not in PUBLIC:
             return await JSONResponse({"detail": "sign in required"}, 401)(scope, receive, send)
         if user is not None and user["role"] != "admin" and admin_only(method, path):
             return await JSONResponse({"detail": "only an admin can do this"}, 403)(scope, receive, send)
+        if renewed:          # the server extended the session: extend the browser's cookie too
+            cookie, inner = session_cookie(token, is_https(req)), send
+
+            async def send(message):
+                if message["type"] == "http.response.start" and not any(k == b"set-cookie" and auth.COOKIE.encode() in v
+                                                                         for k, v in message.get("headers", [])):
+                    message = {**message, "headers": [*message.get("headers", []), cookie]}
+                await inner(message)
         tok = auth.current_user.set(user)
         try:
             await self.app(scope, receive, send)
@@ -129,9 +162,6 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ sign-in and users
     login_throttle, ip_throttle, register_throttle = auth.Throttle(10, 600), auth.Throttle(50, 600), auth.Throttle(10, 3600)
-
-    def client_ip(request: Request) -> str:
-        return request.client.host if request.client else "?"
 
     def auth_call(fn, *a, **kw):
         try:
@@ -173,8 +203,7 @@ def create_app() -> FastAPI:
             raise HTTPException(e.status, str(e)) from None
         login_throttle.clear(key)
         token = auth.create_session(conn(), u["id"], ip, request.headers.get("user-agent"))
-        https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
-        response.set_cookie(auth.COOKIE, token, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="strict", secure=https, path="/")
+        response.raw_headers.append(session_cookie(token, is_https(request)))
         eventlog.emit("info", "api", f"{u['username']} signed in", user=u["username"], ip=ip)
         return {"user": public_user(u)}
 
@@ -235,10 +264,11 @@ def create_app() -> FastAPI:
         return u
 
     @app.post("/api/users/{user_id}/password")
-    def users_reset_password(user_id: int, body: Any = Body(...)):
+    def users_reset_password(request: Request, user_id: int, body: Any = Body(...)):
         need_auth_on()
         need(body, "password")
-        auth_call(auth.set_password, conn(), user_id, body["password"])
+        own = user_id == me()["id"]          # an admin resetting their own password keeps this session, like /api/auth/password
+        auth_call(auth.set_password, conn(), user_id, body["password"], keep_session=request.cookies.get(auth.COOKIE) if own else None)
         u = auth.get_user(conn(), user_id)
         audit(f"Password reset by an admin for '{u['username']}' (signed out everywhere)", target=u["username"])
         return {"ok": True}

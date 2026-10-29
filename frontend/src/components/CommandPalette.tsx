@@ -16,9 +16,9 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const [i, setI] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   const go = (to: string) => () => nav(to);
-  const { isAdmin } = useAuth();
+  const { canManageUsers } = useAuth();
   const cmds = useMemo<Cmd[]>(() => [
-    ...navFor(isAdmin).map((n) => ({ id: n.to, group: "Go to", label: n.label, hint: n.desc, icon: n.icon, run: go(n.to), keywords: n.desc })),
+    ...navFor(canManageUsers).map((n) => ({ id: n.to, group: "Go to", label: n.label, hint: n.desc, icon: n.icon, run: go(n.to), keywords: n.desc })),
     { id: "s-ai", group: "Settings", label: "AI providers & models", icon: NAV.find((n) => n.to === "/settings")!.icon, run: go("/settings#ai"), keywords: "ollama opencode model llm" },
     { id: "s-log", group: "Settings", label: "Logging options", icon: NAV.find((n) => n.to === "/settings")!.icon, run: go("/settings#logging"), keywords: "prompt capture level" },
     { id: "s-mi", group: "Settings", label: "NVMe-MI message layout", icon: NAV.find((n) => n.to === "/settings")!.icon, run: go("/settings#mi"), keywords: "mi layout overrides" },
@@ -29,7 +29,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     { id: "t-d", group: "Theme", label: "Dark theme", icon: Moon, run: () => setTheme("dark") },
     { id: "t-s", group: "Theme", label: "Match system theme", icon: Monitor, run: () => setTheme("system") },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [isAdmin]);
+  ], [canManageUsers]);
   const shown = useMemo(() => {
     const t = q.trim().toLowerCase();
     return t ? cmds.filter((c) => `${c.label} ${c.group} ${c.keywords ?? ""}`.toLowerCase().includes(t)) : cmds;
