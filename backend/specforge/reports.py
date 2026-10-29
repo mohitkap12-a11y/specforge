@@ -8,7 +8,7 @@ import json
 import sqlite3
 from typing import Any
 
-from . import __version__
+from . import __version__, coverage
 from .core.db import jloads, row, rows
 from .execscen import flow_summary
 
@@ -44,22 +44,19 @@ def build_dataset(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
         executed.append({"sid": s["sid"], "title": s["title"], "test_count": p.get("test_count", 0), "tests": p.get("tests", []),
                          "commands": p.get("commands", 0), "steps": p.get("n_steps", len(p.get("steps", []))),
                          "flow": flow_summary(p.get("steps", []), 400) + (" → … (log continues)" if p.get("truncated") else "")})
-    tests = [jloads(r["stats_json"], {}) for r in rows(conn, "SELECT stats_json FROM coverage_test WHERE run_id=? ORDER BY test_id", (run_id,))]
+    tests = coverage.test_results(conn, run_id)
     return {"header": header, "summary": summary, "specs": specs, "items": items, "scenarios": scen, "executed": executed, "issues": issues,
             "tests": tests}
 
 
-TEST_COLS = ["command", "value", "boundary", "reserved", "mi_tunnel", "requirement"]
-
-
 def _test_rows(ds) -> tuple[list[str], list[list]]:
     """One row per executed test (test script / database): commands sent and the catalog items it exercised on its own."""
-    head = ["test", "script", "commands", "unknown commands", "% of catalog", *[f"{k}s exercised" for k in TEST_COLS]]
+    head = ["test", "script", "commands", "unknown commands", "% of catalog", *[f"{k} exercised" for k in coverage.TEST_KINDS]]
     data = []
     for t in ds.get("tests", []):
         bk = t.get("by_kind", {})
         data.append([t["test"], t.get("script") or "", t["commands"], t["unknown_commands"], _pct(t["pct_covered"]),
-                     *[f"{bk[k]['exercised']}/{bk[k]['total']}" if k in bk else "" for k in TEST_COLS]])
+                     *[f"{bk[k]['exercised']}/{bk[k]['total']}" if k in bk else "" for k in coverage.TEST_KINDS]])
     return head, data
 
 

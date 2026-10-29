@@ -31,6 +31,7 @@ from ..llm.service import LLMService, make_provider
 
 
 MAX_CONVERT_BYTES = 200 * 1024 * 1024
+MAX_CMDDB_UPLOAD_BYTES = int(os.environ.get("SPECFORGE_CMDDB_UPLOAD_MB", "4096")) * 1024 * 1024   # per upload (all files together)
 SCENARIO_STATES = {"draft", "approved", "rejected"}
 LINK_STATES = {"proposed", "approved", "rejected"}
 EXEC_READONLY = "executed scenarios are read from the command DB: they have no review state and their steps cannot be edited; review their requirement links instead"
@@ -54,7 +55,8 @@ def safe_join(root: Path, rel: str) -> Path | None:
 # Reachable without a session (the login page needs them). Everything else under /api/ needs an active account.
 PUBLIC = {("POST", "/api/auth/login"), ("POST", "/api/auth/register"), ("POST", "/api/auth/logout"), ("GET", "/api/auth/me")}
 # Admin only: user management, global settings, wiping shared data.
-ADMIN_ONLY = {("PUT", "/api/settings"), ("POST", "/api/reset"), ("DELETE", "/api/logs")}
+ADMIN_ONLY = {("PUT", "/api/settings"), ("POST", "/api/reset"), ("DELETE", "/api/logs"),
+              ("GET", "/api/fs/browse")}     # lists the server's folders: other users type or drop a path instead
 ADMIN_PREFIX = "/api/users"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # With login turned off (`serve --no-auth`, localhost only) the single local user is the admin.
@@ -1213,13 +1215,18 @@ def create_app() -> FastAPI:
         n = 1
         while dest.exists():
             dest = dest.with_name(f"{dest.name}-{n}"); n += 1
-        saved = 0
+        saved = size = 0
         try:
             for f, parts in rels:
                 target = dest.joinpath(*[re.sub(r'[<>:"|?*\x00-\x1f]', "_", x) for x in parts])
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with open(target, "wb") as out:
-                    shutil.copyfileobj(f.file, out, 1024 * 1024)
+                    while chunk := f.file.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > MAX_CMDDB_UPLOAD_BYTES:
+                            raise HTTPException(413, f"Upload is larger than {MAX_CMDDB_UPLOAD_BYTES // (1024 * 1024)} MB "
+                                                     "(SPECFORGE_CMDDB_UPLOAD_MB); put the databases where the server can read them and add the folder by path.")
+                        out.write(chunk)
                 if not cmddb.is_sqlite(target):
                     target.unlink()
                     continue

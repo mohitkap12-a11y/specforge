@@ -229,3 +229,92 @@ def test_api_scan_browse_upload_and_tests(ws, tmp_path, parsed_set):
     assert [t["test"] for t in tests] == ["suiteA/TC_Identify", "suiteB/TC_GetLogPage"]
     items = c.get(f"/api/coverage/{run}/items", params={"test": "suiteB/TC_GetLogPage", "kind": "command"}).json()
     assert [i["key"] for i in items["items"]] == ["cmd:admin:02"]
+
+
+def test_both_on_a_folder_that_only_logged_mi_commands(tmp_path):
+    root = tmp_path / "mi-only"
+    root.mkdir()
+    con = sqlite3.connect(root / "TC_MI.db")
+    con.execute("CREATE TABLE MICommandHistoryTable (CmdType VARCHAR(10), OP VARCHAR(100), Header VARCHAR(100), DWORD0 VARCHAR(100), DWORD1 VARCHAR(100), DeviceID VARCHAR(20))")
+    con.execute("INSERT INTO MICommandHistoryTable VALUES ('MI','0x0','0x0','0x0','0x0','d')")
+    con.commit()
+    con.close()
+    sc = cmddb.scan(str(root))                       # "Both" in the UI scans without a kind
+    assert sc["kinds"] == ["mi"] and sc["mapping"]["table"] == "MICommandHistoryTable" and "error" not in sc
+    # and in a mixed folder the kinds come from every database, not only the first
+    make_history_db(root / "TC_Both.db")
+    assert cmddb.scan(str(root))["kinds"] == ["mi", "nvme"]
+
+
+def test_column_case_differs_between_databases(conn, tmp_path):
+    root = make_tree(tmp_path / "logs")
+    con = sqlite3.connect(root / "suiteB" / "TC_GetLogPage.db")
+    con.execute('ALTER TABLE CommandHistoryTable RENAME COLUMN "OP" TO "Op"')
+    con.commit()
+    con.close()
+    sid = cmddb.register_source(conn, str(root))
+    res = cmddb.import_source(conn, sid)
+    assert (res["undecodable"], res["decoded"]) == (0, 3)
+
+
+def test_a_database_failing_half_way_contributes_nothing(conn, tmp_path, monkeypatch):
+    root = make_tree(tmp_path / "logs")
+    real = cmddb.iter_source_rows
+
+    def broken(path, mapping):
+        for i, r in enumerate(real(path, mapping)):
+            if "TC_Identify" in path and i == 1:
+                raise sqlite3.DatabaseError("database disk image is malformed")
+            yield r
+    monkeypatch.setattr(cmddb, "iter_source_rows", broken)
+    monkeypatch.setattr(cmddb, "BATCH", 1)              # the first row of the broken database is already written
+    sid = cmddb.register_source(conn, str(root))
+    res = cmddb.import_source(conn, sid)
+    assert (res["rows"], res["decoded"], res["failed_databases"]) == (1, 1, 2)
+    assert {r["test_id"] for r in rows(conn, "SELECT test_id FROM decoded_command WHERE source_id=?", (sid,))} == {"suiteB/TC_GetLogPage"}
+    assert sum(r["count"] for r in rows(conn, "SELECT count FROM cmd_signature WHERE source_id=?", (sid,))) == 1
+
+
+def test_test_column_names_inside_a_folder_stay_per_database(conn, tmp_path):
+    root = tmp_path / "generic"
+    root.mkdir()
+    for name in ("a.db", "b.db"):
+        con = sqlite3.connect(root / name)
+        con.execute("CREATE TABLE commands(id INTEGER PRIMARY KEY, test_name TEXT, seq INTEGER, cdw0 INTEGER, cdw1 INTEGER, "
+                    + ", ".join(f"cdw{i} INTEGER" for i in range(2, 16)) + ")")
+        con.execute("INSERT INTO commands(test_name,seq,cdw0,cdw1) VALUES('smoke',1,6,0)")
+        con.commit()
+        con.close()
+    sid = cmddb.register_source(conn, str(root))
+    cmddb.import_source(conn, sid)
+    assert sorted(r["test_id"] for r in rows(conn, "SELECT test_id FROM decoded_command WHERE source_id=?", (sid,))) == ["a:smoke", "b:smoke"]
+
+
+def test_a_script_named_like_a_test_keeps_its_own_per_test_row(conn, parsed_set, tmp_path):
+    from specforge import execscen
+
+    p = tmp_path / "mixed.db"
+    con = sqlite3.connect(p)
+    con.execute("CREATE TABLE commands(id INTEGER PRIMARY KEY, test_name TEXT, script TEXT, seq INTEGER, sqe BLOB)")
+    con.execute("INSERT INTO commands(test_name,script,seq,sqe) VALUES('foo','x.py',1,?)", (sqe(0x06, cdw10=1),))
+    con.execute("INSERT INTO commands(test_name,script,seq,sqe) VALUES(NULL,'foo',1,?)", (sqe(0x02, cdw10=0x3FF0002),))
+    con.commit()
+    con.close()
+    sid = cmddb.register_source(conn, str(p))
+    cmddb.import_source(conn, sid)
+    execscen.analyze_execution(conn, parsed_set, sid)
+    assert sorted(r["test_id"] for r in rows(conn, "SELECT test_id FROM exec_test WHERE source_id=?", (sid,))) == ["foo", "script foo"]
+
+
+def test_browse_is_admin_only_and_uploads_are_capped(ws, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from specforge.api import app as appmod
+
+    assert appmod.admin_only("GET", "/api/fs/browse") and not appmod.admin_only("POST", "/api/cmddb/upload")
+    monkeypatch.setattr(appmod, "MAX_CMDDB_UPLOAD_BYTES", 10)
+    root = make_tree(tmp_path / "logs")
+    c = TestClient(appmod.create_app())
+    r = c.post("/api/cmddb/upload", files=[("files", ("a.db", (root / "suiteB" / "TC_GetLogPage.db").read_bytes()))])
+    assert r.status_code == 413
+    assert not any((ws / "cmddb-uploads").iterdir())          # nothing is left behind

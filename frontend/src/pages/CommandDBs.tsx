@@ -6,6 +6,7 @@ import { ArrowRight, ArrowUp, Database, Folder, FolderOpen, UploadCloud } from "
 import { rememberSource } from "../components/ExecScenarios";
 import { Badge, Empty, ErrorNote, Loading, PageHeader, Segmented } from "../components/ui";
 import { useJobs } from "../components/jobs";
+import { useAuth } from "../components/auth";
 import { useStoredState } from "../hooks";
 import { parseOpcode } from "../util";
 import type { CmdKind, CmdSource, ScannedDb } from "../types";
@@ -78,11 +79,13 @@ function Add() {
   const [kind, setKind] = useStoredState<CmdKind | "both">("specforge.cmdkind", "nvme");
   const [auto, setAuto] = useState(true);
   const [browsing, setBrowsing] = useState(false);
+  const { isAdmin } = useAuth();
   const [over, setOver] = useState(false);
   const folderInput = useRef<HTMLInputElement>(null);
   const filesInput = useRef<HTMLInputElement>(null);
   const kinds: CmdKind[] = kind === "both" ? ["nvme", "mi"] : [kind];
-  const scan = useMutation({ mutationFn: (p: string) => api.scanDbs(p, kinds[0]) });
+  // "Both": no kind, so a folder that only logged NVMe-MI commands still gets a mapping (NVMe is preferred when present)
+  const scan = useMutation({ mutationFn: (p: string) => api.scanDbs(p, kind === "both" ? undefined : kind) });
   const run = (p: string) => { const t = p.trim(); if (t) { setPath(t); scan.mutate(t); } };
   useEffect(() => { if (scan.data) scan.mutate(scan.data.path); }, [kind]);   // eslint-disable-line react-hooks/exhaustive-deps
   const upload = useMutation({
@@ -131,7 +134,7 @@ function Add() {
       <div className="row">
         <input className="grow" placeholder="Path on the server to a database or a folder of databases, e.g. D:\Log\CommandHistory" value={path}
           onChange={(e) => setPath(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") run(path); }} aria-label="Database or folder path" />
-        <button onClick={() => setBrowsing(true)}><FolderOpen size={14} /> Browse…</button>
+        {isAdmin && <button onClick={() => setBrowsing(true)} title="Browse the server's folders (admins)"><FolderOpen size={14} /> Browse…</button>}
         <button className="primary" disabled={!path.trim() || scan.isPending} onClick={() => run(path)}>{scan.isPending ? "Scanning…" : "Find databases"}</button>
       </div>
       <div className={`dropzone ${over ? "over" : ""}`} style={{ marginTop: 10, marginBottom: 0 }}

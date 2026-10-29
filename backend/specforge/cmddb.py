@@ -20,6 +20,7 @@ from .core.db import row
 from .core.hashing import sha256_file, stable_hash
 
 PROGRESS_EVERY = 2000   # rows scanned between progress / cancellation checks
+BATCH = 20000           # decoded rows written per insert
 
 MI_DEFAULT_LAYOUT: dict[str, Any] = {
     "_note": "Default NVMe-MI request layout. VERIFY against the NVMe-MI revision under test; override in Settings.",
@@ -192,11 +193,33 @@ def _rel(root: Path, f: Path) -> str:
     return f.relative_to(root).as_posix() if root.is_dir() else f.name
 
 
-def source_sha256(path: str | Path) -> str:
+def source_sha256(path: str | Path, files: list[Path] | None = None) -> str:
     root = Path(path)
     if root.is_file():
         return sha256_file(root)
-    return stable_hash([(_rel(root, f), sha256_file(f)) for f in discover(root)])
+    return stable_hash([(_rel(root, f), sha256_file(f)) for f in (discover(root) if files is None else files)])
+
+
+_COLUMN_KEYS = ("id", "test", "script", "seq", "ts", "interface", "queue", "sqe", "mi_msg", "cs")
+
+
+def fit_mapping(mapping: dict, tables: dict[str, list[str]]) -> dict:
+    """The mapping with its table and column names spelled as in this database. The databases of a folder share one mapping
+    (made from one of them), but SQLite names are case-insensitive and sqlite3.Row keys are not: 'Op' must still find 'OP'."""
+    tlow = {t.lower(): t for t in tables}
+    table = tlow.get(str(mapping.get("table", "")).lower())
+    if table is None:
+        return mapping
+    low = {c.lower(): c for c in tables[table]}
+    fit = lambda c: low.get(c.lower(), c) if isinstance(c, str) else c    # noqa: E731
+    m = {**mapping, "table": table}
+    for k in _COLUMN_KEYS:
+        if k in m:
+            m[k] = fit(m[k])
+    for k in ("cdw", "fields", "mi_fields"):
+        if isinstance(m.get(k), dict):
+            m[k] = {kk: fit(v) for kk, v in m[k].items()}
+    return m
 
 
 def _history_tables(tables: dict[str, list[str]]) -> dict[str, str]:
@@ -255,31 +278,37 @@ def scan(path: str, kind: str | None = None, limit: int = 5000) -> dict[str, Any
         dbs.append(e)
     out: dict[str, Any] = {"path": str(root), "folder": root.is_dir(), "count": len(files), "databases": dbs, "truncated": len(files) > limit}
     try:
-        out.update(suggest_mapping(path, kind))
+        out.update(suggest_mapping(path, kind, files))
     except ValueError as ex:
         out["error"] = str(ex)
+    present = sorted({k for d in dbs for k in d.get("commands", {})})
+    if present:                       # which command tables exist in any of the databases, not only in the one the mapping came from
+        out["kinds"] = present
     return out
 
 
-def suggest_mapping(path: str, kind: str | None = None) -> dict[str, Any]:
+def suggest_mapping(path: str, kind: str | None = None, files: list[Path] | None = None) -> dict[str, Any]:
     """Guess a column mapping for a database or a folder of databases (read from the first one that has the commands).
 
     `kind` ("nvme" | "mi") picks which commands to read from command-history databases."""
     if kind is not None and kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)}")
     root = Path(path)
-    files = discover(root)
+    files = discover(root) if files is None else files
     if not files:
         raise ValueError("No SQLite databases found in this folder")
     first = files[0]
     tables = list_tables(str(first))
     hist = _history_tables(tables)
-    if root.is_dir() and hist:                 # the first database may predate MI logging: use one that has the requested table
-        want = HISTORY_TABLES[kind or "nvme"]
-        for f in files:
-            t = list_tables(str(f))
-            if want in {x.lower() for x in t}:
-                first, tables, hist = f, t, _history_tables(t)
+    if root.is_dir() and hist and (kind or "nvme") not in hist:   # this database lacks the table: use one that has it
+        listed = {}
+        for want in ([kind] if kind else ["nvme", "mi"]):
+            for f in files:
+                t = listed[f] = listed.get(f) or list_tables(str(f))
+                if HISTORY_TABLES[want] in {x.lower() for x in t}:
+                    first, tables, hist = f, t, _history_tables(t)
+                    break
+            if (kind or "nvme") in hist or want in hist:
                 break
     if hist:
         kind = kind or ("nvme" if "nvme" in hist else "mi")
@@ -523,61 +552,81 @@ def import_source(conn: sqlite3.Connection, source_id: int, mi_layout: dict | No
     mapping = json.loads(src["mapping_json"])
     layout = merged_layout(mi_layout)
     root = Path(src["path"])
+    folder = root.is_dir()
     files = discover(root)               # a folder is scanned again: databases added since the last import are picked up
     eventlog.emit("info", "import", f"Importing '{src['name'] or src['path']}' (table {mapping.get('table')}, {len(files)} database(s))",
                   source_id=source_id, mapping=mapping, mi_layout_overrides=mi_layout or {})
     # the files may have changed since they were registered: record the hash of the bytes actually imported
-    conn.execute("UPDATE cmd_source SET sha256=? WHERE id=?", (source_sha256(root), source_id))
+    conn.execute("UPDATE cmd_source SET sha256=? WHERE id=?", (source_sha256(root, files), source_id))
     conn.execute("DELETE FROM decoded_command WHERE source_id=?", (source_id,))
     conn.execute("DELETE FROM cmd_signature WHERE source_id=?", (source_id,))
     sigs: dict[str, dict] = {}
-    batch: list[tuple] = []
     total = bad = 0
     errors: list[dict] = []
     per_file: list[dict] = []
-    id_col, test_col, script_col, seq_col = mapping.get("id"), mapping.get("test"), mapping.get("script"), mapping.get("seq")
     table = str(mapping.get("table", "")).lower()
     for f in files:
         rel, ftest = _rel(root, f), test_name(root, f)
         fs: dict[str, Any] = {"rel": rel, "test": ftest, "rows": 0, "decoded": 0}
         per_file.append(fs)
+        # a database counts only once it has been read to the end: one that fails half-way contributes nothing
+        fsigs: dict[str, dict] = {}
+        fbatch: list[tuple] = []
+        n = fbad = 0
+        first_id = None
         try:
-            if table not in {t.lower() for t in list_tables(str(f))}:
+            tables = list_tables(str(f))
+            if table not in {t.lower() for t in tables}:
                 fs["error"] = f"no table {mapping.get('table')}"
                 continue
-            n = 0
-            for r in iter_source_rows(str(f), mapping):
+            fmap = fit_mapping(mapping, tables)
+            id_col, test_col, script_col, seq_col = (fmap.get(k) for k in ("id", "test", "script", "seq"))
+            for r in iter_source_rows(str(f), fmap):
                 n += 1
-                total += 1
-                fs["rows"] += 1
-                if progress and total % PROGRESS_EVERY == 0:      # polled on rows SCANNED (decode failures included), so cancellation is honoured
-                    progress(total)
+                if progress and (total + n) % PROGRESS_EVERY == 0:   # polled on rows SCANNED (decode failures included), so cancellation is honoured
+                    progress(total + n)
                 try:
-                    d = decode_row(r, mapping, layout)
+                    d = decode_row(r, fmap, layout)
                     seq = _int(_meta(r, seq_col, n))
                     seq = n if seq is None else seq
                 except Exception as e:  # noqa: BLE001
-                    bad += 1
+                    fbad += 1
                     if len(errors) < 25:
-                        errors.append({"row": _meta(r, id_col, n), "error": str(e), **({"file": rel} if root.is_dir() else {})})
+                        errors.append({"row": _meta(r, id_col, n), "error": str(e), **({"file": rel} if folder else {})})
                     continue
-                fs["decoded"] += 1
-                s = sigs.get(d["signature"])
-                if s is None:
-                    s = sigs[d["signature"]] = {"interface": d["interface"], "queue": d["queue"], "cs": d["cs"], "opcode": d["opcode"],
-                                                "nsid": d["nsid"], "dwords": d["dwords"], "count": 0}
-                s["count"] += 1
-                batch.append((source_id, _meta(r, id_col, n), str(_meta(r, test_col, ftest if test_col == FROM_FILE or root.is_dir() else "")),
-                              str(_meta(r, script_col, rel if root.is_dir() else "")), seq,
-                              d["interface"], d["queue"], d["cs"], d["opcode"], d["nsid"], d["signature"]))
-                if len(batch) >= 20000:
-                    _flush(conn, batch)
-                    batch = []
+                s_ = fsigs.get(d["signature"])
+                if s_ is None:
+                    s_ = fsigs[d["signature"]] = {"interface": d["interface"], "queue": d["queue"], "cs": d["cs"], "opcode": d["opcode"],
+                                                  "nsid": d["nsid"], "dwords": d["dwords"], "count": 0}
+                s_["count"] += 1
+                if folder:
+                    # one database = one test script: a test-name column inside it names test cases *of this file*, so the
+                    # same name in two databases stays two tests
+                    col_test = _meta(r, test_col, None) if isinstance(test_col, str) else None
+                    test = f"{ftest}:{col_test}" if col_test not in (None, "") else ftest
+                else:
+                    test = _meta(r, test_col, ftest if test_col == FROM_FILE else "")
+                fbatch.append((source_id, _meta(r, id_col, n), str(test), str(_meta(r, script_col, rel if folder else "")), seq,
+                               d["interface"], d["queue"], d["cs"], d["opcode"], d["nsid"], d["signature"]))
+                if len(fbatch) >= BATCH:
+                    if first_id is None:
+                        first_id = (conn.execute("SELECT MAX(id) FROM decoded_command").fetchone()[0] or 0) + 1
+                    _flush(conn, fbatch)
+                    fbatch = []
         except sqlite3.DatabaseError as e:                  # a corrupt or locked database is reported, the others are still imported
-            fs["error"] = str(e)
+            fs.update({"error": str(e), "rows": n, "decoded": 0})
+            if first_id is not None:                        # rows of this database already written are taken back
+                conn.execute("DELETE FROM decoded_command WHERE source_id=? AND id>=?", (source_id, first_id))
+            continue
+        _flush(conn, fbatch)
+        for k, v in fsigs.items():
+            s_ = sigs.setdefault(k, {**v, "count": 0})
+            s_["count"] += v["count"]
+        fs.update({"rows": n, "decoded": n - fbad})
+        total += n
+        bad += fbad
     if progress:
         progress(total)                                    # last chance to cancel before the import is finalised
-    _flush(conn, batch)
     conn.executemany("INSERT INTO cmd_signature(source_id,signature,interface,queue,cs,opcode,nsid,dwords_json,count) VALUES(?,?,?,?,?,?,?,?,?)",
                      [(source_id, k, v["interface"], v["queue"], v["cs"], v["opcode"], v["nsid"], json.dumps(v["dwords"]), v["count"])
                       for k, v in sigs.items()])

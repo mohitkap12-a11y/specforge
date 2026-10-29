@@ -271,10 +271,13 @@ def analyze_execution(conn: sqlite3.Connection, set_id: int, source_id: int, pro
     unknown: dict[tuple, int] = defaultdict(int)
     stats = {"tests": 0, "commands": 0, "unknown_commands": 0}
 
-    def finish(test: str, t: dict) -> None:
+    def finish(group: tuple[str, str], t: dict) -> None:
+        test = group[1]
         fp = t["hash"].hexdigest()[:20]
         stats["tests"] += 1
-        per_test.append((set_id, source_id, test, t["script"], f"exec:{source_id}:{fp}", t["commands"], t["unknown"], json.dumps(sorted(t["items"]))))
+        # a script named like a test is another group (see _group_of): its per-test row must not replace the test's
+        label = f"script {test}" if group[0] == "script" else test
+        per_test.append((set_id, source_id, label, t["script"], f"exec:{source_id}:{fp}", t["commands"], t["unknown"], json.dumps(sorted(t["items"]))))
         f = flows.get(fp)
         if f is None:
             flows[fp] = {"tests": [test], "n_tests": 1, "steps": t["steps"], "truncated": t["truncated"], "n_steps": t["n_steps"],
@@ -301,7 +304,7 @@ def analyze_execution(conn: sqlite3.Connection, set_id: int, source_id: int, pro
         g = _group_of(r)
         if g != cur_test:
             if t is not None:
-                finish(cur_test[1], t)
+                finish(cur_test, t)
             cur_test = g
             t = {"steps": [], "last": None, "open": False, "hash": hashlib.sha1(), "truncated": False, "n_steps": 0, "commands": 0,
                  "items": {}, "evidence": [], "unknown": 0, "script": r["script"]}
@@ -330,7 +333,7 @@ def analyze_execution(conn: sqlite3.Connection, set_id: int, source_id: int, pro
         if t["open"]:
             _add_to_step(t["steps"][-1], d)
     if t is not None:
-        finish(cur_test[1], t)
+        finish(cur_test, t)
 
     res = _store(conn, set_id, source_id, cat, flows)
     conn.execute("DELETE FROM exec_test WHERE set_id=? AND source_id=?", (set_id, source_id))

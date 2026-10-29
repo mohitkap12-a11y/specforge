@@ -10,8 +10,10 @@ import { useDebounced, useStoredState } from "../hooks";
 import type { CovItem, TestCov } from "../types";
 
 const LIMIT = 100;
-const TEST_KINDS = ["command", "value", "boundary", "reserved", "requirement"] as const;
-const TEST_KIND_LABEL: Record<string, string> = { command: "Commands", value: "Values", boundary: "Boundaries", reserved: "Reserved bits", requirement: "Requirements" };
+// same kinds as coverage.TEST_KINDS on the server; a kind missing from the catalog shows as "–"
+const TEST_KINDS = ["command", "value", "boundary", "reserved", "mi_tunnel", "requirement"] as const;
+const TEST_KIND_LABEL: Record<string, string> = { command: "Commands", value: "Values", boundary: "Boundaries", reserved: "Reserved bits",
+  mi_tunnel: "Over NVMe-MI", requirement: "Requirements" };
 
 /** Coverage of every test script (database) on its own; click one to list the items it exercised. */
 function ByTest({ runId, test, onTest }: { runId: number; test: string; onTest: (t: string) => void }) {
