@@ -104,6 +104,14 @@ CREATE TABLE IF NOT EXISTS exec_analysis(
   stats_json TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(set_id, source_id)
 );
 
+-- What each executed test (one database of a folder source, or one test name) exercised, as of the last analysis
+CREATE TABLE IF NOT EXISTS exec_test(
+  set_id INTEGER NOT NULL REFERENCES spec_set(id) ON DELETE CASCADE,
+  source_id INTEGER NOT NULL REFERENCES cmd_source(id) ON DELETE CASCADE,
+  test_id TEXT NOT NULL, script TEXT, scenario_sid TEXT, commands INTEGER, unknown INTEGER, items_json TEXT,
+  PRIMARY KEY(set_id, source_id, test_id)
+);
+
 CREATE TABLE IF NOT EXISTS llm_cache(
   key TEXT PRIMARY KEY, provider TEXT, model TEXT, response TEXT, created TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -142,6 +150,10 @@ CREATE TABLE IF NOT EXISTS coverage_result(
   state TEXT NOT NULL, match_count INTEGER DEFAULT 0, evidence_json TEXT,
   sid TEXT, origin TEXT, kind TEXT, title TEXT, observability TEXT, review_state TEXT, predicate_json TEXT,   -- snapshot of the scenario as judged
   PRIMARY KEY(run_id, scenario_id)
+);
+CREATE TABLE IF NOT EXISTS coverage_test(
+  run_id INTEGER NOT NULL REFERENCES coverage_run(id) ON DELETE CASCADE, test_id TEXT NOT NULL,
+  stats_json TEXT, items_json TEXT, PRIMARY KEY(run_id, test_id)
 );
 CREATE TABLE IF NOT EXISTS item_result(
   run_id INTEGER NOT NULL REFERENCES coverage_run(id) ON DELETE CASCADE, item_key TEXT NOT NULL,

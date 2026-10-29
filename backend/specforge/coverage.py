@@ -269,6 +269,7 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
                        by_key[k]["kind"], by_key[k]["parent_key"], by_key[k]["label"], by_key[k]["observability"], by_key[k]["na_reason"],
                        by_key[k]["attrs_json"]) for k, v in item_res.items()])
     summary = summarize_run(conn, run_id, set_id, source_id, items, item_res, sigs_by)
+    summary["tests"] = per_test_coverage(conn, run_id, set_id, source_id, items, item_res)
     if execution is not None:
         summary["execution"] = {k: v for k, v in execution.items() if k not in ("new", "updated", "removed", "links_reopened")}
     conn.execute("UPDATE coverage_run SET summary_json=? WHERE id=?", (json.dumps(summary), run_id))
@@ -279,6 +280,45 @@ def run_coverage(conn: sqlite3.Connection, set_id: int, source_id: int, progress
     if summary["unknown_commands"]:
         eventlog.emit("warn", "coverage", f"{len(summary['unknown_commands'])} command type(s) in the database are not in the catalog", run_id=run_id, top=summary["unknown_commands"][:5])
     return run_id  # type: ignore[return-value]
+
+
+TEST_KINDS = ("command", "value", "boundary", "reserved", "mi_tunnel", "requirement")   # what a single test is reported against
+
+
+def per_test_coverage(conn: sqlite3.Connection, run_id: int, set_id: int, source_id: int, items: list[dict], item_res: dict[str, dict]) -> dict:
+    """Coverage of every executed test on its own (one test script = one database of a folder source): the catalog items it
+    exercised (observed in its commands, plus the approved requirement links of its flow), against the whole catalog."""
+    tests = rows(conn, "SELECT test_id,script,scenario_sid,commands,unknown,items_json FROM exec_test WHERE set_id=? AND source_id=? ORDER BY test_id",
+                 (set_id, source_id))
+    approved: dict[str, set] = defaultdict(set)
+    for r in conn.execute("SELECT s.sid, si.item_key FROM scenario_item si JOIN scenario s ON s.id=si.scenario_id "
+                          "WHERE s.set_id=? AND s.origin='exec' AND s.source_id=? AND si.state='approved'", (set_id, source_id)):
+        approved[r[0]].add(r[1])
+    live = {i["key"]: i["kind"] for i in items if i["kind"] in TEST_KINDS and item_res[i["key"]]["state"] != "na"}
+    totals: dict[str, int] = defaultdict(int)
+    for k in live.values():
+        totals[k] += 1
+    denominator = sum(1 for k in live.values() if k in DIRECT_KINDS)
+    batch, pcts = [], []
+    for t in tests:
+        hit = sorted((set(jloads(t["items_json"], [])) | approved.get(t["scenario_sid"], set())) & live.keys())
+        by_kind: dict[str, int] = defaultdict(int)
+        for k in hit:
+            by_kind[live[k]] += 1
+        direct = sum(by_kind[k] for k in DIRECT_KINDS)
+        pct = round(100 * direct / denominator, 2) if denominator else None
+        pcts.append(pct or 0)
+        st = {"test": t["test_id"], "script": t["script"], "scenario": t["scenario_sid"], "commands": t["commands"], "unknown_commands": t["unknown"],
+              "items": len(hit), "direct": direct, "denominator": denominator, "pct_covered": pct,
+              "by_kind": {k: {"exercised": by_kind.get(k, 0), "total": totals[k]} for k in TEST_KINDS if totals.get(k)}}
+        batch.append((run_id, t["test_id"], json.dumps(st), json.dumps(hit)))
+    conn.executemany("INSERT OR REPLACE INTO coverage_test(run_id,test_id,stats_json,items_json) VALUES(?,?,?,?)", batch)
+    return {"count": len(tests), "denominator": denominator,
+            "max_pct": max(pcts) if pcts else None, "mean_pct": round(sum(pcts) / len(pcts), 2) if pcts else None}
+
+
+def test_results(conn: sqlite3.Connection, run_id: int) -> list[dict]:
+    return [jloads(r["stats_json"], {}) for r in rows(conn, "SELECT stats_json FROM coverage_test WHERE run_id=? ORDER BY test_id", (run_id,))]
 
 
 def _run_meta(conn: sqlite3.Connection, set_id: int, src: dict, scen: list[dict]) -> dict[str, Any]:

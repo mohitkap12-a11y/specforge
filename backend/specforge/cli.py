@@ -226,11 +226,15 @@ def cmd_catalog(a):
     print("references:", refs.summarize(refs.resolve_references(conn, a.set_id)))
 
 
-def _import(conn, path: str) -> int:
-    """Re-import the source already registered for this file, so `analyze` and `coverage` share its executed scenarios and reviews."""
+def _import(conn, path: str, kind: str | None = None) -> int:
+    """Re-import the source already registered for this file, so `analyze` and `coverage` share its executed scenarios and reviews.
+
+    `kind` (nvme | mi) picks the command table of a command-history database; the same file can be registered once per kind."""
     want = Path(path).resolve()
-    known = [r["id"] for r in rows(conn, "SELECT id,path FROM cmd_source ORDER BY id DESC") if Path(r["path"]).resolve() == want]
-    sid = known[0] if known else cmddb.register_source(conn, path, None)
+    table = cmddb.suggest_mapping(path, kind)["mapping"]["table"]
+    known = [r["id"] for r in rows(conn, "SELECT id,path,mapping_json FROM cmd_source ORDER BY id DESC")
+             if Path(r["path"]).resolve() == want and json.loads(r["mapping_json"]).get("table") == table]
+    sid = known[0] if known else cmddb.register_source(conn, path, None, kind=kind)
     print("import:", {k: v for k, v in cmddb.import_source(conn, sid, config.load_settings(conn).get("mi_layout")).items() if k != "errors"})
     return sid
 
@@ -244,7 +248,7 @@ def _print_analysis(res: dict) -> None:
 
 def cmd_analyze(a):
     conn = _conn()
-    sid = _import(conn, a.db)
+    sid = _import(conn, a.db, a.kind)
     _print_analysis(execscen.analyze_execution(conn, a.set_id, sid))
     for s in rows(conn, "SELECT title,provenance_json FROM scenario WHERE set_id=? AND origin='exec' AND source_id=? ORDER BY id", (a.set_id, sid))[:a.show]:
         print("  -", s["title"])
@@ -252,11 +256,16 @@ def cmd_analyze(a):
 
 def cmd_coverage(a):
     conn = _conn()
-    sid = _import(conn, a.db)
+    sid = _import(conn, a.db, a.kind)
     _print_analysis(execscen.analyze_execution(conn, a.set_id, sid))
     rid = coverage.run_coverage(conn, a.set_id, sid, analyze=False)
     o = json.loads(row(conn, "SELECT summary_json FROM coverage_run WHERE id=?", (rid,))["summary_json"])["overall"]
     print(f"coverage run {rid}: covered {o['covered']}/{o['denominator']} ({o['pct_covered']}%), stimulus-only {o['stimulus_covered']}, N/A {o['na']}")
+    tests = coverage.test_results(conn, rid)
+    if len(tests) > 1:
+        print(f"per test ({len(tests)}):")
+        for t in tests[:a.show_tests]:
+            print(f"  {t['pct_covered'] or 0:>6}%  {t['commands']:>6} cmds  {t['test']}")
     if a.out:
         data, _, name = reports.export(conn, rid, a.format)
         p = Path(a.out) / name
@@ -277,6 +286,9 @@ def cmd_models(a):
                 print("   ", m.id, m.detail)
         except Exception as e:  # noqa: BLE001
             print(name, "error:", e)
+
+
+KIND_HELP = "command-history databases (a file, or a folder of them: one database per test script): read the NVMe (CommandHistoryTable, default) or NVMe-MI (MICommandHistoryTable) commands"
 
 
 def main(argv=None):
@@ -307,10 +319,13 @@ def main(argv=None):
     s = sub.add_parser("reparse", help="parse a registered document again"); s.add_argument("document_id", type=int); s.add_argument("--activate", action="store_true")
     s.add_argument("--previous", type=int, help="run id to diff against"); s.add_argument("--workers", type=int, default=None); s.set_defaults(fn=cmd_reparse)
     s = sub.add_parser("catalog", help="build the catalog for a spec set"); s.add_argument("set_id", type=int); s.set_defaults(fn=cmd_catalog)
-    s = sub.add_parser("analyze", help="import a command DB and derive one scenario per executed test case"); s.add_argument("set_id", type=int)
-    s.add_argument("db"); s.add_argument("--show", type=int, default=50, help="list this many scenarios"); s.set_defaults(fn=cmd_analyze)
-    s = sub.add_parser("coverage", help="import a command DB, analyse what it executed and run coverage"); s.add_argument("set_id", type=int); s.add_argument("db")
-    s.add_argument("--out", help="directory for the report"); s.add_argument("--format", default="xlsx", choices=sorted(reports.EXPORTS)); s.set_defaults(fn=cmd_coverage)
+    s = sub.add_parser("analyze", help="import a command DB (file or folder) and derive one scenario per executed test case"); s.add_argument("set_id", type=int)
+    s.add_argument("db"); s.add_argument("--show", type=int, default=50, help="list this many scenarios"); s.add_argument("--kind", choices=cmddb.KINDS, help=KIND_HELP)
+    s.set_defaults(fn=cmd_analyze)
+    s = sub.add_parser("coverage", help="import a command DB (file or folder), analyse what it executed and run coverage"); s.add_argument("set_id", type=int); s.add_argument("db")
+    s.add_argument("--out", help="directory for the report"); s.add_argument("--format", default="xlsx", choices=sorted(reports.EXPORTS))
+    s.add_argument("--kind", choices=cmddb.KINDS, help=KIND_HELP)
+    s.add_argument("--show-tests", type=int, default=50, help="list the coverage of this many tests"); s.set_defaults(fn=cmd_coverage)
     s = sub.add_parser("models", help="list models from Ollama and OpenCode"); s.set_defaults(fn=cmd_models)
     a = p.parse_args(argv)
     a.fn(a)

@@ -7,9 +7,48 @@ import { Badge, Empty, ErrorNote, Legend, Loading, Pager, PageHeader, Pct, STATE
 import { SetPicker, useSelectedSet } from "../components/SetPicker";
 import { useJobs } from "../components/jobs";
 import { useDebounced, useStoredState } from "../hooks";
-import type { CovItem } from "../types";
+import type { CovItem, TestCov } from "../types";
 
 const LIMIT = 100;
+// same kinds as coverage.TEST_KINDS on the server; a kind missing from the catalog shows as "–"
+const TEST_KINDS = ["command", "value", "boundary", "reserved", "mi_tunnel", "requirement"] as const;
+const TEST_KIND_LABEL: Record<string, string> = { command: "Commands", value: "Values", boundary: "Boundaries", reserved: "Reserved bits",
+  mi_tunnel: "Over NVMe-MI", requirement: "Requirements" };
+
+/** Coverage of every test script (database) on its own; click one to list the items it exercised. */
+function ByTest({ runId, test, onTest }: { runId: number; test: string; onTest: (t: string) => void }) {
+  const q = useQuery({ queryKey: ["covtests", runId], queryFn: () => api.covTests(runId) });
+  const [filter, setFilter] = useState("");
+  const [sort, setSort] = useState<"pct" | "name">("pct");
+  const tests = (q.data ?? []).filter((t) => t.test.toLowerCase().includes(filter.toLowerCase()));
+  const sorted = [...tests].sort(sort === "name" ? (a, b) => a.test.localeCompare(b.test) : (a, b) => (b.pct_covered ?? -1) - (a.pct_covered ?? -1));
+  if (!q.data?.length) return <Loading q={q} />;
+  const cell = (t: TestCov, k: string) => { const v = t.by_kind[k]; return v ? `${v.exercised}/${v.total}` : "–"; };
+  return (
+    <div className="card">
+      <div className="row" style={{ marginBottom: 8 }}>
+        <h2 className="grow">By test script <span className="muted small">({q.data.length} · what each one exercised on its own; click to filter the items)</span></h2>
+        <input placeholder="Filter tests…" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter tests" />
+        <select value={sort} onChange={(e) => setSort(e.target.value as "pct" | "name")} aria-label="Sort tests">
+          <option value="pct">Most coverage first</option><option value="name">By name</option>
+        </select>
+      </div>
+      <div className="scroll" style={{ maxHeight: 380 }}>
+        <table className="t">
+          <thead><tr><th>Test</th><th>Commands sent</th><th>% of catalog</th>{TEST_KINDS.map((k) => <th key={k}>{TEST_KIND_LABEL[k]}</th>)}</tr></thead>
+          <tbody>{sorted.map((t) => (
+            <tr key={t.test} className={`click ${test === t.test ? "sel" : ""}`} onClick={() => onTest(test === t.test ? "" : t.test)}>
+              <td>{t.test}{t.unknown_commands > 0 && <div className="small muted">{t.unknown_commands} command(s) not in the catalog</div>}</td>
+              <td>{t.commands}</td><td><Pct v={t.pct_covered} /></td>
+              {TEST_KINDS.map((k) => <td key={k} className="small">{cell(t, k)}</td>)}
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+      <div className="muted small">% of catalog counts the commands and requirements a test exercised against all of them (N/A excluded); requirements count once their link is approved.</div>
+    </div>
+  );
+}
 
 function Evidence({ run, item, onClose }: { run: number; item: CovItem; onClose: () => void }) {
   const q = useQuery({ queryKey: ["evidence", run, item.key], queryFn: () => api.covEvidence(run, item.key) });
@@ -47,14 +86,16 @@ function RunView({ runId, prevId }: { runId: number; prevId: number | null }) {
   const [state, setState] = useState("");
   const [kind, setKind] = useState("");
   const [command, setCommand] = useState("");
+  const [test, setTest] = useState("");
   const [q, setQ] = useState("");
   const dq = useDebounced(q);
   const [offset, setOffset] = useState(0);
   const [item, setItem] = useState<CovItem | null>(null);
   const [showDiff, setShowDiff] = useState(false);
-  useEffect(() => { setOffset(0); }, [runId, state, kind, command, dq]);
-  useEffect(() => { setItem(null); setShowDiff(false); }, [runId]);
-  const items = useQuery({ queryKey: ["covitems", runId, state, kind, command, dq, offset], queryFn: () => api.covItems(runId, { state, kind, command, q: dq, offset, limit: LIMIT }) });
+  useEffect(() => { setOffset(0); }, [runId, state, kind, command, test, dq]);
+  useEffect(() => { setItem(null); setShowDiff(false); setTest(""); }, [runId]);
+  const items = useQuery({ queryKey: ["covitems", runId, state, kind, command, test, dq, offset],
+    queryFn: () => api.covItems(runId, { state, kind, command, test: test || undefined, q: dq, offset, limit: LIMIT }) });
   const diff = useQuery({ queryKey: ["covdiff", prevId, runId], enabled: showDiff && prevId !== null, queryFn: () => api.covDiff(prevId!, runId) });
   if (sum.isLoading || sum.error || !sum.data) return <Loading q={sum} />;
   const s = sum.data.summary;
@@ -93,6 +134,8 @@ function RunView({ runId, prevId }: { runId: number; prevId: number | null }) {
         </div>
       </div>
 
+      {(s.tests?.count ?? 0) > 0 && <ByTest runId={runId} test={test} onTest={setTest} />}
+
       {s.unknown_commands.length > 0 && (
         <div className="card">
           <h2>Commands in the DB that are not in the catalog</h2>
@@ -117,6 +160,7 @@ function RunView({ runId, prevId }: { runId: number; prevId: number | null }) {
             <option value="">All kinds</option>{Object.keys(kinds).map((k) => <option key={k} value={k}>{k}</option>)}
           </select>
           {command && <button onClick={() => setCommand("")}>Command: {command.split("/").pop()} ×</button>}
+          {test && <button onClick={() => setTest("")} title="Only the items this test exercised">Test: {test} ×</button>}
           <input placeholder="Search…" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
         <Loading q={items} />

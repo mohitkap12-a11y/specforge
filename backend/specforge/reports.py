@@ -8,7 +8,7 @@ import json
 import sqlite3
 from typing import Any
 
-from . import __version__
+from . import __version__, coverage
 from .core.db import jloads, row, rows
 from .execscen import flow_summary
 
@@ -44,7 +44,20 @@ def build_dataset(conn: sqlite3.Connection, run_id: int) -> dict[str, Any]:
         executed.append({"sid": s["sid"], "title": s["title"], "test_count": p.get("test_count", 0), "tests": p.get("tests", []),
                          "commands": p.get("commands", 0), "steps": p.get("n_steps", len(p.get("steps", []))),
                          "flow": flow_summary(p.get("steps", []), 400) + (" → … (log continues)" if p.get("truncated") else "")})
-    return {"header": header, "summary": summary, "specs": specs, "items": items, "scenarios": scen, "executed": executed, "issues": issues}
+    tests = coverage.test_results(conn, run_id)
+    return {"header": header, "summary": summary, "specs": specs, "items": items, "scenarios": scen, "executed": executed, "issues": issues,
+            "tests": tests}
+
+
+def _test_rows(ds) -> tuple[list[str], list[list]]:
+    """One row per executed test (test script / database): commands sent and the catalog items it exercised on its own."""
+    head = ["test", "script", "commands", "unknown commands", "% of catalog", *[f"{k} exercised" for k in coverage.TEST_KINDS]]
+    data = []
+    for t in ds.get("tests", []):
+        bk = t.get("by_kind", {})
+        data.append([t["test"], t.get("script") or "", t["commands"], t["unknown_commands"], _pct(t["pct_covered"]),
+                     *[f"{bk[k]['exercised']}/{bk[k]['total']}" if k in bk else "" for k in coverage.TEST_KINDS]])
+    return head, data
 
 
 def _pct(v):
@@ -79,6 +92,11 @@ def to_csv(ds, which: str = "gaps") -> bytes:
         w.writerow(["key", "kind", "command", "label", "observability", "state"])
         for i in _gap_rows(ds):
             w.writerow([i["key"], i["kind"], i["command"], i["label"], i["observability"], i["state"]])
+    elif which == "tests":
+        head, data = _test_rows(ds)
+        w.writerow(head)
+        for r in data:
+            w.writerow(r)
     elif which == "executed":
         w.writerow(["sid", "title", "tests", "commands", "steps", "flow", "test names"])
         for x in ds.get("executed", []):
@@ -148,6 +166,7 @@ def to_xlsx(ds) -> bytes:
     sheet("By kind", ["kind", "covered", "stimulus_covered", "partial", "not_covered", "no_scenario", "needs_review", "na", "% covered", "% incl. stimulus"],
           [[k, v["covered"], v["stimulus_covered"], v["partial"], v["not_covered"], v["no_scenario"], v["needs_review"], v["na"],
             _pct(v["pct_covered"]), _pct(v["pct_incl_stimulus"])] for k, v in by_kind.items()])
+    sheet("By test", *_test_rows(ds))
     sheet("Executed scenarios", ["sid", "title", "tests", "commands", "steps", "flow", "test names"],
           [[x["sid"], x["title"], x["test_count"], x["commands"], x["steps"], x["flow"], ", ".join(x["tests"][:50])] for x in ds.get("executed", [])])
     sheet("Scenarios", ["sid", "origin", "kind", "title", "observability", "review state", "result", "match_count"],
@@ -192,6 +211,9 @@ def to_html(ds) -> bytes:
                         for k, v in ds["summary"].get("by_kind_all", {}).items())
     exec_rows = "".join(f"<tr><td>{e(x['title'])}</td><td title='{e(', '.join(x['tests'][:30]))}'>{x['test_count']}</td><td>{x['commands']}</td>"
                         f"<td>{e(x['flow'])}</td></tr>" for x in ds.get("executed", []))
+    th, td = _test_rows(ds)
+    test_rows = "".join("<tr>" + "".join(f"<td>{e(str(c))}</td>" for c in r) + "</tr>" for r in td)
+    test_head = "".join(f"<th>{e(c)}</th>" for c in th)
     gap_rows = "".join(f"<tr><td>{e(i['command'])}</td><td>{e(i['kind'])}</td><td>{e(i['label'])}</td><td>{e(i['state'])}</td></tr>" for i in _gap_rows(ds))
     hdr = "".join(f"<tr><th>{e(k)}</th><td>{e(', '.join(v) if isinstance(v, list) else str(v))}</td></tr>" for k, v in ds["header"].items())
     legend = "".join(f'<span style="margin-right:12px"><i style="display:inline-block;width:10px;height:10px;background:{c}"></i> {k}</span>' for k, c in colors.items())
@@ -203,6 +225,8 @@ th{{background:#f3f4f6}}.big{{font-size:32px;font-weight:700}}@media print{{body
  &nbsp; denominator {o.get('denominator', 0)} (N/A excluded: {o.get('na', 0)})</p><p>{legend}</p>
 <h2>By kind</h2><table><tr><th>kind</th><th>covered</th><th>%</th><th>distribution</th></tr>{kind_rows}</table>
 <h2>Executed scenarios ({len(ds.get('executed', []))})</h2><table><tr><th>scenario</th><th>tests</th><th>commands</th><th>flow</th></tr>{exec_rows}</table>
+<h2>By test ({len(td)})</h2><p>What each test (test script / database) exercised on its own; % of catalog counts commands and requirements.</p>
+<table><tr>{test_head}</tr>{test_rows}</table>
 <h2>By command</h2><table><tr><th>key</th><th>command</th><th>covered</th><th>%</th><th>distribution</th></tr>{cmd_rows}</table>
 <h2>Gaps</h2><table><tr><th>command</th><th>kind</th><th>item</th><th>state</th></tr>{gap_rows}</table></body></html>"""
     return doc.encode()

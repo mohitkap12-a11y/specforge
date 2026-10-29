@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
 import threading
 import time
@@ -14,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
-from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
@@ -30,6 +31,7 @@ from ..llm.service import LLMService, make_provider
 
 
 MAX_CONVERT_BYTES = 200 * 1024 * 1024
+MAX_CMDDB_UPLOAD_BYTES = int(os.environ.get("SPECFORGE_CMDDB_UPLOAD_MB", "4096")) * 1024 * 1024   # per upload (all files together)
 SCENARIO_STATES = {"draft", "approved", "rejected"}
 LINK_STATES = {"proposed", "approved", "rejected"}
 EXEC_READONLY = "executed scenarios are read from the command DB: they have no review state and their steps cannot be edited; review their requirement links instead"
@@ -53,7 +55,8 @@ def safe_join(root: Path, rel: str) -> Path | None:
 # Reachable without a session (the login page needs them). Everything else under /api/ needs an active account.
 PUBLIC = {("POST", "/api/auth/login"), ("POST", "/api/auth/register"), ("POST", "/api/auth/logout"), ("GET", "/api/auth/me")}
 # Admin only: user management, global settings, wiping shared data.
-ADMIN_ONLY = {("PUT", "/api/settings"), ("POST", "/api/reset"), ("DELETE", "/api/logs")}
+ADMIN_ONLY = {("PUT", "/api/settings"), ("POST", "/api/reset"), ("DELETE", "/api/logs"),
+              ("GET", "/api/fs/browse")}     # lists the server's folders: other users type or drop a path instead
 ADMIN_PREFIX = "/api/users"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # With login turned off (`serve --no-auth`, localhost only) the single local user is the admin.
@@ -1138,17 +1141,112 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ command DBs
     @app.get("/api/cmddb/suggest")
-    def suggest(path: str):
+    def suggest(path: str, kind: str | None = None):
         try:
-            return cmddb.suggest_mapping(path)
+            return cmddb.suggest_mapping(path, kind or None)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(400, str(e))
+
+    @app.get("/api/cmddb/scan")
+    def scan_dbs(path: str, kind: str | None = None):
+        """Every database of a file or folder (sub-folders included), with its test name and command counts."""
+        if kind and kind not in cmddb.KINDS:
+            raise HTTPException(400, f"kind must be one of {', '.join(cmddb.KINDS)}")
+        try:
+            return cmddb.scan(path, kind or None)
+        except FileNotFoundError:
+            raise HTTPException(400, f"No such file or folder on the server: {path}")
+        except (OSError, sqlite3.DatabaseError, ValueError) as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/api/fs/browse")
+    def browse_fs(path: str | None = None):
+        """Folders and SQLite databases on the server, to pick a command DB or a folder of them. Without a path: the
+        starting points (home folder, uploads, drives on Windows)."""
+        if not path:
+            roots = [str(Path.home()), str(_cmddb_uploads())]
+            if os.name == "nt":
+                roots += [f"{d}:\\" for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.isdir(f"{d}:\\")]
+            return {"path": "", "parent": None, "dirs": [{"name": r, "path": r} for r in dict.fromkeys(roots)], "databases": []}
+        p = Path(path).expanduser()
+        if not p.is_dir():
+            raise HTTPException(400, f"Not a folder on the server: {path}")
+        dirs, dbs = [], []
+        try:
+            for e in sorted(p.iterdir(), key=lambda e: e.name.lower()):
+                if e.name.startswith("."):
+                    continue
+                try:
+                    if e.is_dir():
+                        dirs.append({"name": e.name, "path": str(e)})
+                    elif e.suffix.lower() in cmddb.DB_SUFFIXES and e.is_file():
+                        dbs.append({"name": e.name, "path": str(e), "size": e.stat().st_size})
+                except OSError:
+                    continue
+                if len(dirs) + len(dbs) >= 5000:
+                    break
+        except OSError as e:
+            raise HTTPException(400, f"Cannot read {path}: {e.strerror or e}")
+        parent = str(p.parent) if p.parent != p else ""
+        return {"path": str(p), "parent": parent, "dirs": dirs, "databases": dbs}
+
+    def _cmddb_uploads() -> Path:
+        d = config.workspace_dir() / "cmddb-uploads"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @app.post("/api/cmddb/upload")
+    def upload_dbs(files: list[UploadFile] = File(...), paths: list[str] = Form(default=[])):
+        """Dropped / picked databases or folders, copied to the server (relative paths kept) so they can be added as one source.
+        `paths[i]` is the path of `files[i]` inside the dropped folder. Returns the folder they were saved to."""
+        rels = []
+        for i, f in enumerate(files):
+            parts = [x for x in re.split(r"[\\/]+", paths[i] if i < len(paths) and paths[i] else (f.filename or "")) if x not in ("", ".", "..")]
+            if not parts or Path(parts[-1]).suffix.lower() not in cmddb.DB_SUFFIXES:
+                continue                                    # anything that is not a database is left out
+            rels.append((f, parts))
+        if not rels:
+            raise HTTPException(400, f"No SQLite databases ({', '.join(cmddb.DB_SUFFIXES)}) in the upload")
+        top = {p[0] for _, p in rels if len(p) > 1}
+        label = top.pop() if len(top) == 1 and all(len(p) > 1 for _, p in rels) else ""
+        if label:                                           # one dropped folder: its databases are relative to it
+            rels = [(f, p[1:]) for f, p in rels]
+        dest = _cmddb_uploads() / (time.strftime("%Y%m%d-%H%M%S") + "-" + re.sub(r"[^\w.-]+", "_", label or "upload")[:60])
+        n = 1
+        while dest.exists():
+            dest = dest.with_name(f"{dest.name}-{n}"); n += 1
+        saved = size = 0
+        try:
+            for f, parts in rels:
+                target = dest.joinpath(*[re.sub(r'[<>:"|?*\x00-\x1f]', "_", x) for x in parts])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "wb") as out:
+                    while chunk := f.file.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > MAX_CMDDB_UPLOAD_BYTES:
+                            raise HTTPException(413, f"Upload is larger than {MAX_CMDDB_UPLOAD_BYTES // (1024 * 1024)} MB "
+                                                     "(SPECFORGE_CMDDB_UPLOAD_MB); put the databases where the server can read them and add the folder by path.")
+                        out.write(chunk)
+                if not cmddb.is_sqlite(target):
+                    target.unlink()
+                    continue
+                saved += 1
+        except BaseException:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise
+        if not saved:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise HTTPException(400, "None of the uploaded files is a SQLite database")
+        audit(f"Uploaded {saved} command database(s) to {dest}", databases=saved)
+        return {"path": str(dest), "databases": saved}
 
     @app.post("/api/cmddb")
     def add_source(body: dict = Body(...)):
         need(body, 'path')
         try:
-            sid = cmddb.register_source(conn(), body["path"], body.get("mapping"), body.get("name"))
+            sid = cmddb.register_source(conn(), body["path"], body.get("mapping"), body.get("name"), body.get("kind") or None)
+        except FileNotFoundError:
+            raise HTTPException(400, f"No such file or folder on the server: {body['path']}")
         except Exception as e:  # noqa: BLE001
             raise HTTPException(400, str(e))
         audit(f"Command database registered: {body['path']}", source_id=sid)
@@ -1225,10 +1323,13 @@ def create_app() -> FastAPI:
 
     @app.get("/api/coverage/{run_id}/items")
     def cov_items(run_id: int, state: str | None = None, kind: str | None = None, command: str | None = None, q: str | None = None,
-                  limit: int = 500, offset: int = 0):
+                  test: str | None = None, limit: int = 500, offset: int = 0):
         # reads the run's own snapshot (item_result), so historical runs are unaffected by later catalog rebuilds
         sql = "FROM item_result i WHERE i.run_id=?"
         args: list[Any] = [run_id]
+        if test is not None:                 # only the items this one test exercised
+            sql += " AND i.item_key IN (SELECT value FROM json_each((SELECT items_json FROM coverage_test WHERE run_id=? AND test_id=?)))"
+            args += [run_id, test]
         if state:
             sql += " AND i.state=?"; args.append(state)
         if kind:
@@ -1245,6 +1346,13 @@ def create_app() -> FastAPI:
             i["detail"] = jloads(i.pop("detail_json"), {})
             i["attrs"] = {k: a[k] for k in ("command", "dw", "hi", "lo", "vlo", "vhi", "family", "text", "strength") if k in a}
         return {"total": total, "items": out}
+
+    @app.get("/api/coverage/{run_id}/tests")
+    def cov_tests(run_id: int):
+        """Coverage of every executed test (test script / database) on its own."""
+        if not row(conn(), "SELECT 1 AS x FROM coverage_run WHERE id=?", (run_id,)):
+            raise HTTPException(404)
+        return coverage.test_results(conn(), run_id)
 
     @app.get("/api/coverage/{run_id}/evidence")
     def cov_evidence(run_id: int, item: str):

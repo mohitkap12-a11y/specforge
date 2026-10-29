@@ -62,6 +62,7 @@ export interface CovSummary {
     execution?: Omit<ExecAnalysis, "source_id" | "created">;
     unknown_commands: { interface: string; queue: string; opcode: number; commands: number }[];
     scenarios: { state: string; n: number }[]; scenario_errors: number;
+    tests?: { count: number; denominator: number; max_pct: number | null; mean_pct: number | null };
   };
 }
 export interface CovRun { id: number; set_id: number; source_id: number; created: string; overall: Counts | null }
@@ -72,7 +73,22 @@ export interface CovItem {
 export interface Evidence { id: number; sid: string; title: string; state: string; observability: string; result: string; match_count: number; evidence: any[] }
 export interface CmdSource {
   id: number; name: string; path: string; row_count: number; decoded_count: number; status: string; imported_at: string | null;
-  mapping: Record<string, any>; unknown: { undecodable_rows?: number; errors?: { row: unknown; error: string }[] };
+  mapping: Record<string, any>;
+  unknown: { undecodable_rows?: number; errors?: { row: unknown; error: string; file?: string }[]; files?: SourceFile[]; failed_files?: number };
+}
+/** One database of a command DB source (a folder holds one per test script). */
+export interface SourceFile { rel: string; test: string; rows: number; decoded: number; error?: string }
+export type CmdKind = "nvme" | "mi";
+export interface ScannedDb { path: string; rel: string; test: string; size: number; commands?: Partial<Record<CmdKind, number>>; tables?: string[]; error?: string }
+export interface DbScan {
+  path: string; folder: boolean; count: number; truncated: boolean; databases: ScannedDb[];
+  mapping?: Record<string, any>; warnings?: string[]; format?: string; kinds?: CmdKind[]; error?: string;
+}
+export interface FsListing { path: string; parent: string | null; dirs: { name: string; path: string }[]; databases: { name: string; path: string; size: number }[] }
+/** Coverage of one executed test (test script / database) on its own. */
+export interface TestCov {
+  test: string; script: string | null; scenario: string; commands: number; unknown_commands: number; items: number;
+  direct: number; denominator: number; pct_covered: number | null; by_kind: Record<string, { exercised: number; total: number }>;
 }
 export interface CatalogItem {
   id: number; key: string; kind: string; parent_key: string | null; label: string; observability: string; na_reason: string | null; attrs: Record<string, any>;
