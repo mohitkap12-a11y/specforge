@@ -37,6 +37,13 @@ describe("conversionSummary", () => {
   it("pluralises and drops zero counts", () => expect(conversionSummary({ words: 1204, headings: 1, tables: 3, list_items: 0, code_blocks: 0, pages: 2 })).toBe("2 pages · 1,204 words · 1 heading · 3 tables"));
 });
 
+import { jobErrorText } from "./util";
+
+describe("jobErrorText", () => {
+  it("unwraps the exception repr", () => expect(jobErrorText("ConversionError('No text could be extracted.')\nTraceback (most recent call last):")).toBe("No text could be extracted."));
+  it("keeps other first lines and handles empty errors", () => { expect(jobErrorText("interrupted by restart")).toBe("interrupted by restart"); expect(jobErrorText(null)).toBe("The job failed."); });
+});
+
 import { compareVersions, splitMarks } from "./util";
 
 describe("compareVersions", () => {

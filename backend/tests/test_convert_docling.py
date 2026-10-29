@@ -22,8 +22,14 @@ def _text(label, text):
 class StubConverter:
     calls: list = []
 
-    def __init__(self, status="success", markdown=MD, fail=None):
-        self.status, self.markdown, self.fail = status, markdown, fail
+    def __init__(self, status="success", markdown=MD, fail=None, fail_init=None, pictures=0):
+        self.status, self.markdown, self.fail, self.fail_init, self.pictures = status, markdown, fail, fail_init, pictures
+        self.inits = 0
+
+    def initialize_pipeline(self, fmt):
+        self.inits += 1
+        if self.fail_init:
+            raise self.fail_init
 
     def convert(self, path, raises_on_error=True):
         StubConverter.calls.append(path)
@@ -31,7 +37,7 @@ class StubConverter:
             raise self.fail
         doc = SimpleNamespace(
             texts=[_text("title", "Widget Spec"), _text("section_header", "1 Scope"), _text("list_item", "a"), _text("text", "b")],
-            tables=[object()], pictures=[], num_pages=lambda: 3, export_to_markdown=lambda: self.markdown)
+            tables=[object()], pictures=[object()] * self.pictures, num_pages=lambda: 3, export_to_markdown=lambda: self.markdown)
         return SimpleNamespace(status=SimpleNamespace(value=self.status), document=doc,
                                errors=[SimpleNamespace(error_message="page 2 broken")])
 
@@ -39,9 +45,13 @@ class StubConverter:
 @pytest.fixture
 def stub(monkeypatch):
     def use(**kw):
-        monkeypatch.setattr(docling_engine, "_converter", StubConverter(**kw))
+        conv = StubConverter(**kw)
+        monkeypatch.setattr(docling_engine, "_converter", conv)
         monkeypatch.setattr(docling_engine, "available", lambda: True)
+        monkeypatch.setattr(docling_engine, "_ready", {})
+        monkeypatch.setattr(docling_engine, "_broken", {})
         StubConverter.calls = []
+        return conv
     use()
     monkeypatch.delenv("SPECFORGE_CONVERT_ENGINE", raising=False)
     return use
@@ -102,6 +112,55 @@ def test_falls_back_to_builtin_when_docling_is_missing(monkeypatch, tmp_path):
     assert "Docling is not installed" in r.warnings[0]
 
 
+def test_models_that_cannot_load_fall_back_to_builtin(stub, tmp_path, monkeypatch):
+    """Offline machine without prefetched models: convert with the builtin engine instead of failing every file."""
+    import docx
+
+    d = docx.Document()
+    d.add_heading("Overview", 1)
+    path = tmp_path / "a.docx"
+    d.save(path)
+    conv = stub(fail_init=OSError("cannot reach huggingface.co"))
+    r = convert_file(path, front_matter=False)
+    assert r.engine == "builtin" and "# Overview" in r.markdown
+    assert "huggingface.co" in r.warnings[0] and "prefetch-models" in r.warnings[0]
+    convert_file(path, front_matter=False)
+    assert conv.inits == 1 and StubConverter.calls == []       # the failure is remembered, not retried for every file
+    monkeypatch.setattr(docling_engine, "RETRY_AFTER", 0)
+    conv.fail_init = None
+    assert convert_file(path).engine == "docling" and conv.inits == 2
+    convert_file(path)
+    assert conv.inits == 2                                     # a loaded pipeline is not loaded again
+
+
+def test_broken_native_libraries_count_as_unavailable(monkeypatch):
+    import builtins
+
+    real = builtins.__import__
+
+    def fake(name, *a, **kw):
+        if name.startswith("docling"):
+            raise OSError("libtorch_cpu.so: cannot open shared object file")
+        return real(name, *a, **kw)
+    monkeypatch.setattr(builtins, "__import__", fake)
+    assert docling_engine.available() is False
+
+
+def test_metadata_title_images_and_word_count(stub, tmp_path):
+    import pymupdf
+
+    path = tmp_path / "spec.pdf"
+    d = pymupdf.open()
+    d.new_page().insert_text((72, 72), "1 Introduction")
+    d.set_metadata({"title": "NVM Express Base Specification 2.1"})
+    d.save(path)
+    stub(pictures=2, markdown="## 1 Introduction\n\n<!-- image -->\n\nOne two three.\n\n<!-- image -->\n")
+    r = convert_file(path)
+    assert r.title == "NVM Express Base Specification 2.1"
+    assert r.stats["words"] == 5                              # "1 Introduction One two three": the image markers are not words
+    assert any("2 image(s)" in w and "<!-- image -->" in w for w in r.warnings)
+
+
 def test_api_and_cli_pass_the_engine(stub, pdf_file, tmp_path, ws):
     from specforge.api.app import create_app
     from specforge.cli import main
@@ -117,6 +176,64 @@ def test_api_and_cli_pass_the_engine(stub, pdf_file, tmp_path, ws):
     assert "| 7:0  | OPC  |" in (tmp_path / "out" / "Widget.md").read_text()
 
 
+def _wait(client, job):
+    import time
+
+    for _ in range(200):
+        j = client.get(f"/api/jobs/{job}").json()
+        if j["state"] in ("done", "failed", "cancelled"):
+            return j
+        time.sleep(0.05)
+    raise AssertionError("job did not finish")
+
+
+def test_background_conversion_job(stub, pdf_file, ws):
+    from specforge.api.app import create_app
+
+    with TestClient(create_app()) as client:
+        r = client.post("/api/convert/markdown/jobs?engine=docling", files={"file": ("Widget.pdf", io.BytesIO(pdf_file.read_bytes()))})
+        job = r.json()["job"]
+        assert _wait(client, job)["state"] == "done"
+        res = client.get(f"/api/convert/markdown/jobs/{job}").json()
+        assert res["filename"] == "Widget.md" and res["engine"] == "docling" and "| 7:0  | OPC  |" in res["markdown"] and "dir" not in res
+        dl = client.get(f"/api/convert/markdown/jobs/{job}?download=true")
+        assert dl.headers["content-disposition"].endswith("Widget.md") and "| 7:0" in dl.text
+        folder = ws / "conversions"
+        assert [p.name for d in folder.iterdir() for p in d.iterdir()] == ["out.md"]   # the upload is deleted after converting
+
+        stub(status="failure")
+        bad = client.post("/api/convert/markdown/jobs", files={"file": ("w.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()["job"]
+        j = _wait(client, bad)
+        assert j["state"] == "failed" and "page 2 broken" in j["error"]
+        assert client.get(f"/api/convert/markdown/jobs/{bad}").status_code == 409
+        assert client.get("/api/convert/markdown/jobs/99999").status_code == 404
+
+        for d in folder.iterdir():                                     # expired results are pruned on the next upload
+            os.utime(d, (0, 0))
+        client.post("/api/convert/markdown/jobs", files={"file": ("w.pdf", io.BytesIO(pdf_file.read_bytes()))})
+        assert client.get(f"/api/convert/markdown/jobs/{job}").status_code == 410
+
+
+def test_conversion_results_are_private(stub, pdf_file, ws, monkeypatch):
+    from specforge import jobs
+    from specforge.api.app import create_app
+    from specforge.core.db import get_conn
+
+    with TestClient(create_app()) as client:
+        job = client.post("/api/convert/markdown/jobs", files={"file": ("w.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()["job"]
+        _wait(client, job)
+        c = get_conn()
+        c.execute("UPDATE job SET payload_json=? WHERE id=?", ('{"user": "someone-else"}', job))
+        c.commit()
+        assert jobs.get(c, job)["state"] == "done"
+        assert client.get(f"/api/convert/markdown/jobs/{job}").status_code == 200    # the local user is an admin
+        import specforge.api.app as appmod
+
+        monkeypatch.setattr(appmod, "LOCAL_USER", {**appmod.LOCAL_USER, "role": "user"})
+    with TestClient(create_app()) as client:
+        assert client.get(f"/api/convert/markdown/jobs/{job}").status_code == 404
+
+
 @pytest.mark.skipif(os.environ.get("SPECFORGE_TEST_DOCLING") != "1", reason="set SPECFORGE_TEST_DOCLING=1 to run real Docling")
 def test_real_docling_keeps_table_alignment(tmp_path, monkeypatch):
     from reportlab.lib.pagesizes import A4
@@ -124,6 +241,8 @@ def test_real_docling_keeps_table_alignment(tmp_path, monkeypatch):
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     monkeypatch.setattr(docling_engine, "_converter", None)
+    monkeypatch.setattr(docling_engine, "_ready", {})
+    monkeypatch.setattr(docling_engine, "_broken", {})
     ss = getSampleStyleSheet()
     rows = [["Bits", "Name", "Description"], ["31:16", "SQID", "Submission Queue Identifier"],
             ["15:08", "Reserved", ""], ["07:00", "OPC", "Opcode of the command"]]

@@ -54,6 +54,8 @@ export const api = {
   specs: () => req<SpecDoc[]>("GET", "/api/specs"),
   upload: (files: File[]) => { const f = new FormData(); files.forEach((x) => f.append("files", x)); return req<SpecDoc[]>("POST", "/api/specs/upload", f); },
   toMarkdown: (file: File, frontMatter = true, engine?: ConvertEngine) => { const f = new FormData(); f.append("file", file); return req<MarkdownConversion>("POST", `/api/convert/markdown${qs({ front_matter: frontMatter ? undefined : "false", engine })}`, f); },
+  toMarkdownJob: (file: File, frontMatter = true, engine?: ConvertEngine) => { const f = new FormData(); f.append("file", file); return req<{ job: number }>("POST", `/api/convert/markdown/jobs${qs({ front_matter: frontMatter ? undefined : "false", engine })}`, f); },
+  markdownResult: (job: number) => req<MarkdownConversion>("GET", `/api/convert/markdown/jobs/${job}`),
   compareOptions: () => req<CompareOption[]>("GET", "/api/compare/options"),
   compare: (from_run: number, to_run: number) => req<Comparison>("POST", "/api/compare", { from_run, to_run }),
   comparisons: () => req<ComparisonRow[]>("GET", "/api/compare"),

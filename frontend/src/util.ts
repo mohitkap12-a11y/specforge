@@ -70,3 +70,10 @@ export function splitMarks(text: string, chunks: string[]): { t: string; m: bool
   if (last < text.length) out.push({ t: text.slice(last), m: false });
   return out.length ? out : [{ t: text, m: false }];
 }
+
+/** The user-facing message of a failed job: "ConversionError('No text…')\nTraceback…" -> "No text…". */
+export function jobErrorText(error: string | null | undefined): string {
+  const first = (error ?? "").split("\n")[0];
+  const m = first.match(/^\w+\((['"])([\s\S]*)\1\)$/);
+  return (m ? m[2] : first) || "The job failed.";
+}

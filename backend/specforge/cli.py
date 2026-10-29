@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from . import catalog, cmddb, compare, coverage, execscen, refs, reports
+from .convert import ENGINES
 from .core import config
 from .core.db import connect, row, rows
 from .ingest import store
@@ -162,12 +163,16 @@ def cmd_to_md(a):
 def cmd_prefetch_models(a):
     """Download Docling's model weights once, for machines that convert offline afterwards."""
     try:
+        import docling
+    except Exception as e:  # noqa: BLE001 - a broken torch install fails with OSError / RuntimeError too
+        raise SystemExit(f"Docling cannot be loaded ({e.__class__.__name__}: {e}); install it with: pip install 'docling>=2.19'")
+    try:
         from docling.utils.model_downloader import download_models
     except ImportError:
-        raise SystemExit("Docling is not installed: pip install docling")
+        raise SystemExit(f"Docling {getattr(docling, '__version__', '')} is too old to download models; upgrade: pip install -U 'docling>=2.19'")
     out = Path(a.out).resolve() if a.out else None
-    path = download_models(output_dir=out, progress=True) if out else download_models(progress=True)
-    print(f"Docling models are in {path}")
+    path = download_models(output_dir=out, progress=True)
+    print(f"Docling models are in {path or out or 'the default cache'}")
     if out:
         print(f"On the offline machine set DOCLING_ARTIFACTS_PATH={path}")
 
@@ -294,7 +299,7 @@ def main(argv=None):
     s.add_argument("--workers", type=int, default=None); s.add_argument("--set", help="add to (and create) this spec set"); s.set_defaults(fn=cmd_ingest)
     s = sub.add_parser("to-md", help="convert PDF / DOC / DOCX files to Markdown"); s.add_argument("files", nargs="+")
     s.add_argument("--out", help="output directory (default: next to each source file)"); s.add_argument("--no-front-matter", action="store_true", help="omit the YAML header")
-    s.add_argument("--engine", choices=("docling", "builtin"), help="docling (default: layout model, best tables) or builtin (fast, no models)"); s.set_defaults(fn=cmd_to_md)
+    s.add_argument("--engine", choices=ENGINES, help="docling (default: layout model, best tables) or builtin (fast, no models)"); s.set_defaults(fn=cmd_to_md)
     s = sub.add_parser("prefetch-models", help="download Docling's model weights for offline conversion")
     s.add_argument("--out", help="folder for the weights (default: Docling's cache)"); s.set_defaults(fn=cmd_prefetch_models)
     s = sub.add_parser("compare", help="compare two parsed versions of a spec and list what changed"); s.add_argument("family"); s.add_argument("old"); s.add_argument("new")

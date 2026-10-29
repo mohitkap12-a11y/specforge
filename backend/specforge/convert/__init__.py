@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -77,12 +78,32 @@ def _doc_to_docx(path: str, workdir: str) -> str:
     return str(out)
 
 
-def _title_of(blocks, meta: dict, filename: str) -> str:
-    t = (meta.get("title") or "").strip()
+def _usable_title(t: str | None) -> str:
+    t = (t or "").strip()
     if t and t.lower() not in ("(anonymous)", "anonymous", "untitled") and not re.search(r"\.(docx?|pdf|indd|tmp)$", t, re.I):
+        return t
+    return ""
+
+
+def _title_of(blocks, meta: dict, filename: str) -> str:
+    if t := _usable_title(meta.get("title")):
         return t
     first = next((b for b in blocks if isinstance(b, Heading)), None)
     return first.text.strip() if first else Path(filename).stem
+
+
+# Conversions run one at a time on this thread (Docling is CPU-heavy and its converter is not thread-safe); the API
+# hands work here instead of blocking a request thread while another conversion holds the engine.
+_serial = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sf-convert")
+
+
+def serial_pool() -> ThreadPoolExecutor:
+    return _serial
+
+
+def submit(*args, **kw) -> Future:
+    """convert_file(*args, **kw) on the conversion thread."""
+    return _serial.submit(convert_file, *args, **kw)
 
 
 def default_engine() -> str:
@@ -90,8 +111,26 @@ def default_engine() -> str:
     return e if e in ENGINES else "docling"
 
 
+IMAGE_MARK = "<!-- image -->"
+
+
 def _words(body: str) -> int:
-    return len(re.findall(r"\w+", re.sub(r"[#*|`>\-]+", " ", body)))
+    return len(re.findall(r"\w+", re.sub(r"[#*|`>\-]+", " ", body.replace(IMAGE_MARK, " "))))
+
+
+def _meta_title(path: str, fmt: str) -> str:
+    """The document's own Title property (PDF info / Word core properties), if it is a real title."""
+    try:
+        if fmt == "pdf":
+            import pymupdf
+
+            with pymupdf.open(path) as d:
+                return _usable_title((d.metadata or {}).get("title"))
+        import docx
+
+        return _usable_title(docx.Document(path).core_properties.title)
+    except Exception:  # noqa: BLE001 - a title is optional; Docling reports a broken file itself
+        return ""
 
 
 def _front(body: str, title: str, filename: str, fmt: str, pages: int | None, engine: str) -> str:
@@ -113,9 +152,16 @@ def convert_file(path: str | Path, filename: str | None = None, front_matter: bo
     if engine == "docling":
         from . import docling_engine
 
-        if docling_engine.available():
-            return _convert_docling(path, filename, fmt, front_matter)
-        warnings.append("Docling is not installed (pip install docling); the built-in converter was used, tables may be less accurate.")
+        if not docling_engine.available():
+            warnings.append("Docling is not installed or cannot be loaded (pip install docling); the built-in converter was used, tables may be less accurate.")
+        else:
+            try:
+                docling_engine.ready("pdf" if fmt == "pdf" else "docx")
+            except docling_engine.DoclingUnavailable as e:
+                warnings.append(f"{e}; the built-in converter was used, tables may be less accurate. "
+                                "On an offline machine run `specforge prefetch-models` and set DOCLING_ARTIFACTS_PATH.")
+            else:
+                return _convert_docling(path, filename, fmt, front_matter)
     res = _convert_builtin(path, filename, fmt, front_matter)
     res.warnings[:0] = warnings
     return res
@@ -136,13 +182,15 @@ def _convert_docling(path: str, filename: str, fmt: str, front_matter: bool) -> 
             body, meta = docling_engine.convert(src)
         except docling_engine.DoclingError as e:
             raise ConversionError(str(e)) from e
+        doc_title = _meta_title(src, fmt)
     body = body.strip() + "\n"
     if not body.strip():
         raise ConversionError("No text could be extracted from the file.")
     if meta.get("partial"):
         warnings.append("Docling converted the file only partially; some pages may be missing.")
-    t = (meta.get("title") or "").strip()
-    title = t or Path(filename).stem
+    if meta.get("pictures"):
+        warnings.append(f"{meta['pictures']} image(s) are not included in the Markdown; each is marked {IMAGE_MARK}.")
+    title = doc_title or (meta.get("title") or "").strip() or Path(filename).stem
     stats = {"words": _words(body), "headings": meta["headings"], "tables": meta["tables"], "list_items": meta["list_items"],
              "code_blocks": meta["code_blocks"], "characters": len(body)}
     pages = meta.get("pages") if fmt == "pdf" else None
