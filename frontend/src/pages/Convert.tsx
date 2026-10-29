@@ -14,36 +14,61 @@ let nextId = 1;
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+function saveFile(name: string, text: string) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));
+  const a = Object.assign(document.createElement("a"), { href: url, download: name });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** Copy text that is still being fetched. The clipboard call has to start inside the click (Safari refuses it after an
+ *  await), so the text goes in as a promise when the browser supports that; otherwise it is written once it arrives. */
+async function copyLater(text: Promise<string>): Promise<void> {
+  if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+    const blob = text.then((t) => new Blob([t], { type: "text/plain" }));
+    return navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]);
+  }
+  return navigator.clipboard.writeText(await text);
+}
+
 function Conversion({ c }: { c: ConversionEntry }) {
   const { push } = useToast();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const r = c.result;
-  const md = useQuery({ queryKey: ["conversion", c.job], queryFn: () => api.markdownResult(c.job), enabled: open && !!r, staleTime: Infinity });
+  const mdQuery = { queryKey: ["conversion", c.job], queryFn: () => api.markdownResult(c.job), staleTime: Infinity };
+  const md = useQuery({ ...mdQuery, enabled: open && !!r });
+  const fetchMd = () => qc.fetchQuery(mdQuery);     // shared with the preview: fetched once
   const working = c.state === "queued" || c.state === "running";
-  const copy = () => api.markdownResult(c.job).then((x) => navigator.clipboard.writeText(x.markdown))
-    .then(() => push({ title: "Markdown copied", tone: "ok" }), () => push({ title: "Copy failed", tone: "bad" }));
+  const copy = () => {
+    const cached = md.data?.markdown;
+    (cached !== undefined ? navigator.clipboard.writeText(cached) : copyLater(fetchMd().then((x) => x.markdown)))
+      .then(() => push({ title: "Markdown copied", tone: "ok" }), (e) => push({ title: "Copy failed", description: errText(e), tone: "bad" }));
+  };
+  const download = () => fetchMd().then((x) => saveFile(x.filename, x.markdown), (e) => push({ title: "Download failed", description: errText(e), tone: "bad" }));
   const remove = () => api.removeConversion(c.job).then(() => qc.invalidateQueries({ queryKey: ["conversions"] }), (e) => push({ title: "Remove failed", description: errText(e), tone: "bad" }));
   return (
     <div className="card">
       <div className="card-head">
         <strong>{c.source ?? `Conversion #${c.job}`}</strong>
         {working && <span className="spinner" aria-label="Converting" />}
-        {working && <span className="muted small">{c.state === "queued" ? "Waiting for the previous file…" : c.message ?? "Converting…"}</span>}
+        {working && <span className="muted small">{c.cancelling ? "Cancelling: stops when the current file is done…" : c.state === "queued" ? "Waiting for the previous file…" : c.message ?? "Converting…"}</span>}
         {c.state === "failed" && <Badge value="failed" label="Failed" />}
         {c.state === "cancelled" && <Badge value="draft" label="Cancelled" />}
         {r && <span className="muted small">{conversionSummary(r.stats)}</span>}
         {r && <Badge value={r.engine === "docling" ? "ok" : "info"} label={r.engine === "docling" ? "Docling" : "Built-in"} />}
         <span className="grow" />
-        {working && <button onClick={() => void api.cancelJob(c.job)}>Cancel</button>}
+        {working && !c.cancelling && <button onClick={() => api.cancelJob(c.job).then(() => qc.invalidateQueries({ queryKey: ["conversions"] }))}>Cancel</button>}
         {r && (
           <>
             <button onClick={() => setOpen(!open)}>{open ? "Hide preview" : "Preview"}</button>
-            <button onClick={() => void copy()}><Copy size={14} /> Copy</button>
-            <a href={`/api/convert/markdown/jobs/${c.job}?download=true`} download={r.filename} tabIndex={-1}><button className="primary"><Download size={14} /> Download {r.filename}</button></a>
+            <button onClick={copy}><Copy size={14} /> Copy</button>
+            <button className="primary" onClick={() => void download()}><Download size={14} /> Download {r.filename}</button>
           </>
         )}
-        {!working && <button aria-label="Remove from the list" title="Remove" onClick={() => void remove()}><Trash2 size={14} /></button>}
+        <button aria-label="Remove from the list" title={working ? "Cancel and remove" : "Remove"} onClick={() => void remove()}><Trash2 size={14} /></button>
       </div>
       {c.state === "failed" && <ErrorNote error={new Error(jobErrorText(c.error))} />}
       {r?.warnings.map((w) => <div key={w} className="muted small">⚠ {w}</div>)}
@@ -114,7 +139,7 @@ export default function ConvertPage() {
           <ErrorNote error={u.error ? new Error(u.error) : null} />
         </div>
       ))}
-      {!list.isLoading && items.length === 0 && uploads.length === 0 && <Empty icon={FileDown} title="Nothing converted yet">Converted files appear here with a preview, copy and download.</Empty>}
+      {!list.isLoading && !list.error && items.length === 0 && uploads.length === 0 && <Empty icon={FileDown} title="Nothing converted yet">Converted files appear here with a preview, copy and download.</Empty>}
       {items.map((c) => <Conversion key={c.job} c={c} />)}
     </>
   );

@@ -101,6 +101,7 @@ export type ConvertEngine = "docling" | "builtin";
 /** One of the signed-in user's background conversions (GET /api/convert/markdown/jobs); the Markdown itself is fetched on demand. */
 export interface ConversionEntry {
   job: number; source: string | null; state: Job["state"]; message: string | null; created: string; error: string | null;
+  cancelling: boolean;   // cancel asked; a running Docling conversion stops only when the current file is done
   result: Omit<MarkdownConversion, "markdown"> | null;
 }
 export interface MarkdownConversion {

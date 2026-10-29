@@ -259,43 +259,125 @@ def test_real_docling_keeps_table_alignment(tmp_path, monkeypatch):
     assert "## 1 Command Dword 0" in r.markdown
 
 
+def _post(client, pdf_file, name):
+    return client.post("/api/convert/markdown/jobs", files={"file": (name, io.BytesIO(pdf_file.read_bytes()))}).json()["job"]
+
+
+def _listed(client):
+    return [(c["source"], c["state"]) for c in client.get("/api/convert/markdown/jobs").json()]
+
+
 def test_conversion_list_survives_and_removes(stub, pdf_file, ws, monkeypatch):
     """The To Markdown page lists the user's conversions from the server, so leaving the page does not lose them."""
+    from specforge import jobs
     from specforge.api.app import create_app
+    from specforge.core.db import get_conn
 
     with TestClient(create_app()) as client:
         assert client.get("/api/convert/markdown/jobs").json() == []
-        first = client.post("/api/convert/markdown/jobs", files={"file": ("A.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()["job"]
+        first = _post(client, pdf_file, "A.pdf")
         _wait(client, first)
         stub(status="failure")
-        bad = client.post("/api/convert/markdown/jobs", files={"file": ("B.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()["job"]
+        bad = _post(client, pdf_file, "B.pdf")
         _wait(client, bad)
         listed = client.get("/api/convert/markdown/jobs").json()
         assert [(c["job"], c["source"], c["state"]) for c in listed] == [(bad, "B.pdf", "failed"), (first, "A.pdf", "done")]
         assert listed[1]["result"]["filename"] == "A.md" and "markdown" not in listed[1]["result"] and "dir" not in listed[1]["result"]
-        assert listed[0]["result"] is None and "page 2 broken" in listed[0]["error"]
+        assert listed[0]["result"] is None and "page 2 broken" in listed[0]["error"] and listed[0]["cancelling"] is False
 
-        import specforge.api.app as appmod                       # another user sees none of them
-        monkeypatch.setattr(appmod, "LOCAL_USER", {**appmod.LOCAL_USER, "username": "other"})
-        assert client.get("/api/convert/markdown/jobs").json() == []
-        monkeypatch.undo()
-        monkeypatch.setenv("SPECFORGE_HOME", str(ws))
+        import specforge.api.app as appmod
+        with monkeypatch.context() as m:                          # another user sees none of them
+            m.setattr(appmod, "LOCAL_USER", {**appmod.LOCAL_USER, "username": "other"})
+            assert client.get("/api/convert/markdown/jobs").json() == []
 
         assert client.delete(f"/api/convert/markdown/jobs/{first}").json() == {"ok": True}
-        assert [c["job"] for c in client.get("/api/convert/markdown/jobs").json()] == [bad]
+        assert _listed(client) == [("B.pdf", "failed")]
         assert client.get(f"/api/convert/markdown/jobs/{first}").status_code == 404
         assert not any((ws / "conversions").iterdir())            # its file is gone
         assert client.delete(f"/api/convert/markdown/jobs/{first}").status_code == 404
+        j = jobs.get(get_conn(), first)                           # removed means the file name is gone everywhere (jobs panel too)
+        assert "A.pdf" not in (j["payload_json"] or "") and j["result_json"] is None
 
-        from specforge import jobs                                 # cancelled while queued: the upload is deleted on remove
-        from specforge.core.db import get_conn
 
+class Gate(StubConverter):
+    """Holds the conversion thread until the test opens the gate (a long Docling run)."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        import threading
+
+        self.gate, self.started = threading.Event(), threading.Event()
+
+    def convert(self, path, raises_on_error=True):
+        self.started.set()
+        assert self.gate.wait(10)
+        return super().convert(path, raises_on_error)
+
+
+def test_cancel_and_remove_while_another_file_converts(stub, pdf_file, ws, monkeypatch):
+    from specforge.api.app import create_app
+
+    conv = Gate()
+    monkeypatch.setattr(docling_engine, "_converter", conv)
+    with TestClient(create_app()) as client:
+        long_job = _post(client, pdf_file, "Long.pdf")
+        assert conv.started.wait(10)
+        queued = _post(client, pdf_file, "Queued.pdf")
+        removed = _post(client, pdf_file, "Removed.pdf")
+        assert _listed(client) == [("Removed.pdf", "queued"), ("Queued.pdf", "queued"), ("Long.pdf", "running")]
+
+        client.post(f"/api/jobs/{queued}/cancel")                # a queued job shows cancelled at once, not after the long one
+        assert ("Queued.pdf", "cancelled") in _listed(client)
+        assert client.delete(f"/api/convert/markdown/jobs/{removed}").json() == {"ok": True}   # remove works on a queued job too
+        assert ("Removed.pdf", "queued") not in _listed(client) and len(list((ws / "conversions").iterdir())) == 2
+
+        client.post(f"/api/jobs/{long_job}/cancel")              # Docling cannot be interrupted: it is "cancelling" until it returns
+        entry = next(c for c in client.get("/api/convert/markdown/jobs").json() if c["job"] == long_job)
+        assert entry["state"] == "running" and entry["cancelling"] is True
+        assert client.delete(f"/api/convert/markdown/jobs/{long_job}").json() == {"ok": True}
+        conv.gate.set()
+        assert _wait(client, long_job)["state"] == "cancelled"
+        assert client.delete(f"/api/convert/markdown/jobs/{queued}").json() == {"ok": True}
+        assert not any((ws / "conversions").iterdir())             # nothing left behind by any of them
+        assert _listed(client) == []
+
+
+def test_old_active_jobs_stay_listed_and_their_uploads_are_not_pruned(stub, pdf_file, ws, monkeypatch):
+    """A queue of long specs can take more than a day: age counts from when a conversion ended, not when it was queued."""
+    from specforge.api.app import create_app
+    from specforge.core.db import get_conn
+
+    conv = Gate()
+    monkeypatch.setattr(docling_engine, "_converter", conv)
+    with TestClient(create_app()) as client:
+        running = _post(client, pdf_file, "Running.pdf")
+        assert conv.started.wait(10)
+        waiting = _post(client, pdf_file, "Waiting.pdf")
         c = get_conn()
-        jid = c.execute("INSERT INTO job(type,state,payload_json) VALUES('convert-markdown','cancelled',?)",
-                        ('{"user": "local", "filename": "C.pdf", "dir": "tmpq"}',)).lastrowid
+        c.execute("UPDATE job SET created=datetime('now','-3 days') WHERE id IN (?,?)", (running, waiting))
         c.commit()
-        (ws / "conversions" / "tmpq").mkdir()
-        (ws / "conversions" / "tmpq" / "x.pdf").write_bytes(b"%PDF")
-        assert jobs.get(c, jid)["state"] == "cancelled"
+        for d in (ws / "conversions").iterdir():
+            os.utime(d, (0, 0))
+        _post(client, pdf_file, "Trigger.pdf")                    # a new upload runs the prune
+        assert len(list((ws / "conversions").iterdir())) == 3       # the old queued and running uploads were kept
+        assert {s for s, _ in _listed(client)} == {"Running.pdf", "Waiting.pdf", "Trigger.pdf"}
+        conv.gate.set()
+        assert _wait(client, waiting)["state"] == "done"
+        c.execute("UPDATE job SET created=datetime('now','-3 days')")   # finished just now: still listed
+        c.commit()
+        assert ("Waiting.pdf", "done") in _listed(client)
+        assert "| 7:0" in client.get(f"/api/convert/markdown/jobs/{waiting}").json()["markdown"]
+
+
+def test_remove_never_deletes_outside_the_conversions_folder(stub, ws):
+    from specforge.api.app import create_app
+    from specforge.core.db import get_conn
+
+    with TestClient(create_app()) as client:
+        (ws / "conversions").mkdir(exist_ok=True)
+        c = get_conn()
+        jid = c.execute("INSERT INTO job(type,state,payload_json) VALUES('convert-markdown','failed',?)",
+                        ('{"user": "local", "filename": "x.pdf", "dir": ".."}',)).lastrowid
+        c.commit()
         assert client.delete(f"/api/convert/markdown/jobs/{jid}").json() == {"ok": True}
-        assert not (ws / "conversions" / "tmpq").exists()
+        assert ws.is_dir() and (ws / "conversions").is_dir() and (ws / "specs").is_dir()
