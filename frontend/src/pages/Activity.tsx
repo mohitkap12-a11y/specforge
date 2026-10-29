@@ -5,6 +5,7 @@ import { ArrowDown, Bot, ChevronDown, ChevronRight, Cog, Copy, Download, Layers,
 import { api, logStreamUrl } from "../api";
 import { Badge, Empty, ErrorNote, Loading, PageHeader, Segmented } from "../components/ui";
 import { useToast } from "../components/Toasts";
+import { useAuth } from "../components/auth";
 import { useDebounced } from "../hooks";
 import { bufferPaused, trimRows } from "../util";
 import type { Job, LogEvent, LogLevel } from "../types";
@@ -78,6 +79,7 @@ const Row = memo(function Row({ e, open, onToggle, onJob }: { e: LogEvent; open:
 
 function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p: URLSearchParams) => void }) {
   const toast = useToast();
+  const { isAdmin } = useAuth();
   const lens = (params.get("lens") as Lens) in LENSES ? (params.get("lens") as Lens) : "all";
   const level = (["debug", "info", "warn", "error"].includes(params.get("level") ?? "") ? params.get("level") : "info") as LogLevel;
   const job = params.get("job") ? Number(params.get("job")) : undefined;
@@ -217,7 +219,7 @@ function LogView({ params, setParams }: { params: URLSearchParams; setParams: (p
         <span className="row small muted" style={{ gap: 6 }}><span className={`dot ${connected && live ? "ok pulse" : connected ? "warn" : "bad"}`} />{!connected ? "Reconnecting…" : live ? "Live" : "Paused"}</span>
         <button className="sm" onClick={() => setLive((v) => !v)} aria-pressed={!live}>{live ? <><Pause size={13} /> Pause</> : <><Play size={13} /> Resume{pending ? ` (${pending})` : ""}</>}</button>
         <button className="sm" onClick={download} disabled={!events.length}><Download size={13} /> Export</button>
-        <button className="sm danger" onClick={clear}><Trash2 size={13} /></button>
+        {isAdmin && <button className="sm danger" onClick={clear}><Trash2 size={13} /></button>}
       </div>
       {lens === "ai" && <div className="small muted" style={{ padding: "8px 14px", borderBottom: "1px solid var(--border)" }}>The scenario agent narrates each requirement it reads and every draft it accepts or rejects. <strong>llm</strong> rows are the individual model calls. Click a row to see the exact prompt and reply.</div>}
       {level === "debug" && <div className="small muted" style={{ padding: "8px 14px", borderBottom: "1px solid var(--border)" }}>Debug events (cache hits, progress heartbeats) are only recorded when the minimum level in Settings → Logging is “debug”.</div>}

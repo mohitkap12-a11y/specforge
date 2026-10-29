@@ -1,4 +1,5 @@
-"""FastAPI application: REST + SSE for the React UI. Binds to localhost by default (see cli.serve)."""
+"""FastAPI application: REST + SSE for the React UI. Binds to localhost by default (see cli.serve); every /api/ route needs a
+signed-in user unless the server runs with --no-auth (see AuthGate and auth.py)."""
 from __future__ import annotations
 
 import asyncio
@@ -10,13 +11,14 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
-from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
-from .. import __version__, catalog, cmddb, compare, compare_ai, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
+from .. import __version__, auth, catalog, cmddb, compare, compare_ai, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
 from ..crossgen import generate_cross_scenarios
 from ..convert import ConversionError, SUPPORTED, convert_file, output_name
 from ..core import config
@@ -47,9 +49,61 @@ def safe_join(root: Path, rel: str) -> Path | None:
     return f if rel and f.is_relative_to(root) and f.is_file() else None
 
 
+# Reachable without a session (the login page needs them). Everything else under /api/ needs an active account.
+PUBLIC = {("POST", "/api/auth/login"), ("POST", "/api/auth/register"), ("POST", "/api/auth/logout"), ("GET", "/api/auth/me")}
+# Admin only: user management, global settings, wiping shared data.
+ADMIN_ONLY = {("PUT", "/api/settings"), ("POST", "/api/reset"), ("DELETE", "/api/logs")}
+ADMIN_PREFIX = "/api/users"
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+# With login turned off (`serve --no-auth`, localhost only) the single local user is the admin.
+LOCAL_USER = {"id": 0, "username": "local", "display_name": None, "role": "admin", "status": "active"}
+
+
+def admin_only(method: str, path: str) -> bool:
+    return (method, path) in ADMIN_ONLY or path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/")
+
+
+class AuthGate:
+    """ASGI middleware in front of /api/: refuses cross-origin writes, resolves the session cookie to a user (401 without
+    one, 403 for admin-only routes) and makes the user available to the endpoint (`auth.current_user`). Plain ASGI rather
+    than BaseHTTPMiddleware so the server-sent event streams pass through untouched. The static UI is not gated: it holds
+    no data and shows the login page itself."""
+
+    def __init__(self, app, enabled: bool):
+        self.app, self.enabled = app, enabled
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "")
+        if scope["type"] != "http" or not path.startswith("/api/"):
+            return await self.app(scope, receive, send)
+        req = Request(scope)
+        method = scope["method"]
+        if method not in SAFE_METHODS and (origin := req.headers.get("origin")) and origin != "null":
+            # a page on another site, or on another port of this host, must not drive the API with the user's cookie
+            hosts = {req.headers.get("host"), req.headers.get("x-forwarded-host")}
+            if urlsplit(origin).netloc not in hosts:
+                return await JSONResponse({"detail": "cross-origin request refused"}, 403)(scope, receive, send)
+        if self.enabled:
+            token = req.cookies.get(auth.COOKIE)
+            user = await run_in_threadpool(lambda: auth.session_user(get_conn(), token)) if token else None
+        else:
+            user = LOCAL_USER
+        if user is None and (method, path) not in PUBLIC:
+            return await JSONResponse({"detail": "sign in required"}, 401)(scope, receive, send)
+        if user is not None and user["role"] != "admin" and admin_only(method, path):
+            return await JSONResponse({"detail": "only an admin can do this"}, 403)(scope, receive, send)
+        tok = auth.current_user.set(user)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            auth.current_user.reset(tok)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="SpecForge", version=__version__)
     DB = str(config.db_path())
+    AUTH = config.auth_enabled()
+    app.add_middleware(AuthGate, enabled=AUTH)
 
     def conn():
         return get_conn()
@@ -58,7 +112,8 @@ def create_app() -> FastAPI:
         return config.load_settings(conn())
 
     def audit(message: str, level: str = "info", **data) -> None:
-        eventlog.emit(level, "api", message, **data)
+        u = auth.current_user.get()
+        eventlog.emit(level, "api", message, **({"user": u["username"]} if u else {}), **data)
 
     @app.on_event("startup")
     def _startup():
@@ -67,6 +122,133 @@ def create_app() -> FastAPI:
         eventlog.emit("info", "system", f"SpecForge {__version__} started", workspace=str(config.workspace_dir()), parser_version=config.PARSER_VERSION)
         if n:
             eventlog.emit("warn", "system", f"{n} job(s) were interrupted by the previous shutdown and marked failed")
+        if AUTH and not auth.count_admins(conn()):
+            eventlog.emit("warn", "system", "Sign-in is on but there is no admin account yet: run `specforge user create <name> --admin` on the server")
+        elif not AUTH:
+            eventlog.emit("warn", "system", "Sign-in is turned off (--no-auth): everyone who can reach this server is an admin")
+
+    # ------------------------------------------------------------------ sign-in and users
+    login_throttle, ip_throttle, register_throttle = auth.Throttle(10, 600), auth.Throttle(50, 600), auth.Throttle(10, 3600)
+
+    def client_ip(request: Request) -> str:
+        return request.client.host if request.client else "?"
+
+    def auth_call(fn, *a, **kw):
+        try:
+            return fn(*a, **kw)
+        except auth.AuthError as e:
+            raise HTTPException(e.status, str(e)) from None
+
+    def me() -> dict:
+        return auth.current_user.get()
+
+    def public_user(u: dict) -> dict:
+        return {k: u.get(k) for k in ("id", "username", "display_name", "role", "status")}
+
+    def need_auth_on():
+        if not AUTH:
+            raise HTTPException(409, "sign-in is turned off on this server (started with --no-auth)")
+
+    @app.get("/api/auth/me")
+    def auth_me():
+        u = me()
+        return {"auth": AUTH, "user": public_user(u) if u else None,
+                "pending": auth.pending_count(conn()) if AUTH and u and u["role"] == "admin" else 0}
+
+    @app.post("/api/auth/login")
+    def auth_login(request: Request, response: Response, body: Any = Body(...)):
+        need_auth_on()
+        need(body, "username", "password")
+        ip = client_ip(request)
+        key = f"{ip}|{str(body['username']).strip().lower()}"
+        if login_throttle.blocked(key) or ip_throttle.blocked(ip):
+            raise HTTPException(429, "too many failed sign-in attempts; wait a few minutes and try again")
+        try:
+            u = auth.authenticate(conn(), body["username"], body["password"])
+        except auth.AuthError as e:
+            if e.status == 401:
+                login_throttle.fail(key)
+                ip_throttle.fail(ip)
+                eventlog.emit("warn", "api", f"Failed sign-in for '{str(body['username'])[:40]}'", ip=ip)
+            raise HTTPException(e.status, str(e)) from None
+        login_throttle.clear(key)
+        token = auth.create_session(conn(), u["id"], ip, request.headers.get("user-agent"))
+        https = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+        response.set_cookie(auth.COOKIE, token, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="strict", secure=https, path="/")
+        eventlog.emit("info", "api", f"{u['username']} signed in", user=u["username"], ip=ip)
+        return {"user": public_user(u)}
+
+    @app.post("/api/auth/logout")
+    def auth_logout(request: Request, response: Response):
+        auth.end_session(conn(), request.cookies.get(auth.COOKIE))
+        response.delete_cookie(auth.COOKIE, path="/")
+        return {"ok": True}
+
+    @app.post("/api/auth/register")
+    def auth_register(request: Request, body: Any = Body(...)):
+        """Request an account. It stays pending (cannot sign in) until an admin approves it."""
+        need_auth_on()
+        need(body, "username", "password")
+        ip = client_ip(request)
+        if register_throttle.blocked(ip):
+            raise HTTPException(429, "too many access requests from this address; try again later")
+        register_throttle.fail(ip)
+        u = auth_call(auth.create_user, conn(), body["username"], body["password"], display_name=body.get("display_name"), note=body.get("note"))
+        eventlog.emit("info", "api", f"Access requested by '{u['username']}' (waiting for an admin)", user=u["username"], ip=ip)
+        return {"ok": True, "status": u["status"]}
+
+    @app.post("/api/auth/password")
+    def auth_password(request: Request, body: Any = Body(...)):
+        need_auth_on()
+        need(body, "current", "new")
+        auth_call(auth.change_own_password, conn(), me()["id"], body["current"], body["new"], request.cookies.get(auth.COOKIE))
+        audit("Password changed (own account)")
+        return {"ok": True}
+
+    @app.get("/api/users")
+    def users_list():
+        need_auth_on()
+        return auth.list_users(conn())
+
+    @app.post("/api/users")
+    def users_create(body: Any = Body(...)):
+        """An admin adds an account directly (active straight away)."""
+        need_auth_on()
+        need(body, "username", "password")
+        u = auth_call(auth.create_user, conn(), body["username"], body["password"], role=body.get("role", "user"), status="active",
+                      display_name=body.get("display_name"), decided_by=me()["username"])
+        audit(f"User '{u['username']}' created ({u['role']})", target=u["username"])
+        return u
+
+    @app.patch("/api/users/{user_id}")
+    def users_update(user_id: int, body: Any = Body(...)):
+        """Approve / reject a request (status active / rejected), disable or re-enable an account, change role or name."""
+        need_auth_on()
+        if not isinstance(body, dict):
+            raise HTTPException(422, "body must be a JSON object")
+        before = auth.get_user(conn(), user_id)
+        u = auth_call(auth.update_user, conn(), user_id, actor=me(), role=body.get("role"), status=body.get("status"), display_name=body.get("display_name"))
+        changes = [f"{k} {before[k]} -> {u[k]}" for k in ("role", "status") if before and before[k] != u[k]]
+        if changes:
+            verb = {("pending", "active"): "approved", ("pending", "rejected"): "rejected"}.get((before["status"], u["status"]))
+            audit(f"User '{u['username']}' {verb or 'changed'}: {', '.join(changes)}", target=u["username"])
+        return u
+
+    @app.post("/api/users/{user_id}/password")
+    def users_reset_password(user_id: int, body: Any = Body(...)):
+        need_auth_on()
+        need(body, "password")
+        auth_call(auth.set_password, conn(), user_id, body["password"])
+        u = auth.get_user(conn(), user_id)
+        audit(f"Password reset by an admin for '{u['username']}' (signed out everywhere)", target=u["username"])
+        return {"ok": True}
+
+    @app.delete("/api/users/{user_id}")
+    def users_delete(user_id: int):
+        need_auth_on()
+        u = auth_call(auth.delete_user, conn(), user_id, actor=me())
+        audit(f"User '{u['username']}' deleted", "warn", target=u["username"])
+        return {"ok": True}
 
     # ------------------------------------------------------------------ misc / settings
     @app.get("/api/health")

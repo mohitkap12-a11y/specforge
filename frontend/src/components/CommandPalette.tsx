@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
-import { CornerDownLeft, Moon, Monitor, Search, Sun } from "lucide-react";
-import { NAV } from "./nav";
+import { CornerDownLeft, Moon, Monitor, Search, Sun, UserRound } from "lucide-react";
+import { NAV, navFor } from "./nav";
+import { useAuth } from "./auth";
 import { useTheme } from "../theme";
 
 interface Cmd { id: string; group: string; label: string; hint?: string; icon: LucideIcon; run: () => void; keywords?: string }
@@ -15,18 +16,20 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const [i, setI] = useState(0);
   const input = useRef<HTMLInputElement>(null);
   const go = (to: string) => () => nav(to);
+  const { isAdmin } = useAuth();
   const cmds = useMemo<Cmd[]>(() => [
-    ...NAV.map((n) => ({ id: n.to, group: "Go to", label: n.label, hint: n.desc, icon: n.icon, run: go(n.to), keywords: n.desc })),
+    ...navFor(isAdmin).map((n) => ({ id: n.to, group: "Go to", label: n.label, hint: n.desc, icon: n.icon, run: go(n.to), keywords: n.desc })),
     { id: "s-ai", group: "Settings", label: "AI providers & models", icon: NAV.find((n) => n.to === "/settings")!.icon, run: go("/settings#ai"), keywords: "ollama opencode model llm" },
     { id: "s-log", group: "Settings", label: "Logging options", icon: NAV.find((n) => n.to === "/settings")!.icon, run: go("/settings#logging"), keywords: "prompt capture level" },
     { id: "s-mi", group: "Settings", label: "NVMe-MI message layout", icon: NAV.find((n) => n.to === "/settings")!.icon, run: go("/settings#mi"), keywords: "mi layout overrides" },
     { id: "a-err", group: "Activity", label: "Show errors in the activity log", icon: NAV.find((n) => n.to === "/activity")!.icon, run: go("/activity?level=error"), keywords: "failures problems" },
     { id: "a-ai", group: "Activity", label: "Watch the AI agents", icon: NAV.find((n) => n.to === "/activity")!.icon, run: go("/activity?lens=ai"), keywords: "llm agent prompts" },
+    { id: "acct", group: "Account", label: "My account", hint: "Change password, sign out", icon: UserRound, run: go("/account"), keywords: "password logout sign out user" },
     { id: "t-l", group: "Theme", label: "Light theme", icon: Sun, run: () => setTheme("light") },
     { id: "t-d", group: "Theme", label: "Dark theme", icon: Moon, run: () => setTheme("dark") },
     { id: "t-s", group: "Theme", label: "Match system theme", icon: Monitor, run: () => setTheme("system") },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], []);
+  ], [isAdmin]);
   const shown = useMemo(() => {
     const t = q.trim().toLowerCase();
     return t ? cmds.filter((c) => `${c.label} ${c.group} ${c.keywords ?? ""}`.toLowerCase().includes(t)) : cmds;

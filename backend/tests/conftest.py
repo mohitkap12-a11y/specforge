@@ -1,8 +1,10 @@
+import os
 import warnings
 
 import pytest
 
 warnings.filterwarnings("ignore")
+os.environ["SPECFORGE_AUTH"] = "0"      # the API tests predate sign-in; test_auth.py turns it on
 
 
 @pytest.fixture(scope="session")

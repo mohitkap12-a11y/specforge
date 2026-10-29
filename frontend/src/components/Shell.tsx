@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, Info, Layers, Menu, Moon, Search, Sun } from "lucide-react";
+import { ChevronLeft, Info, Layers, LogOut, Menu, Moon, Search, Sun, UserRound } from "lucide-react";
 import { api } from "../api";
 import { useJobs } from "./jobs";
 import { CommandPalette } from "./CommandPalette";
-import { GROUPS, NAV } from "./nav";
+import { GROUPS, NAV, navFor } from "./nav";
+import { useAuth } from "./auth";
 import { useTheme } from "../theme";
 
 const KEY = "specforge.nav.collapsed";
@@ -18,6 +19,8 @@ export function Shell({ children }: { children: ReactNode }) {
   const [palette, setPalette] = useState(false);
   const [theme, setTheme] = useTheme();
   const { active } = useJobs();
+  const { me, user, isAdmin, signOut } = useAuth();
+  const pages = navFor(isAdmin);
   const health = useQuery({ queryKey: ["health"], queryFn: api.health, staleTime: 60_000 });
   const running = active.filter((j) => j.state === "running" || j.state === "queued").length;
   const tool = GROUPS.find((g) => g.key === NAV.find((n) => (n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to)))?.group)?.title ?? null;
@@ -45,6 +48,7 @@ export function Shell({ children }: { children: ReactNode }) {
     <NavLink key={n.to} to={n.to} end={n.to === "/"} title={tip(n.label)} aria-label={n.label} className={({ isActive }) => `item ${isActive ? "active" : ""}`}>
       <n.icon size={17} /><span className="lbl">{n.label}</span>
       {n.to === "/activity" && running > 0 && <span className="count" aria-label={`${running} running`}>{running}</span>}
+      {n.to === "/users" && me.pending > 0 && <span className="count" aria-label={`${me.pending} access requests waiting`}>{me.pending}</span>}
     </NavLink>
   );
 
@@ -63,14 +67,14 @@ export function Shell({ children }: { children: ReactNode }) {
           {GROUPS.map((g) => (
             <div key={g.key}>
               {g.title ? <div className="nav-group"><span className="lbl">{g.title}</span></div> : <div style={{ height: 6 }} />}
-              {NAV.filter((n) => n.group === g.key).map(link)}
+              {pages.filter((n) => n.group === g.key).map(link)}
             </div>
           ))}
           <div className="spacer" />
-          {NAV.filter((n) => n.group === "system").map(link)}
-          <div className="nav-foot" title={tip(health.data ? `v${health.data.version} · local` : "")}>
+          {pages.filter((n) => n.group === "system").map(link)}
+          <div className="nav-foot" title={tip(health.data ? `v${health.data.version} · ${me.auth ? user.username : "local"}` : "")}>
             <span className={`dot ${health.data?.ok ? "ok" : health.isError ? "bad" : ""}`} />
-            <span className="lbl">{health.data ? `v${health.data.version} · running locally` : health.isError ? "API unreachable" : "connecting…"}</span>
+            <span className="lbl">{health.data ? `v${health.data.version} · ${me.auth ? "shared server" : "running locally"}` : health.isError ? "API unreachable" : "connecting…"}</span>
           </div>
         </nav>
         <button className="nav-toggle" onClick={toggle} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed}
@@ -91,6 +95,10 @@ export function Shell({ children }: { children: ReactNode }) {
           </button>
           <a href="/about.html" target="_blank" rel="noopener" className="iconbtn about-btn" aria-label="About SpecForge (opens presentation page)" title="About SpecForge"><Info size={17} /><span className="about-lbl">About</span></a>
           <Link to="/settings" className="iconbtn" aria-label="Settings" title="Settings">{(() => { const I = NAV.find((n) => n.to === "/settings")!.icon; return <I size={17} />; })()}</Link>
+          <Link to="/account" className="iconbtn user-btn" aria-label={`My account (${user.username})`} title={`Signed in as ${user.username}${isAdmin && me.auth ? " (admin)" : ""}`}>
+            <UserRound size={17} /><span className="user-lbl">{user.display_name || user.username}</span>
+          </Link>
+          {me.auth && <button className="iconbtn" aria-label="Sign out" title="Sign out" onClick={signOut}><LogOut size={17} /></button>}
         </header>
         <main className="main" id="main">{children}</main>
       </div>

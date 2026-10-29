@@ -16,11 +16,82 @@ def _conn():
     return connect()
 
 
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+
 def cmd_serve(a):
+    import os
+
     import uvicorn
 
+    from . import auth
+
+    if a.no_auth:
+        if a.host not in LOOPBACK:
+            sys.exit("--no-auth is only allowed with a localhost --host: anyone on the network would be an admin")
+        os.environ["SPECFORGE_AUTH"] = "0"
     print(f"SpecForge workspace: {config.workspace_dir()}")
+    if config.auth_enabled():
+        conn = _conn()
+        if not auth.count_admins(conn):
+            print("No admin account yet. Create one before signing in:  specforge user create <name> --admin")
+        n = auth.pending_count(conn)
+        if n:
+            print(f"{n} access request(s) waiting for approval (Users page, or `specforge user list`)")
+    else:
+        print("Sign-in is OFF (--no-auth): local single-user mode")
     uvicorn.run("specforge.api.app:app", host=a.host, port=a.port, log_level="info")
+
+
+def _password(given: str | None, prompt: str = "Password: ") -> str:
+    if given:
+        return given
+    import getpass
+
+    p1 = getpass.getpass(prompt)
+    if getpass.getpass("Repeat password: ") != p1:
+        sys.exit("passwords do not match")
+    return p1
+
+
+def _user(conn, name: str) -> dict:
+    from . import auth
+
+    u = auth.find_user(conn, name)
+    if not u:
+        sys.exit(f"no user named {name!r}")
+    return u
+
+
+def cmd_user(a):
+    """Accounts for `serve` with sign-in. Run on the server; works while the server is running."""
+    from . import auth
+
+    conn = _conn()
+    try:
+        if a.action == "create":
+            u = auth.create_user(conn, a.username, _password(a.password), role="admin" if a.admin else "user", status="active",
+                                 display_name=a.name, decided_by="cli")
+            print(f"created {u['role']} {u['username']!r} (active)")
+        elif a.action == "list":
+            us = auth.list_users(conn)
+            if not us:
+                print("no users yet; create the first admin with: specforge user create <name> --admin")
+            for u in us:
+                print(f"{u['username']:<24} {u['role']:<6} {u['status']:<9} last sign-in: {u['last_login'] or '-':<20} {u['display_name'] or ''}")
+        elif a.action == "passwd":
+            u = _user(conn, a.username)
+            auth.set_password(conn, u["id"], _password(a.password, "New password: "))
+            print(f"password changed for {u['username']!r}; their sessions were signed out")
+        elif a.action == "set":
+            u = _user(conn, a.username)
+            u = auth.update_user(conn, u["id"], role=a.role, status=a.status)
+            print(f"{u['username']!r}: role={u['role']} status={u['status']}")
+        elif a.action == "delete":
+            u = auth.delete_user(conn, _user(conn, a.username)["id"])
+            print(f"deleted {u['username']!r}")
+    except auth.AuthError as e:
+        sys.exit(f"error: {e}")
 
 
 def cmd_demo(a):
@@ -192,7 +263,18 @@ def cmd_models(a):
 def main(argv=None):
     p = argparse.ArgumentParser(prog="specforge")
     sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("serve", help="start the API + web UI"); s.add_argument("--host", default="127.0.0.1"); s.add_argument("--port", type=int, default=8000); s.set_defaults(fn=cmd_serve)
+    s = sub.add_parser("serve", help="start the API + web UI"); s.add_argument("--host", default="127.0.0.1"); s.add_argument("--port", type=int, default=8000)
+    s.add_argument("--no-auth", action="store_true", help="no sign-in (single user, localhost only)"); s.set_defaults(fn=cmd_serve)
+    s = sub.add_parser("user", help="manage sign-in accounts (create the first admin, reset a password, approve, disable)")
+    us = s.add_subparsers(dest="action", required=True)
+    u = us.add_parser("create", help="add an active account"); u.add_argument("username"); u.add_argument("--admin", action="store_true")
+    u.add_argument("--name", help="display name"); u.add_argument("--password", help="omit to be prompted (keeps it out of shell history)")
+    us.add_parser("list", help="list accounts and pending requests")
+    u = us.add_parser("passwd", help="set a new password (signs the user out everywhere)"); u.add_argument("username"); u.add_argument("--password")
+    u = us.add_parser("set", help="change role or status, e.g. approve a request: --status active"); u.add_argument("username")
+    u.add_argument("--role", choices=["admin", "user"]); u.add_argument("--status", choices=["active", "disabled", "rejected"])
+    u = us.add_parser("delete", help="remove an account"); u.add_argument("username")
+    s.set_defaults(fn=cmd_user)
     s = sub.add_parser("make-demo", help="write synthetic demo specs and command DB"); s.add_argument("dir"); s.set_defaults(fn=cmd_demo)
     s = sub.add_parser("ingest", help="register + parse spec files"); s.add_argument("files", nargs="+"); s.add_argument("--family"); s.add_argument("--version")
     s.add_argument("--workers", type=int, default=None); s.add_argument("--set", help="add to (and create) this spec set"); s.set_defaults(fn=cmd_ingest)
