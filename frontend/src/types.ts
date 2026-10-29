@@ -142,3 +142,12 @@ export interface CompareChange {
   id: number; kind: "section" | "table"; change: "added" | "removed" | "modified" | "moved" | "renamed"; impact: Impact; score: number; chapter: string;
   number_from: string | null; number_to: string | null; title: string; title_from?: string | null; nested: boolean; moved?: boolean; normative?: number; details: ChangeDetails;
 }
+
+export type UserRole = "admin" | "user";
+export type UserStatus = "pending" | "active" | "disabled" | "rejected";
+export interface AppUser {
+  id: number; username: string; display_name: string | null; role: UserRole; status: UserStatus;
+  note?: string | null; created?: string; decided_at?: string | null; decided_by?: string | null; last_login?: string | null;
+}
+/** `auth` false: the server runs without sign-in (single local user, who is admin). */
+export interface Me { auth: boolean; user: AppUser | null; pending: number }

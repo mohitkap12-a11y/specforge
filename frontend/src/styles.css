@@ -335,3 +335,13 @@ table.t { width: 100%; border-collapse: collapse; }
 .entity-table td:first-child { min-width: 140px; } .entity-table td:nth-last-child(2) { min-width: 260px; }
 .entity-table .nowrap { white-space: nowrap; }
 .entity-table ul.plain { margin: 0; padding-left: 16px; display: grid; gap: 2px; }
+
+/* sign-in page, user menu */
+fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
+.auth-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: var(--bg); }
+.auth-card { width: min(400px, 100%); margin: 0; padding: 24px; }
+.auth-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+.auth-card textarea { height: auto; padding: 8px 10px; }
+.iconbtn.user-btn { width: auto; padding: 0 10px; gap: 6px; grid-auto-flow: column; font-weight: 500; max-width: 200px; }
+.user-lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 640px) { .user-lbl { display: none; } .iconbtn.user-btn { width: 34px; padding: 0; } }

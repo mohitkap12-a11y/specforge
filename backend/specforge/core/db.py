@@ -171,6 +171,17 @@ CREATE TABLE IF NOT EXISTS compare_change(
   chapter TEXT, number_from TEXT, number_to TEXT, title TEXT, nested INTEGER DEFAULT 0, detail_json TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_cc ON compare_change(compare_id, ord);
+-- Accounts and login sessions (see auth.py). Sessions store only the SHA-256 of their token.
+CREATE TABLE IF NOT EXISTS app_user(
+  id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, display_name TEXT, password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'user', status TEXT NOT NULL DEFAULT 'pending', note TEXT,
+  created TEXT DEFAULT CURRENT_TIMESTAMP, decided_at TEXT, decided_by TEXT, last_login TEXT
+);
+CREATE TABLE IF NOT EXISTS user_session(
+  token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+  created TEXT NOT NULL, last_seen TEXT NOT NULL, expires TEXT NOT NULL, ip TEXT, user_agent TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_session_user ON user_session(user_id);
 CREATE TABLE IF NOT EXISTS job(
   id INTEGER PRIMARY KEY, type TEXT NOT NULL, state TEXT NOT NULL, progress INTEGER DEFAULT 0,
   total INTEGER DEFAULT 0, message TEXT, payload_json TEXT, result_json TEXT, error TEXT,

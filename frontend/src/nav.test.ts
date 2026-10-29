@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { GROUPS, NAV } from "./components/nav";
+import { GROUPS, NAV, navFor } from "./components/nav";
 
 describe("navigation config", () => {
   it("has unique paths and labels", () => {
     expect(new Set(NAV.map((n) => n.to)).size).toBe(NAV.length);
     expect(new Set(NAV.map((n) => n.label)).size).toBe(NAV.length);
   });
-  it("puts Settings and Activity in the always-visible system group", () => {
-    expect(NAV.filter((n) => n.group === "system").map((n) => n.to).sort()).toEqual(["/activity", "/settings"]);
+  it("puts Settings, Activity and Users in the always-visible system group", () => {
+    expect(NAV.filter((n) => n.group === "system").map((n) => n.to).sort()).toEqual(["/activity", "/settings", "/users"]);
+  });
+  it("shows user management to admins only", () => {
+    expect(navFor(true).map((n) => n.to)).toContain("/users");
+    expect(navFor(false).map((n) => n.to)).not.toContain("/users");
+    expect(navFor(false).length).toBe(NAV.length - 1);
   });
   it("every non-system group is rendered", () => {
     const rendered = new Set(GROUPS.map((g) => g.key));

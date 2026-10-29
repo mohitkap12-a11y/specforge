@@ -1,4 +1,4 @@
-import type { CompareChange, CompareOption, Comparison, ComparisonRow, MarkdownConversion, LogEvent, CatalogItem, CmdSource, DecodedCommand, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, MarkdownConversion, LogEvent, CatalogItem, CmdSource, DecodedCommand, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -20,6 +20,7 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   if (body instanceof FormData) init.body = body;
   else if (body !== undefined) { init.headers = { "Content-Type": "application/json" }; init.body = JSON.stringify(body); }
   const r = await fetch(path, init);
+  if (r.status === 401 && !path.startsWith("/api/auth/")) window.dispatchEvent(new Event(UNAUTHORIZED));   // session ended: show the sign-in page
   if (!r.ok) {
     let detail: unknown = r.statusText;
     try { detail = (await r.json()).detail ?? detail; } catch { /* non-JSON error body */ }
@@ -27,6 +28,9 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   }
   return (r.status === 204 ? undefined : await r.json()) as T;
 }
+
+/** Fired when any API call answers 401 (session expired, signed out elsewhere, account disabled). */
+export const UNAUTHORIZED = "specforge:unauthorized";
 
 export const qs = (o: Record<string, string | number | undefined | null>) => {
   const p = new URLSearchParams();
@@ -36,6 +40,17 @@ export const qs = (o: Record<string, string | number | undefined | null>) => {
 };
 
 export const api = {
+  me: () => req<Me>("GET", "/api/auth/me"),
+  login: (username: string, password: string) => req<{ user: AppUser }>("POST", "/api/auth/login", { username, password }),
+  logout: () => req("POST", "/api/auth/logout"),
+  register: (b: { username: string; password: string; display_name?: string; note?: string }) => req<{ ok: boolean; status: string }>("POST", "/api/auth/register", b),
+  changePassword: (current: string, next: string) => req("POST", "/api/auth/password", { current, new: next }),
+  users: () => req<AppUser[]>("GET", "/api/users"),
+  createUser: (b: { username: string; password: string; role: string; display_name?: string }) => req<AppUser>("POST", "/api/users", b),
+  updateUser: (id: number, b: { role?: string; status?: string; display_name?: string }) => req<AppUser>("PATCH", `/api/users/${id}`, b),
+  resetUserPassword: (id: number, password: string) => req("POST", `/api/users/${id}/password`, { password }),
+  deleteUser: (id: number) => req("DELETE", `/api/users/${id}`),
+
   specs: () => req<SpecDoc[]>("GET", "/api/specs"),
   upload: (files: File[]) => { const f = new FormData(); files.forEach((x) => f.append("files", x)); return req<SpecDoc[]>("POST", "/api/specs/upload", f); },
   toMarkdown: (file: File, frontMatter = true) => { const f = new FormData(); f.append("file", file); return req<MarkdownConversion>("POST", `/api/convert/markdown${qs({ front_matter: frontMatter ? undefined : "false" })}`, f); },

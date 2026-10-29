@@ -32,6 +32,11 @@ def workspace_dir() -> Path:
     return root
 
 
+def auth_enabled() -> bool:
+    """Login required for the API (default). `specforge serve --no-auth` turns it off for a single user on this machine."""
+    return os.environ.get("SPECFORGE_AUTH", "1").strip().lower() not in ("0", "off", "false", "no")
+
+
 def db_path() -> Path:
     return workspace_dir() / "app.db"
 

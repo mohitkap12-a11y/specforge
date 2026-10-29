@@ -82,12 +82,34 @@ Prerequisites: Python 3.11+, and Node 18+ only if you build or develop the UI.
 
 | Goal | Commands | Result |
 |---|---|---|
-| **Use it (backend + built UI, one process)** | `make ui` once, then `specforge serve` | UI and API on http://127.0.0.1:8000 (API docs at `/docs`) |
+| **Use it (backend + built UI, one process)** | `make ui` once, `specforge user create <name> --admin` once, then `specforge serve` | UI and API on http://127.0.0.1:8000 (API docs at `/docs`) |
 | **Backend only (API / CLI)** | `specforge serve [--host 0.0.0.0 --port 9000]` or just use the CLI commands | API on the given host/port |
 | **Develop the UI (hot reload)** | terminal 1: `specforge serve`; terminal 2: `make ui-dev` | UI on http://localhost:5173, proxying `/api` to :8000 |
 | **Develop the backend** | `make test` and `make lint` | tests + ruff |
 
+Sign-in is on by default: create the first admin before starting the server (`specforge user create <name> --admin`). For a single user on one machine, `specforge serve --no-auth` skips sign-in (allowed only with a localhost `--host`). See [Sharing it on the network](#sharing-it-on-the-network-users-and-sign-in).
+
 `make ui` runs `npm ci && npm run build` and writes `frontend/dist`, which the server finds automatically. Without a built UI, `specforge serve` still serves the API. Data lives in `~/.specforge` (override with `SPECFORGE_HOME`).
+
+### Sharing it on the network: users and sign-in
+
+One SpecForge server can serve a team on the local network. Everyone signs in with a local account, and all approved users share one workspace: the same specs, sets, command DBs and coverage runs. The activity log records who did what.
+
+```bash
+specforge user create alice --admin --name "Alice"     # first admin (prompts for the password)
+specforge serve --host 0.0.0.0 --port 8000              # then open http://<server-ip>:8000 from other machines
+```
+
+Open the port in the server's firewall, and run `serve` as a service (systemd, NSSM) so it survives logouts.
+
+* **New users** pick *Request access* on the sign-in page. The request stays *pending* until an admin approves it on the **Users** page (sidebar, admins only; a badge counts waiting requests).
+* **Roles:** *admin* manages users (approve / reject requests, add users, change roles, disable or delete accounts, reset passwords), changes the global **Settings**, resets the workspace and clears the activity log. *User* can do everything else. Settings are read-only for users.
+* **Passwords:** at least 8 characters, stored as salted scrypt hashes in `app.db`. Users change their own password under *My account* (top bar). There is no e-mail, so a forgotten password is reset by an admin. Disabling an account, changing its role or resetting its password signs that user out everywhere at once.
+* **Sessions:** HttpOnly, SameSite=Strict cookie. A session expires after 7 days without use. Cross-origin writes are refused. After 10 failed sign-ins for one name from one address, further attempts are refused for 10 minutes.
+* **Safeguards:** the server always keeps at least one active admin, and admins cannot demote, disable or delete themselves.
+* **Recovery on the server:** `specforge user list`, `specforge user passwd <name>`, `specforge user set <name> --status active|disabled|rejected --role admin|user`, `specforge user delete <name>`. These work while the server is running.
+
+Plain HTTP is fine on a trusted LAN. Anywhere else, put a reverse proxy (nginx, Caddy) with HTTPS in front and keep SpecForge on `127.0.0.1`. The proxy must forward the original `Host` (nginx: `proxy_set_header Host $host;`) or set `X-Forwarded-Host`, and pass `X-Forwarded-Proto` so the cookie is marked `Secure`. Note that command DBs are registered by a path *on the server*, so put the dumps where the server can read them.
 
 ### Package it (one installable file)
 
@@ -183,7 +205,7 @@ Requirements cannot be seen in a log of submissions. `POST /api/sets/{id}/exec/d
 ## Tests and CI
 
 ```bash
-make test     # 228 tests, ~2.5 min
+make test     # 334 tests
 make lint
 ```
 
