@@ -1,4 +1,4 @@
-import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, CatalogItem, CmdSource, DecodedCommand, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -114,13 +114,22 @@ export const api = {
   crossGenerate: (set: number, b: CrossSelection & { focus?: string; max_per_section?: number; passes?: number }) => req<{ job: number }>("POST", `/api/sets/${set}/scenarios/cross`, b),
 
   sources: () => req<CmdSource[]>("GET", "/api/cmddb"),
-  suggestMapping: (path: string) => req<Record<string, any>>("GET", `/api/cmddb/suggest${qs({ path })}`),
-  addSource: (path: string, mapping?: unknown) => req<{ id: number }>("POST", "/api/cmddb", { path, mapping }),
+  suggestMapping: (path: string, kind?: CmdKind) => req<Record<string, any>>("GET", `/api/cmddb/suggest${qs({ path, kind })}`),
+  addSource: (path: string, mapping?: unknown, kind?: CmdKind) => req<{ id: number }>("POST", "/api/cmddb", { path, mapping, kind }),
+  scanDbs: (path: string, kind?: CmdKind) => req<DbScan>("GET", `/api/cmddb/scan${qs({ path, kind })}`),
+  browseFs: (path?: string) => req<FsListing>("GET", `/api/fs/browse${qs({ path })}`),
+  /** Copy dropped / picked databases to the server; `path` is each file's path inside the dropped folder. */
+  uploadDbs: (files: { file: File; path: string }[]) => {
+    const f = new FormData();
+    files.forEach((x) => { f.append("files", x.file); f.append("paths", x.path); });
+    return req<{ path: string; databases: number }>("POST", "/api/cmddb/upload", f);
+  },
   importSource: (id: number) => req<{ job: number }>("POST", `/api/cmddb/${id}/import`),
   runCoverage: (set_id: number, source_id: number) => req<{ job: number }>("POST", "/api/coverage/run", { set_id, source_id }),
   covRuns: (set?: number) => req<CovRun[]>("GET", `/api/coverage/runs${qs({ set_id: set })}`),
   covSummary: (id: number) => req<CovSummary>("GET", `/api/coverage/${id}`),
-  covItems: (id: number, f: { state?: string; kind?: string; command?: string; q?: string; offset?: number; limit?: number }) =>
+  covTests: (id: number) => req<TestCov[]>("GET", `/api/coverage/${id}/tests`),
+  covItems: (id: number, f: { state?: string; kind?: string; command?: string; test?: string; q?: string; offset?: number; limit?: number }) =>
     req<{ total: number; items: CovItem[] }>("GET", `/api/coverage/${id}/items${qs(f)}`),
   covEvidence: (id: number, item: string) => req<Evidence[]>("GET", `/api/coverage/${id}/evidence${qs({ item })}`),
   covDiff: (a: number, b: number) => req<{ gained: string[]; lost: string[]; summary: Record<string, number> }>("GET", `/api/coverage/${a}/diff/${b}`),

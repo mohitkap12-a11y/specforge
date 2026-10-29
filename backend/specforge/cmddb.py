@@ -148,8 +148,162 @@ def list_tables(path: str) -> dict[str, list[str]]:
         con.close()
 
 
-def suggest_mapping(path: str) -> dict[str, Any]:
-    tables = list_tables(path)
+# Command-history databases written by the test framework: one file per test script, NVMe commands in one table, NVMe-MI
+# commands in another. Values are hex text ("0x6"); the SQE is stored field by field (OP, NS, FUSE, ...) rather than as dword 0/1.
+HISTORY_TABLES = {"nvme": "commandhistorytable", "mi": "micommandhistorytable"}   # kind -> table name (lower case)
+KINDS = ("nvme", "mi")
+DB_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".db3")
+FROM_FILE = {"from": "file"}       # mapping value: the test name is the database's path (one database per test script)
+
+
+def is_sqlite(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(16) == b"SQLite format 3\x00"
+    except OSError:
+        return False
+
+
+def discover(path: str | Path) -> list[Path]:
+    """The databases of a source: the file itself, or every SQLite database under a folder (sub-folders included, hidden ones
+    skipped), in path order."""
+    p = Path(path)
+    if p.is_file():
+        return [p]
+    if not p.is_dir():
+        raise FileNotFoundError(str(path))
+    found = []
+    for f in p.rglob("*"):
+        rel = f.relative_to(p)
+        if f.suffix.lower() in DB_SUFFIXES and not any(x.startswith(".") for x in rel.parts) and f.is_file() and is_sqlite(f):
+            found.append(f)
+    return sorted(found, key=lambda f: f.relative_to(p).as_posix().lower())
+
+
+def test_name(root: str | Path, f: Path) -> str:
+    """A database's test name: its path inside the folder without the extension (for a single file, folder/file)."""
+    root = Path(root)
+    if root.is_dir():
+        return f.relative_to(root).with_suffix("").as_posix()
+    return f"{f.parent.name}/{f.stem}" if f.parent.name else f.stem
+
+
+def _rel(root: Path, f: Path) -> str:
+    return f.relative_to(root).as_posix() if root.is_dir() else f.name
+
+
+def source_sha256(path: str | Path) -> str:
+    root = Path(path)
+    if root.is_file():
+        return sha256_file(root)
+    return stable_hash([(_rel(root, f), sha256_file(f)) for f in discover(root)])
+
+
+def _history_tables(tables: dict[str, list[str]]) -> dict[str, str]:
+    """kind -> actual table name, for the command-history tables present in this database."""
+    low = {t.lower(): t for t in tables}
+    return {k: low[t] for k, t in HISTORY_TABLES.items() if t in low}
+
+
+def _history_mapping(kind: str, table: str, cols: list[str]) -> dict[str, Any]:
+    low = {c.lower(): c for c in cols}
+
+    def pick(names: dict[str, str]) -> dict[str, str]:
+        return {k: low[c] for k, c in names.items() if c in low}
+
+    m: dict[str, Any] = {"table": table, "format": "command_history", "kind": kind, "test": dict(FROM_FILE)}   # no test column
+    if "cmdtype" in low:
+        m["queue"] = low["cmdtype"]
+    if kind == "nvme":
+        if "sn" in low:
+            m["seq"] = low["sn"]
+        m.update({"interface": {"const": "pcie"}, "cs": {"const": "nvm"},
+                  "fields": pick({"opcode": "op", "nsid": "ns", "fuse": "fuse", "psdt": "psdt", "cid": "cmdid"}),
+                  "cdw": pick({str(i): f"dword{i:02d}" for i in (2, 3, 10, 11, 12, 13, 14, 15)})})
+        if "queue" not in m:
+            m["queue"] = {"const": "admin"}
+    else:
+        m.update({"interface": {"const": "mi"}, "mi_fields": pick({"opcode": "op", "nmd0": "dword0", "nmd1": "dword1"})})
+    return m
+
+
+def _count(path: Path, table: str) -> int:
+    con = _open_ro(str(path))
+    try:
+        return con.execute(f"SELECT COUNT(*) FROM {_q(table)}").fetchone()[0]
+    finally:
+        con.close()
+
+
+def scan(path: str, kind: str | None = None, limit: int = 5000) -> dict[str, Any]:
+    """Every database of a file or folder with its test name and how many NVMe / NVMe-MI commands it holds, plus the mapping
+    that would be used for them (see suggest_mapping)."""
+    root = Path(path)
+    files = discover(root)
+    dbs = []
+    for f in files[:limit]:
+        e: dict[str, Any] = {"path": str(f), "rel": _rel(root, f), "test": test_name(root, f), "size": f.stat().st_size}
+        try:
+            tables = list_tables(str(f))
+            hist = _history_tables(tables)
+            if hist:
+                e["commands"] = {k: _count(f, t) for k, t in hist.items()}
+            else:
+                e["tables"] = sorted(tables)
+        except sqlite3.DatabaseError as ex:
+            e["error"] = str(ex)
+        dbs.append(e)
+    out: dict[str, Any] = {"path": str(root), "folder": root.is_dir(), "count": len(files), "databases": dbs, "truncated": len(files) > limit}
+    try:
+        out.update(suggest_mapping(path, kind))
+    except ValueError as ex:
+        out["error"] = str(ex)
+    return out
+
+
+def suggest_mapping(path: str, kind: str | None = None) -> dict[str, Any]:
+    """Guess a column mapping for a database or a folder of databases (read from the first one that has the commands).
+
+    `kind` ("nvme" | "mi") picks which commands to read from command-history databases."""
+    if kind is not None and kind not in KINDS:
+        raise ValueError(f"kind must be one of {', '.join(KINDS)}")
+    root = Path(path)
+    files = discover(root)
+    if not files:
+        raise ValueError("No SQLite databases found in this folder")
+    first = files[0]
+    tables = list_tables(str(first))
+    hist = _history_tables(tables)
+    if root.is_dir() and hist:                 # the first database may predate MI logging: use one that has the requested table
+        want = HISTORY_TABLES[kind or "nvme"]
+        for f in files:
+            t = list_tables(str(f))
+            if want in {x.lower() for x in t}:
+                first, tables, hist = f, t, _history_tables(t)
+                break
+    if hist:
+        kind = kind or ("nvme" if "nvme" in hist else "mi")
+        if kind not in hist:
+            raise ValueError(f"This command-history database has no {'MICommandHistoryTable' if kind == 'mi' else 'CommandHistoryTable'} table")
+        table = hist[kind]
+        m = _history_mapping(kind, table, tables[table])
+        warnings = []
+        need = ("opcode",) if kind == "mi" else ("opcode", "nsid")
+        missing = [f for f in need if f not in m.get("fields" if kind == "nvme" else "mi_fields", {})]
+        if missing:
+            warnings.append(f"{table}: no column found for {', '.join(missing)}; set the mapping manually.")
+        if not root.is_dir() and _count(first, table) == 0:
+            warnings.append(f"{table} is empty: this run recorded no {'NVMe-MI' if kind == 'mi' else 'NVMe'} commands.")
+        return {"mapping": m, "tables": tables, "warnings": warnings, "format": "command_history", "kinds": sorted(hist)}
+    out = _suggest_generic(tables)
+    if root.is_dir() and "test" not in out["mapping"]:
+        out["mapping"]["test"] = dict(FROM_FILE)
+    if kind is not None:
+        out["warnings"].append("Not a command-history database: the NVMe / NVMe-MI choice does not apply; the mapping was guessed from the schema.")
+    return out
+
+
+def _suggest_generic(tables: dict[str, list[str]]) -> dict[str, Any]:
     best, best_score = None, -1
     for t, cols in tables.items():
         low = {c.lower(): c for c in cols}
@@ -259,24 +413,80 @@ def iter_source_rows(path: str, mapping: dict) -> Iterator[sqlite3.Row]:
         con.close()
 
 
+def _int(v: Any) -> int | None:
+    """An integer column value or text in decimal / hex ("0x3ff0005", "06h"); None for NULL or empty text."""
+    if v is None or isinstance(v, int):
+        return v
+    if isinstance(v, float):
+        return int(v)
+    s = (v.decode(errors="replace") if isinstance(v, bytes) else str(v)).strip().lower()
+    if not s:
+        return None
+    try:
+        if s.startswith("0x"):
+            return int(s, 16)
+        if s.endswith("h"):
+            return int(s[:-1], 16)
+        return int(s)
+    except ValueError:
+        raise ValueError(f"not a number: {v!r}") from None
+
+
+def _field(r: sqlite3.Row, col: str | None) -> int | None:
+    return _int(r[col]) if col and col in r.keys() else None
+
+
+def _norm_mi_queue(q: Any) -> str:
+    """Commands in an MI command table are NVMe-MI commands unless the row says it is a tunnelled Admin command."""
+    s = str(q or "").strip().lower()
+    return "admin" if s in ("admin", "adm", "nvme_admin", "nvme-admin", "mi_admin", "mi-admin", "2") else "mi"
+
+
+def _mi_from_fields(r: sqlite3.Row, mapping: dict) -> dict[str, Any]:
+    f = mapping["mi_fields"]
+    opcode = _field(r, f.get("opcode"))
+    if opcode is None:
+        raise ValueError("opcode is NULL")
+    queue = _norm_mi_queue(_value(r, _col(mapping, "queue"), "mi"))
+    if queue == "admin":                                   # only the opcode of a tunnelled Admin command is recorded here
+        return {"interface": "mi", "queue": "admin", "opcode": opcode & 0xFF, "nsid": 0, "dwords": {"0": opcode & 0xFF}, "extra": {}}
+    dws = {k: v & 0xFFFFFFFF for k in ("nmd0", "nmd1") if (v := _field(r, f.get(k))) is not None}
+    return {"interface": "mi", "queue": "mi", "opcode": opcode & 0xFF, "nsid": 0, "dwords": dws, "extra": {}}
+
+
+def _dwords_from_columns(r: sqlite3.Row, mapping: dict) -> dict[str, int]:
+    # SQL NULL means "not recorded": it is omitted (never turned into 0, which would satisfy zero-valued scenarios)
+    dw = {k: v & 0xFFFFFFFF for k, c in (mapping.get("cdw") or {}).items() if (v := _field(r, c)) is not None}
+    f = mapping.get("fields") or {}
+    if "0" not in dw and f.get("opcode"):                  # dword 0 recorded field by field: OPC, FUSE, PSDT, CID
+        opcode = _field(r, f["opcode"])
+        if opcode is not None:
+            fuse, psdt, cid = (_field(r, f.get(k)) or 0 for k in ("fuse", "psdt", "cid"))
+            dw["0"] = (opcode & 0xFF) | (fuse & 3) << 8 | (psdt & 3) << 14 | (cid & 0xFFFF) << 16
+    if "1" not in dw and f.get("nsid") and (nsid := _field(r, f["nsid"])) is not None:
+        dw["1"] = nsid & 0xFFFFFFFF
+    return dw
+
+
 def decode_row(r: sqlite3.Row, mapping: dict, layout: dict) -> dict[str, Any]:
     iface = _norm_iface(_value(r, _col(mapping, "interface"), "pcie"))
     cs = _norm_cs(_value(r, _col(mapping, "cs"), "nvm"), mapping)
     mi_col = _col(mapping, "mi_msg")
     sqe_col = _col(mapping, "sqe")
-    cdw = mapping.get("cdw")
     if iface == "mi":
         blob = r[mi_col] if mi_col and mi_col in r.keys() else None
-        if blob is None:
+        if blob is not None:
+            d = decode_mi(blob, layout)
+        elif mapping.get("mi_fields"):
+            d = _mi_from_fields(r, mapping)
+        else:
             raise ValueError("interface=mi but no MI message bytes")
-        d = decode_mi(blob, layout)
         cs = "mi" if d["queue"] == "mi" else "base"
     else:
         if sqe_col and r[sqe_col] is not None:
             d = decode_sqe(r[sqe_col])
-        elif cdw:
-            # SQL NULL means "not recorded": it is omitted (never turned into 0, which would satisfy zero-valued scenarios)
-            dw = {k: int(r[c]) & 0xFFFFFFFF for k, c in cdw.items() if r[c] is not None}
+        elif mapping.get("cdw") or mapping.get("fields"):
+            dw = _dwords_from_columns(r, mapping)
             if "0" not in dw:
                 raise ValueError("cdw0 (opcode) is NULL")
             d = _from_dwords(dw)
@@ -290,12 +500,18 @@ def decode_row(r: sqlite3.Row, mapping: dict, layout: dict) -> dict[str, Any]:
     return d
 
 
-def register_source(conn: sqlite3.Connection, path: str, mapping: dict | None = None, name: str | None = None) -> int:
-    if not Path(path).is_file():
+def register_source(conn: sqlite3.Connection, path: str, mapping: dict | None = None, name: str | None = None,
+                    kind: str | None = None) -> int:
+    """`path` is one database or a folder of databases (one per test script; sub-folders included)."""
+    if not Path(path).exists():
         raise FileNotFoundError(path)
-    mapping = mapping or suggest_mapping(path)["mapping"]
+    mapping = mapping or suggest_mapping(path, kind)["mapping"]
+    if not name:
+        name = Path(path).name + ("/" if Path(path).is_dir() else "")
+        if mapping.get("format") == "command_history":
+            name += f" ({'NVMe-MI' if mapping.get('kind') == 'mi' else 'NVMe'})"
     cur = conn.execute("INSERT INTO cmd_source(name,path,sha256,mapping_json,status) VALUES(?,?,?,?, 'new')",
-                       (name or Path(path).name, str(path), sha256_file(path), json.dumps(mapping)))
+                       (name, str(path), source_sha256(path), json.dumps(mapping)))
     conn.commit()
     return cur.lastrowid  # type: ignore[return-value]
 
@@ -306,56 +522,80 @@ def import_source(conn: sqlite3.Connection, source_id: int, mi_layout: dict | No
         raise KeyError(source_id)
     mapping = json.loads(src["mapping_json"])
     layout = merged_layout(mi_layout)
-    eventlog.emit("info", "import", f"Importing '{src['name'] or src['path']}' (table {mapping.get('table')})", source_id=source_id, mapping=mapping,
-                  mi_layout_overrides=mi_layout or {})
-    # the file may have changed since it was registered: record the hash of the bytes actually imported
-    conn.execute("UPDATE cmd_source SET sha256=? WHERE id=?", (sha256_file(src["path"]), source_id))
+    root = Path(src["path"])
+    files = discover(root)               # a folder is scanned again: databases added since the last import are picked up
+    eventlog.emit("info", "import", f"Importing '{src['name'] or src['path']}' (table {mapping.get('table')}, {len(files)} database(s))",
+                  source_id=source_id, mapping=mapping, mi_layout_overrides=mi_layout or {})
+    # the files may have changed since they were registered: record the hash of the bytes actually imported
+    conn.execute("UPDATE cmd_source SET sha256=? WHERE id=?", (source_sha256(root), source_id))
     conn.execute("DELETE FROM decoded_command WHERE source_id=?", (source_id,))
     conn.execute("DELETE FROM cmd_signature WHERE source_id=?", (source_id,))
     sigs: dict[str, dict] = {}
     batch: list[tuple] = []
     total = bad = 0
     errors: list[dict] = []
+    per_file: list[dict] = []
     id_col, test_col, script_col, seq_col = mapping.get("id"), mapping.get("test"), mapping.get("script"), mapping.get("seq")
-    for r in iter_source_rows(src["path"], mapping):
-        total += 1
-        if progress and total % PROGRESS_EVERY == 0:      # polled on rows SCANNED (decode failures included), so cancellation is honoured
-            progress(total)
+    table = str(mapping.get("table", "")).lower()
+    for f in files:
+        rel, ftest = _rel(root, f), test_name(root, f)
+        fs: dict[str, Any] = {"rel": rel, "test": ftest, "rows": 0, "decoded": 0}
+        per_file.append(fs)
         try:
-            d = decode_row(r, mapping, layout)
-            seq = int(_meta(r, seq_col, total))
-        except Exception as e:  # noqa: BLE001
-            bad += 1
-            if len(errors) < 25:
-                errors.append({"row": _meta(r, id_col, total), "error": str(e)})
-            continue
-        s = sigs.get(d["signature"])
-        if s is None:
-            s = sigs[d["signature"]] = {"interface": d["interface"], "queue": d["queue"], "cs": d["cs"], "opcode": d["opcode"],
-                                        "nsid": d["nsid"], "dwords": d["dwords"], "count": 0}
-        s["count"] += 1
-        batch.append((source_id, _meta(r, id_col, total), str(_meta(r, test_col, "")), str(_meta(r, script_col, "")),
-                      seq,
-                      d["interface"], d["queue"], d["cs"], d["opcode"], d["nsid"], d["signature"]))
-        if len(batch) >= 20000:
-            _flush(conn, batch)
-            batch = []
+            if table not in {t.lower() for t in list_tables(str(f))}:
+                fs["error"] = f"no table {mapping.get('table')}"
+                continue
+            n = 0
+            for r in iter_source_rows(str(f), mapping):
+                n += 1
+                total += 1
+                fs["rows"] += 1
+                if progress and total % PROGRESS_EVERY == 0:      # polled on rows SCANNED (decode failures included), so cancellation is honoured
+                    progress(total)
+                try:
+                    d = decode_row(r, mapping, layout)
+                    seq = _int(_meta(r, seq_col, n))
+                    seq = n if seq is None else seq
+                except Exception as e:  # noqa: BLE001
+                    bad += 1
+                    if len(errors) < 25:
+                        errors.append({"row": _meta(r, id_col, n), "error": str(e), **({"file": rel} if root.is_dir() else {})})
+                    continue
+                fs["decoded"] += 1
+                s = sigs.get(d["signature"])
+                if s is None:
+                    s = sigs[d["signature"]] = {"interface": d["interface"], "queue": d["queue"], "cs": d["cs"], "opcode": d["opcode"],
+                                                "nsid": d["nsid"], "dwords": d["dwords"], "count": 0}
+                s["count"] += 1
+                batch.append((source_id, _meta(r, id_col, n), str(_meta(r, test_col, ftest if test_col == FROM_FILE or root.is_dir() else "")),
+                              str(_meta(r, script_col, rel if root.is_dir() else "")), seq,
+                              d["interface"], d["queue"], d["cs"], d["opcode"], d["nsid"], d["signature"]))
+                if len(batch) >= 20000:
+                    _flush(conn, batch)
+                    batch = []
+        except sqlite3.DatabaseError as e:                  # a corrupt or locked database is reported, the others are still imported
+            fs["error"] = str(e)
     if progress:
         progress(total)                                    # last chance to cancel before the import is finalised
     _flush(conn, batch)
     conn.executemany("INSERT INTO cmd_signature(source_id,signature,interface,queue,cs,opcode,nsid,dwords_json,count) VALUES(?,?,?,?,?,?,?,?,?)",
                      [(source_id, k, v["interface"], v["queue"], v["cs"], v["opcode"], v["nsid"], json.dumps(v["dwords"]), v["count"])
                       for k, v in sigs.items()])
-    unknown = {"undecodable_rows": bad, "errors": errors}
+    failed = [x for x in per_file if "error" in x]
+    unknown = {"undecodable_rows": bad, "errors": errors, "files": per_file, "failed_files": len(failed)}
     conn.execute("UPDATE cmd_source SET row_count=?, decoded_count=?, unknown_json=?, imported_at=CURRENT_TIMESTAMP, status='imported' WHERE id=?",
                  (total, total - bad, json.dumps(unknown), source_id))
     conn.commit()
-    eventlog.emit("warn" if bad else "info", "import", f"Import done: {total} rows scanned, {total - bad} decoded, {bad} undecodable, {len(sigs)} distinct command signatures",
-                  source_id=source_id, rows=total, decoded=total - bad, undecodable=bad, signatures=len(sigs))
+    eventlog.emit("warn" if bad or failed else "info", "import",
+                  f"Import done: {len(files)} database(s), {total} rows scanned, {total - bad} decoded, {bad} undecodable, {len(sigs)} distinct command signatures"
+                  + (f"; {len(failed)} database(s) could not be read" if failed else ""),
+                  source_id=source_id, databases=len(files), rows=total, decoded=total - bad, undecodable=bad, signatures=len(sigs))
     for e_ in errors[:5]:
-        eventlog.emit("warn", "import", f"Row {e_['row']} could not be decoded: {e_['error']}", source_id=source_id)
+        eventlog.emit("warn", "import", f"Row {e_['row']}{' of ' + e_['file'] if 'file' in e_ else ''} could not be decoded: {e_['error']}", source_id=source_id)
+    for x in failed[:5]:
+        eventlog.emit("warn", "import", f"{x['rel']} skipped: {x['error']}", source_id=source_id)
     return {"rows": total, "decoded": total - bad, "undecodable": bad, "signatures": len(sigs), "errors": errors,
-            "config_hash": stable_hash([mapping, layout])}
+            "databases": len(files), "failed_databases": len(failed), "config_hash": stable_hash([mapping, layout])}
 
 
 def _flush(conn: sqlite3.Connection, batch: list[tuple]) -> None:

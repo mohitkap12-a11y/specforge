@@ -345,3 +345,10 @@ fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
 .iconbtn.user-btn { width: auto; padding: 0 10px; gap: 6px; grid-auto-flow: column; font-weight: 500; max-width: 200px; }
 .user-lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 640px) { .user-lbl { display: none; } .iconbtn.user-btn { width: 34px; padding: 0; } }
+/* server folder browser (Command DBs) */
+.palette.fsb { display: flex; flex-direction: column; max-height: 70vh; }
+.fsb-head, .fsb-foot { padding: 10px 12px; gap: 8px; border-bottom: 1px solid var(--border); }
+.fsb-foot { border-bottom: 0; border-top: 1px solid var(--border); }
+.fsb-body { list-style: none; margin: 0; padding: 6px; overflow: auto; flex: 1; min-height: 160px; }
+.fsb-body .opt { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.fsb-body .opt:hover { background: var(--surface-2); }

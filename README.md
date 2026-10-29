@@ -16,9 +16,9 @@ Scenario and command **coverage for the NVMe / NVMe-MI specifications**, fully o
 
 1. Parse spec PDFs / DOCX (Base, NVM Command Set, MI, ...) into a versioned, cross-referenced model.
 2. Build the list of everything that can be covered (commands, fields, values, reserved bits, boundaries, normative statements).
-3. Import a SQLite dump of the commands your test scripts submitted.
+3. Import the SQLite databases of the commands your test scripts submitted: one database or a whole folder (one per test script).
 4. **Derive the scenarios from execution:** every test case in the dump becomes one scenario (the commands it sent, in order, named from the catalog with their field values; tests that ran the same flow are merged). Optionally, AI (Ollama or OpenCode) describes each flow and proposes the spec requirements it exercises, for review.
-5. Report every catalog item as **covered / partial / not covered / N/A**, with the tests as evidence. For areas the tests do not reach, AI can still draft spec-driven cross-command scenarios (gap suggestions).
+5. Report every catalog item as **covered / partial / not covered / N/A**, with the tests as evidence, overall and per test script. For areas the tests do not reach, AI can still draft spec-driven cross-command scenarios (gap suggestions).
 6. Export Excel / HTML / CSV / JSON reports.
 
 > **Design rule:** code decides *what exists*, *what was executed* and *what is covered*; AI only describes, proposes and drafts, and never changes a coverage verdict on its own.
@@ -174,14 +174,33 @@ The parser was built on synthetic documents and then run once on the three real 
 
 ## Command database
 
-Any SQLite file with one row per submitted command. The tool opens it **read-only** and suggests a column mapping (`GET /api/cmddb/suggest?path=...`):
+A command DB source is **one SQLite database or a folder of them**. A folder is scanned recursively (hidden folders skipped) and every SQLite database in it is **one test script**: its test name is its path inside the folder without the extension (e.g. `suiteA/2026_10_30/TC_Identify`), unless the database has a test-name column. Coverage is reported for all of them together and for **every test script on its own**. Re-importing a folder picks up databases added since; a database that cannot be read or lacks the command table is listed as skipped and the others are still imported. The files are opened **read-only**.
+
+Adding sources (UI *Command DBs*): type a server path to a database or folder, pick it with **Browse…** (folders and databases on the server), or **drop a folder / database files** on the page (or use *Upload folder* / *Upload files*): dropped files are copied to the server (`~/.specforge/cmddb-uploads/`, sub-folders kept). *Find databases* lists every database found with its test name and command counts before you add it.
+
+**Command-history databases** (written by the test framework, one per test script) are recognised automatically. Choose which commands to check:
+
+| Choice | Table read | Columns used |
+|---|---|---|
+| **NVMe** (default) | `CommandHistoryTable` | `SN` (order), `CmdType` (Admin / I/O queue), `OP`, `NS`, `FUSE`, `PSDT`, `CMDID`, `DWORD02`, `DWORD03`, `DWORD10`-`DWORD15` |
+| **NVMe-MI** | `MICommandHistoryTable` | `CmdType`, `OP`, `DWORD0` / `DWORD1` (NMD0 / NMD1) |
+
+*Both* adds two sources, one per table. Values may be hex text (`0x3ff0005`) or integers. Timing, status and vendor columns are not used (only submissions count; see below).
+
+Other databases need one row per submitted command, and the tool suggests a column mapping (`GET /api/cmddb/suggest?path=...&kind=nvme|mi`):
 
 * **Layout A:** a 64-byte `sqe` BLOB and/or an `mi_msg` BLOB, plus `test_name`, `seq`, `interface` (`pcie`|`mi`), `queue` (`admin`|`io`).
-* **Layout B:** integer columns `cdw0 ... cdw15`.
+* **Layout B:** integer (or hex text) columns `cdw0 ... cdw15`; or the SQE field by field with `"fields": {"opcode", "nsid", "fuse", "psdt", "cid"}` plus `cdw` for the other dwords.
 
-Map `test` (the test-case name) whenever the dump has one: scenarios are built per test case (falling back to `script`, then to the whole log as one test).
+Map `test` (the test-case name) whenever the dump has one: scenarios are built per test case (falling back to `script`, then to the whole log as one test). `{"from": "file"}` names the test after the database.
 
 Mapping values are a column name or `{"const": "..."}`. Set `cs` (command set, default `nvm`) when your I/O commands are not NVM-set commands. No completions are needed. Items that need a completion to verify are reported as *stimulus-only* and never counted as fully covered; controller-internal requirements are *N/A* and excluded from the percentage (listed in the report).
+
+API: `GET /api/cmddb/scan?path=...&kind=...` (the databases of a file or folder), `GET /api/fs/browse?path=...`, `POST /api/cmddb/upload` (multipart `files` with matching `paths`), `POST /api/cmddb {"path", "kind"}`. CLI: `specforge coverage <set> <file-or-folder> [--kind mi]` prints the coverage of each test.
+
+### Coverage per test script
+
+Every coverage run also records what **each test on its own** exercised: commands sent, commands / values / boundaries / reserved bits / requirements exercised out of the catalog's, and its share of the catalog (commands and requirements, N/A excluded; requirements count once their link is approved). UI: *Coverage* → **By test script** (click a test to list only its items); API `GET /api/coverage/{run}/tests` and `GET /api/coverage/{run}/items?test=...`; reports: the *By test* sheet (Excel), section (HTML), `tests` in the JSON and `which=tests` for CSV.
 
 ## Scenarios from execution
 

@@ -267,12 +267,14 @@ def analyze_execution(conn: sqlite3.Connection, set_id: int, source_id: int, pro
                   f"against the catalog of set #{set_id}", set_id=set_id, source_id=source_id)
 
     flows: dict[str, dict] = {}        # fingerprint -> merged scenario
+    per_test: list[tuple] = []         # what every test exercised on its own (per-test coverage)
     unknown: dict[tuple, int] = defaultdict(int)
     stats = {"tests": 0, "commands": 0, "unknown_commands": 0}
 
     def finish(test: str, t: dict) -> None:
         fp = t["hash"].hexdigest()[:20]
         stats["tests"] += 1
+        per_test.append((set_id, source_id, test, t["script"], f"exec:{source_id}:{fp}", t["commands"], t["unknown"], json.dumps(sorted(t["items"]))))
         f = flows.get(fp)
         if f is None:
             flows[fp] = {"tests": [test], "n_tests": 1, "steps": t["steps"], "truncated": t["truncated"], "n_steps": t["n_steps"],
@@ -302,12 +304,13 @@ def analyze_execution(conn: sqlite3.Connection, set_id: int, source_id: int, pro
                 finish(cur_test[1], t)
             cur_test = g
             t = {"steps": [], "last": None, "open": False, "hash": hashlib.sha1(), "truncated": False, "n_steps": 0, "commands": 0,
-                 "items": {}, "evidence": []}
+                 "items": {}, "evidence": [], "unknown": 0, "script": r["script"]}
         d = decoded[r["signature"]]
         t["commands"] += 1
         stats["commands"] += 1
         if d["command"] is None:
             stats["unknown_commands"] += 1
+            t["unknown"] += 1
             unknown[(d["interface"], d["queue"], d["opcode"])] += 1
         for k in d["items"]:
             t["items"][k] = t["items"].get(k, 0) + 1
@@ -330,6 +333,8 @@ def analyze_execution(conn: sqlite3.Connection, set_id: int, source_id: int, pro
         finish(cur_test[1], t)
 
     res = _store(conn, set_id, source_id, cat, flows)
+    conn.execute("DELETE FROM exec_test WHERE set_id=? AND source_id=?", (set_id, source_id))
+    conn.executemany("INSERT OR REPLACE INTO exec_test(set_id,source_id,test_id,script,scenario_sid,commands,unknown,items_json) VALUES(?,?,?,?,?,?,?,?)", per_test)
     by_kind: dict[str, int] = defaultdict(int)
     observed = set()
     for f in flows.values():

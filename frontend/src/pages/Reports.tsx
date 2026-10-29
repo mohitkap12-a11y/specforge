@@ -16,7 +16,7 @@ export default function ReportsPage() {
   const sel = useSelectedSet();
   const runs = useQuery({ queryKey: ["covruns", sel.setId], enabled: sel.setId !== null, queryFn: () => api.covRuns(sel.setId!) });
   const [picked, setPicked] = useState<number | null>(null);
-  const [which, setWhich] = useState<"gaps" | "all">("gaps");
+  const [which, setWhich] = useState<"gaps" | "all" | "tests">("gaps");
   const list = runs.data ?? [];
   const runId = list.some((r) => r.id === picked) ? picked : list[0]?.id ?? null;
   const run = list.find((r) => r.id === runId);
@@ -45,8 +45,8 @@ export default function ReportsPage() {
               <p className="muted small">{f.note}</p>
               {f.id === "csv" && (
                 <label className="row small">Rows
-                  <select value={which} onChange={(e) => setWhich(e.target.value as "gaps" | "all")}>
-                    <option value="gaps">Gaps only</option><option value="all">All items</option>
+                  <select value={which} onChange={(e) => setWhich(e.target.value as "gaps" | "all" | "tests")}>
+                    <option value="gaps">Gaps only</option><option value="all">All items</option><option value="tests">Coverage per test script</option>
                   </select>
                 </label>
               )}
