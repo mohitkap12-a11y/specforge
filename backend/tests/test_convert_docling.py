@@ -257,3 +257,45 @@ def test_real_docling_keeps_table_alignment(tmp_path, monkeypatch):
     assert all(ln.count("|") == 4 for ln in lines)       # every row keeps its three columns
     assert "| 31:16  | SQID     | Submission Queue Identifier |" in r.markdown
     assert "## 1 Command Dword 0" in r.markdown
+
+
+def test_conversion_list_survives_and_removes(stub, pdf_file, ws, monkeypatch):
+    """The To Markdown page lists the user's conversions from the server, so leaving the page does not lose them."""
+    from specforge.api.app import create_app
+
+    with TestClient(create_app()) as client:
+        assert client.get("/api/convert/markdown/jobs").json() == []
+        first = client.post("/api/convert/markdown/jobs", files={"file": ("A.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()["job"]
+        _wait(client, first)
+        stub(status="failure")
+        bad = client.post("/api/convert/markdown/jobs", files={"file": ("B.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()["job"]
+        _wait(client, bad)
+        listed = client.get("/api/convert/markdown/jobs").json()
+        assert [(c["job"], c["source"], c["state"]) for c in listed] == [(bad, "B.pdf", "failed"), (first, "A.pdf", "done")]
+        assert listed[1]["result"]["filename"] == "A.md" and "markdown" not in listed[1]["result"] and "dir" not in listed[1]["result"]
+        assert listed[0]["result"] is None and "page 2 broken" in listed[0]["error"]
+
+        import specforge.api.app as appmod                       # another user sees none of them
+        monkeypatch.setattr(appmod, "LOCAL_USER", {**appmod.LOCAL_USER, "username": "other"})
+        assert client.get("/api/convert/markdown/jobs").json() == []
+        monkeypatch.undo()
+        monkeypatch.setenv("SPECFORGE_HOME", str(ws))
+
+        assert client.delete(f"/api/convert/markdown/jobs/{first}").json() == {"ok": True}
+        assert [c["job"] for c in client.get("/api/convert/markdown/jobs").json()] == [bad]
+        assert client.get(f"/api/convert/markdown/jobs/{first}").status_code == 404
+        assert not any((ws / "conversions").iterdir())            # its file is gone
+        assert client.delete(f"/api/convert/markdown/jobs/{first}").status_code == 404
+
+        from specforge import jobs                                 # cancelled while queued: the upload is deleted on remove
+        from specforge.core.db import get_conn
+
+        c = get_conn()
+        jid = c.execute("INSERT INTO job(type,state,payload_json) VALUES('convert-markdown','cancelled',?)",
+                        ('{"user": "local", "filename": "C.pdf", "dir": "tmpq"}',)).lastrowid
+        c.commit()
+        (ws / "conversions" / "tmpq").mkdir()
+        (ws / "conversions" / "tmpq" / "x.pdf").write_bytes(b"%PDF")
+        assert jobs.get(c, jid)["state"] == "cancelled"
+        assert client.delete(f"/api/convert/markdown/jobs/{jid}").json() == {"ok": True}
+        assert not (ws / "conversions" / "tmpq").exists()

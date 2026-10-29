@@ -1,4 +1,4 @@
-import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConvertEngine, MarkdownConversion, LogEvent, CatalogItem, CmdSource, DecodedCommand, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, CatalogItem, CmdSource, DecodedCommand, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -56,6 +56,8 @@ export const api = {
   toMarkdown: (file: File, frontMatter = true, engine?: ConvertEngine) => { const f = new FormData(); f.append("file", file); return req<MarkdownConversion>("POST", `/api/convert/markdown${qs({ front_matter: frontMatter ? undefined : "false", engine })}`, f); },
   toMarkdownJob: (file: File, frontMatter = true, engine?: ConvertEngine) => { const f = new FormData(); f.append("file", file); return req<{ job: number }>("POST", `/api/convert/markdown/jobs${qs({ front_matter: frontMatter ? undefined : "false", engine })}`, f); },
   markdownResult: (job: number) => req<MarkdownConversion>("GET", `/api/convert/markdown/jobs/${job}`),
+  conversions: () => req<ConversionEntry[]>("GET", "/api/convert/markdown/jobs"),
+  removeConversion: (job: number) => req("DELETE", `/api/convert/markdown/jobs/${job}`),
   compareOptions: () => req<CompareOption[]>("GET", "/api/compare/options"),
   compare: (from_run: number, to_run: number) => req<Comparison>("POST", "/api/compare", { from_run, to_run }),
   comparisons: () => req<ComparisonRow[]>("GET", "/api/compare"),

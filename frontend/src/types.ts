@@ -98,6 +98,11 @@ export interface CrossUnit {
 export interface SpecInSet { family: string; version: string; sections: number }
 
 export type ConvertEngine = "docling" | "builtin";
+/** One of the signed-in user's background conversions (GET /api/convert/markdown/jobs); the Markdown itself is fetched on demand. */
+export interface ConversionEntry {
+  job: number; source: string | null; state: Job["state"]; message: string | null; created: string; error: string | null;
+  result: Omit<MarkdownConversion, "markdown"> | null;
+}
 export interface MarkdownConversion {
   filename: string; title: string; format: "pdf" | "docx" | "doc"; engine: ConvertEngine; markdown: string;
   stats: { words: number; headings: number; tables: number; list_items: number; code_blocks: number; characters: number; pages?: number };
