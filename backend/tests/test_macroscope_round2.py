@@ -116,15 +116,21 @@ def test_cancelling_a_queued_job_prevents_it_from_running(ws):
     conn = connect()
     release, ran = threading.Event(), []
     blockers = [jobs.submit(conn, "b", lambda c, p: release.wait(20), db_file=str(db_path())) for _ in range(4)]   # saturate the pool
+
+    def wait_for(cond):
+        for _ in range(200):
+            if cond():
+                return
+            time.sleep(0.05)
+        raise AssertionError("timed out")
+    wait_for(lambda: all(jobs.get(conn, b)["state"] == "running" for b in blockers))
     queued = jobs.submit(conn, "q", lambda c, p: ran.append(1), db_file=str(db_path()))
     jobs.cancel(queued)
+    assert jobs.get(conn, queued)["state"] == "cancelled"      # shown cancelled at once, not when a worker frees up
     release.set()
-    for _ in range(100):
-        if jobs.get(conn, queued)["state"] in ("cancelled", "done", "failed"):
-            break
-        time.sleep(0.05)
+    wait_for(lambda: all(jobs.get(conn, b)["state"] == "done" for b in blockers))
+    time.sleep(0.2)                                            # the freed worker reaches the cancelled job: it must not run it
     assert jobs.get(conn, queued)["state"] == "cancelled" and ran == []
-    assert all(jobs.get(conn, b)["state"] in ("done", "running") for b in blockers)
 
 
 # ------------------------------------------------------------------ coverage engine

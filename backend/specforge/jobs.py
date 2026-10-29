@@ -109,6 +109,21 @@ def cancel(job_id: int, db_file: str | None = None) -> None:
         return          # unknown or finished: a stale event would cancel whichever job later gets this id
     with _plock:
         _cancel.setdefault((db, job_id), threading.Event()).set()
+    # A queued job may wait behind a long one: show it cancelled now. The event is set first, so a worker that starts the job
+    # afterwards never runs it; one that was already starting may set 'running' again, and then stops at its first step.
+    c = connect(db)
+    try:
+        c.execute("UPDATE job SET state='cancelled', updated=CURRENT_TIMESTAMP WHERE id=? AND state='queued'", (job_id,))
+        c.commit()
+    finally:
+        c.close()
+
+
+def cancel_requested(job_id: int, db_file: str) -> bool:
+    """A cancel was asked for and the job has not stopped yet (a running step that cannot be interrupted)."""
+    with _plock:
+        e = _cancel.get((db_file, job_id))
+    return bool(e and e.is_set())
 
 
 def _overlay(j: dict | None, conn) -> dict | None:
@@ -118,6 +133,11 @@ def _overlay(j: dict | None, conn) -> dict | None:
         if p:
             j["message"], j["progress"], j["total"] = p
     return j
+
+
+def with_progress(j: dict | None, conn) -> dict | None:
+    """A job row read elsewhere, with the live progress of a running job filled in."""
+    return _overlay(j, conn)
 
 
 def get(conn, job_id: int) -> dict | None:

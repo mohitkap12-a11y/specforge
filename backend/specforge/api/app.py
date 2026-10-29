@@ -381,10 +381,21 @@ def create_app() -> FastAPI:
         d.mkdir(exist_ok=True)
         return d
 
+    def _conversion_dir(name: str | None) -> Path | None:
+        """The folder of one conversion, only if it really is a folder directly inside the conversions folder."""
+        if not name:
+            return None
+        root = _conversions_dir().resolve()
+        d = (root / name).resolve()
+        return d if d.parent == root and d.is_dir() else None
+
     def _prune_conversions() -> None:
+        """Delete results older than a day (a folder's mtime is when its Markdown was written); never a queued or running upload."""
+        busy = {jloads(j["payload_json"], {}).get("dir") for j in
+                rows(conn(), "SELECT payload_json FROM job WHERE type='convert-markdown' AND state IN ('queued','running')")}
         cutoff = time.time() - CONVERT_KEEP_SECONDS
         for d in _conversions_dir().iterdir():
-            if d.is_dir() and d.stat().st_mtime < cutoff:
+            if d.is_dir() and d.name not in busy and d.stat().st_mtime < cutoff:
                 shutil.rmtree(d, ignore_errors=True)
 
     @app.post("/api/convert/markdown")
@@ -423,21 +434,70 @@ def create_app() -> FastAPI:
             try:
                 prog(f"Converting {name} to Markdown")
                 res = convert_file(path, filename=name, front_matter=front_matter, engine=engine)
+                prog(f"Converted {name}")       # a Docling run cannot be interrupted: a cancel asked meanwhile stops here
                 (folder / "out.md").write_text(res.markdown, encoding="utf-8")
+            except BaseException:      # failed or cancelled: nothing to keep
+                shutil.rmtree(folder, ignore_errors=True)
+                raise
             finally:
                 Path(path).unlink(missing_ok=True)
             eventlog.emit("info", "api", f"Converted {name} to Markdown", user=user, format=res.source_format, engine=res.engine, **res.stats)
             return {**_conversion_json(name, res), "dir": folder.name}
-        job = jobs.submit(conn(), "convert-markdown", work, {"filename": name, "user": user, "engine": engine}, DB, pool=convert.serial_pool())
+        job = jobs.submit(conn(), "convert-markdown", work, {"filename": name, "user": user, "engine": engine, "dir": folder.name}, DB,
+                          pool=convert.serial_pool())
         audit(f"Conversion of {name} to Markdown queued", job_id=job, engine=engine or convert.default_engine())
         return {"job": job}
 
-    @app.get("/api/convert/markdown/jobs/{job_id}")
-    def convert_markdown_result(job_id: int, download: bool = Query(False)):
+    def _conversion_entry(j: dict) -> dict | None:
+        """A conversion job as the To Markdown page lists it; None once its file has expired."""
+        j = jobs.with_progress(j, conn())
+        payload = jloads(j["payload_json"], {})
+        res = jloads(j["result_json"], None) or {}
+        if j["state"] == "done" and safe_join(_conversions_dir(), f"{res.get('dir', '')}/out.md") is None:
+            return None
+        active = j["state"] in ("queued", "running")
+        return {"job": j["id"], "source": payload.get("filename"), "state": j["state"], "message": j["message"], "created": j["created"],
+                "cancelling": active and jobs.cancel_requested(j["id"], DB), "error": j["error"],
+                "result": {k: v for k, v in res.items() if k != "dir"} if j["state"] == "done" else None}
+
+    def _own_conversion(job_id: int) -> dict:
         j = jobs.get(conn(), job_id)
         payload = jloads(j["payload_json"], {}) if j else {}
-        if not j or j["type"] != "convert-markdown" or (payload.get("user") != me()["username"] and me()["role"] != "admin"):
+        if not j or j["type"] != "convert-markdown" or payload.get("hidden") or \
+                (payload.get("user") != me()["username"] and me()["role"] != "admin"):
             raise HTTPException(404, "conversion not found")
+        return j
+
+    @app.get("/api/convert/markdown/jobs")
+    def convert_markdown_list():
+        """The signed-in user's conversions, newest first: every queued or running one, and those that ended in the last 24 hours."""
+        found = rows(conn(), "SELECT * FROM job WHERE type='convert-markdown' AND json_extract(payload_json, '$.user') = ? "
+                             "AND json_extract(payload_json, '$.hidden') IS NULL "
+                             "AND (state IN ('queued','running') OR updated >= datetime('now', ?)) ORDER BY id DESC",
+                     (me()["username"], f"-{CONVERT_KEEP_SECONDS} seconds"))
+        return [e for j in found if (e := _conversion_entry(j)) is not None]
+
+    @app.delete("/api/convert/markdown/jobs/{job_id}")
+    def convert_markdown_remove(job_id: int):
+        """Remove a conversion from the list: cancel it if it is still queued or running, delete its files and forget the file name."""
+        j = _own_conversion(job_id)
+        payload = jloads(j["payload_json"], {})
+        if j["state"] in ("queued", "running"):
+            jobs.cancel(job_id, DB)
+        j = jobs.get(conn(), job_id)
+        # a running conversion still reads its upload: its worker deletes the folder when it stops (see work above)
+        if j["state"] != "running" and (d := _conversion_dir(payload.get("dir") or (jloads(j["result_json"], None) or {}).get("dir"))):
+            shutil.rmtree(d, ignore_errors=True)
+        # keep the job row (its id must not be reused while a worker may still finish it) but drop what names the file
+        scrubbed = {"user": payload.get("user"), "dir": payload.get("dir"), "hidden": True}
+        conn().execute("UPDATE job SET payload_json=?, result_json=NULL, message=NULL, error=NULL WHERE id=?", (json.dumps(scrubbed), job_id))
+        conn().commit()
+        audit("Conversion removed from the To Markdown list", job_id=job_id)
+        return {"ok": True}
+
+    @app.get("/api/convert/markdown/jobs/{job_id}")
+    def convert_markdown_result(job_id: int, download: bool = Query(False)):
+        j = _own_conversion(job_id)
         if j["state"] != "done":
             raise HTTPException(409, f"the conversion is {j['state']}")
         res = jloads(j["result_json"], {})

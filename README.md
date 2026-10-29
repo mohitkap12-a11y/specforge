@@ -46,7 +46,7 @@ Any PDF, DOC or DOCX can be turned into one clean `.md` file, independent of the
 specforge to-md "NVM Express Base 2.4.pdf" notes.docx --out ./md     # writes ./md/NVM Express Base 2.4.md, ./md/notes.md
 ```
 
-or use the **To Markdown** page in the UI (preview, copy, download), or the API: `POST /api/convert/markdown` (multipart `file`; `?front_matter=false`, `?download=true`, `?engine=docling|builtin`) answers when the file is converted; for large specs use `POST /api/convert/markdown/jobs` (same parameters, returns `{job}`), follow `/api/jobs/{job}` and fetch `GET /api/convert/markdown/jobs/{job}` (`?download=true`) when it is done. The UI uses the job endpoint. Conversions run one at a time; a job's result is visible to the user who started it (and admins) and is deleted after 24 hours.
+or use the **To Markdown** page in the UI (preview, copy, download; your converted files stay listed for 24 hours), or the API: `POST /api/convert/markdown` (multipart `file`; `?front_matter=false`, `?download=true`, `?engine=docling|builtin`) answers when the file is converted; for large specs use `POST /api/convert/markdown/jobs` (same parameters, returns `{job}`), follow `/api/jobs/{job}` and fetch `GET /api/convert/markdown/jobs/{job}` (`?download=true`) when it is done. `GET /api/convert/markdown/jobs` lists your queued and running conversions and those that ended in the last 24 hours; `DELETE /api/convert/markdown/jobs/{job}` removes one (cancelling it if needed) and deletes its files. Cancelling a queued file takes effect at once; a running Docling conversion cannot be interrupted, so it stops when the current file is done. The UI uses these endpoints, so the To Markdown page keeps showing your conversions (running, done or failed) when you leave it, refresh or open another tab. Conversions run one at a time; a result is visible to the user who started it (and admins) and is deleted after 24 hours.
 
 **Engine: [Docling](https://github.com/docling-project/docling)** (the default). Its layout model and TableFormer rebuild every table from the page image, so register / data-structure figures keep their columns aligned (multi-row headers, merged cells, empty cells, tables continued across pages), and headings, lists and paragraphs come out in reading order. PDF and DOCX go straight to Docling; legacy `.doc` is converted to DOCX with LibreOffice (`soffice`) first. Docling runs on the CPU (a GPU is used when torch finds one); expect roughly 3-7 s per page, so a full 800-page base spec takes a while.
 
@@ -211,7 +211,7 @@ Requirements cannot be seen in a log of submissions. `POST /api/sets/{id}/exec/d
 ## Tests and CI
 
 ```bash
-make test     # 350 tests (one runs real Docling only with SPECFORGE_TEST_DOCLING=1)
+make test     # 354 tests (one runs real Docling only with SPECFORGE_TEST_DOCLING=1)
 make lint
 ```
 
