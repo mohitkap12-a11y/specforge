@@ -17,6 +17,8 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: backend/pyproject.toml
+      # CPU-only torch for Docling: the default PyPI wheel pulls several GB of CUDA libraries
+      - run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e "backend[dev]"
       - run: ruff check backend
       - run: python -m pytest backend/tests -W ignore

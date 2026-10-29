@@ -97,8 +97,9 @@ export interface CrossUnit {
 }
 export interface SpecInSet { family: string; version: string; sections: number }
 
+export type ConvertEngine = "docling" | "builtin";
 export interface MarkdownConversion {
-  filename: string; title: string; format: "pdf" | "docx" | "doc"; markdown: string;
+  filename: string; title: string; format: "pdf" | "docx" | "doc"; engine: ConvertEngine; markdown: string;
   stats: { words: number; headings: number; tables: number; list_items: number; code_blocks: number; characters: number; pages?: number };
   warnings: string[];
 }

@@ -142,7 +142,7 @@ def cmd_to_md(a):
     sources = {Path(f).resolve() for f in a.files}
     for f in a.files:
         try:
-            res = convert_file(f, front_matter=not a.no_front_matter)
+            res = convert_file(f, front_matter=not a.no_front_matter, engine=a.engine)
         except ConversionError as e:
             print(f"{f}: {e}", file=sys.stderr)
             failed += 1
@@ -152,11 +152,24 @@ def cmd_to_md(a):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(res.markdown, encoding="utf-8")
         st = res.stats
-        print(f"{f} -> {target}  ({st['words']} words, {st['headings']} headings, {st['tables']} tables, {st['list_items']} list items)")
+        print(f"{f} -> {target}  [{res.engine}] ({st['words']} words, {st['headings']} headings, {st['tables']} tables, {st['list_items']} list items)")
         for w in res.warnings:
             print("  warning:", w)
     if failed:
         sys.exit(1)
+
+
+def cmd_prefetch_models(a):
+    """Download Docling's model weights once, for machines that convert offline afterwards."""
+    try:
+        from docling.utils.model_downloader import download_models
+    except ImportError:
+        raise SystemExit("Docling is not installed: pip install docling")
+    out = Path(a.out).resolve() if a.out else None
+    path = download_models(output_dir=out, progress=True) if out else download_models(progress=True)
+    print(f"Docling models are in {path}")
+    if out:
+        print(f"On the offline machine set DOCLING_ARTIFACTS_PATH={path}")
 
 
 def _run_of(conn, family: str, version: str) -> int:
@@ -280,7 +293,10 @@ def main(argv=None):
     s = sub.add_parser("ingest", help="register + parse spec files"); s.add_argument("files", nargs="+"); s.add_argument("--family"); s.add_argument("--version")
     s.add_argument("--workers", type=int, default=None); s.add_argument("--set", help="add to (and create) this spec set"); s.set_defaults(fn=cmd_ingest)
     s = sub.add_parser("to-md", help="convert PDF / DOC / DOCX files to Markdown"); s.add_argument("files", nargs="+")
-    s.add_argument("--out", help="output directory (default: next to each source file)"); s.add_argument("--no-front-matter", action="store_true", help="omit the YAML header"); s.set_defaults(fn=cmd_to_md)
+    s.add_argument("--out", help="output directory (default: next to each source file)"); s.add_argument("--no-front-matter", action="store_true", help="omit the YAML header")
+    s.add_argument("--engine", choices=("docling", "builtin"), help="docling (default: layout model, best tables) or builtin (fast, no models)"); s.set_defaults(fn=cmd_to_md)
+    s = sub.add_parser("prefetch-models", help="download Docling's model weights for offline conversion")
+    s.add_argument("--out", help="folder for the weights (default: Docling's cache)"); s.set_defaults(fn=cmd_prefetch_models)
     s = sub.add_parser("compare", help="compare two parsed versions of a spec and list what changed"); s.add_argument("family"); s.add_argument("old"); s.add_argument("new")
     s.add_argument("--out", help="write the full report as Markdown"); s.add_argument("--ai", action="store_true", help="also write an AI summary (needs a configured model)"); s.set_defaults(fn=cmd_compare)
     s = sub.add_parser("reparse", help="parse a registered document again"); s.add_argument("document_id", type=int); s.add_argument("--activate", action="store_true")

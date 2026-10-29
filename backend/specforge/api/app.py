@@ -20,7 +20,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .. import __version__, auth, catalog, cmddb, compare, compare_ai, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
 from ..crossgen import generate_cross_scenarios
-from ..convert import ConversionError, SUPPORTED, convert_file, output_name
+from ..convert import ENGINES, ConversionError, SUPPORTED, convert_file, output_name
 from ..core import config
 from ..core.db import get_conn, jloads, row, rows
 from ..ingest import store
@@ -343,7 +343,10 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ spec -> markdown (stateless: nothing is stored)
     @app.post("/api/convert/markdown")
-    def convert_markdown(file: UploadFile = File(...), front_matter: bool = Query(True), download: bool = Query(False)):
+    def convert_markdown(file: UploadFile = File(...), front_matter: bool = Query(True), download: bool = Query(False),
+                         engine: str | None = Query(None)):
+        if engine is not None and engine not in ENGINES:
+            raise HTTPException(400, f"Unknown engine '{engine}'; use one of: {', '.join(ENGINES)}.")
         name = os.path.basename(file.filename or "document")
         suffix = Path(name).suffix.lower()
         if suffix not in SUPPORTED:
@@ -361,17 +364,17 @@ def create_app() -> FastAPI:
                 os.unlink(tmp.name)
                 raise
         try:
-            res = convert_file(tmp.name, filename=name, front_matter=front_matter)
+            res = convert_file(tmp.name, filename=name, front_matter=front_matter, engine=engine)
         except ConversionError as e:
             raise HTTPException(422, str(e)) from e
         finally:
             os.unlink(tmp.name)
         out = output_name(name)
-        audit(f"Converted {name} to Markdown", format=res.source_format, **res.stats)
+        audit(f"Converted {name} to Markdown", format=res.source_format, engine=res.engine, **res.stats)
         if download:
             return Response(res.markdown, media_type="text/markdown; charset=utf-8",
                             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(out)}"})
-        return {"filename": out, "title": res.title, "format": res.source_format, "markdown": res.markdown,
+        return {"filename": out, "title": res.title, "format": res.source_format, "engine": res.engine, "markdown": res.markdown,
                 "stats": res.stats, "warnings": res.warnings}
 
     # ------------------------------------------------------------------ compare two spec versions

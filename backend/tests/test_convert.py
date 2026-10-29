@@ -16,6 +16,12 @@ from specforge.convert import md
 
 # ----------------------------------------------------------------------------- fixtures
 
+@pytest.fixture(autouse=True)
+def builtin_engine(monkeypatch):
+    """These tests pin the built-in engine's output; the Docling engine has its own tests (test_convert_docling.py)."""
+    monkeypatch.setenv("SPECFORGE_CONVERT_ENGINE", "builtin")
+
+
 @pytest.fixture(scope="module")
 def rich_docx(tmp_path_factory):
     d = docx.Document()
@@ -136,7 +142,7 @@ def test_docx_structure(rich_docx):
 
 def test_docx_front_matter(rich_docx):
     m = convert_file(rich_docx, filename="Widget v1.docx").markdown
-    assert m.startswith('---\ntitle: "Widget Spec"\nsource: "Widget v1.docx"\nformat: docx\n---\n')
+    assert m.startswith('---\ntitle: "Widget Spec"\nsource: "Widget v1.docx"\nformat: docx\nengine: builtin\n---\n')
 
 
 def test_docx_numbered_headings_and_footnotes(tmp_path):

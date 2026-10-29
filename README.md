@@ -46,9 +46,15 @@ Any PDF, DOC or DOCX can be turned into one clean `.md` file, independent of the
 specforge to-md "NVM Express Base 2.4.pdf" notes.docx --out ./md     # writes ./md/NVM Express Base 2.4.md, ./md/notes.md
 ```
 
-or use the **To Markdown** page in the UI (preview, copy, download), or `POST /api/convert/markdown` (multipart `file`; `?front_matter=false`, `?download=true`).
+or use the **To Markdown** page in the UI (preview, copy, download), or `POST /api/convert/markdown` (multipart `file`; `?front_matter=false`, `?download=true`, `?engine=docling|builtin`).
 
-Kept: heading hierarchy (PDF bookmarks, font sizes or Word styles, including Word's automatic heading numbers), paragraphs, bullet / numbered lists with nesting, tables (merged cells, tables continued across PDF pages), code, bold / italic / super- and subscript, hyperlinks, footnotes, image alt text. Dropped: running page headers / footers, page numbers, table-of-contents dot leaders. Limits: scanned PDFs without a text layer are rejected (no OCR), images are not extracted (a warning counts them), legacy `.doc` needs LibreOffice (`soffice`) on the machine, multi-column PDF layouts are read in PyMuPDF's block order.
+**Engine: [Docling](https://github.com/docling-project/docling)** (the default). Its layout model and TableFormer rebuild every table from the page image, so register / data-structure figures keep their columns aligned (multi-row headers, merged cells, empty cells, tables continued across pages), and headings, lists and paragraphs come out in reading order. PDF and DOCX go straight to Docling; legacy `.doc` is converted to DOCX with LibreOffice (`soffice`) first. Docling runs on the CPU (a GPU is used when torch finds one); expect roughly 3-7 s per page, so a full 800-page base spec takes a while.
+
+* **Models.** The first conversion downloads Docling's model weights (layout, TableFormer, OCR) from Hugging Face into its cache. For offline machines run `specforge prefetch-models --out ./docling-models` on a connected machine, copy the folder and set `DOCLING_ARTIFACTS_PATH=/path/to/docling-models` on the offline one.
+* **OCR** is on by default (Docling's default; it also handles scanned pages). The NVMe specs are born-digital, so `SPECFORGE_DOCLING_OCR=off` roughly halves the time with practically the same output.
+* **Built-in engine** (`--engine builtin`, the UI drop-down, or `SPECFORGE_CONVERT_ENGINE=builtin` to make it the default): the earlier PyMuPDF / python-docx converter. No models, much faster, but tables in complex layouts can come out misaligned. It is also used, with a warning, if Docling is not installed. It keeps bold / italic, hyperlinks and footnotes, drops running headers / footers and TOC dot leaders, rejects scanned PDFs (no OCR) and reads multi-column layouts in PyMuPDF's block order.
+
+The YAML header records `engine: docling` or `engine: builtin`; images are left out (Docling writes an `<!-- image -->` marker where a figure was).
 
 ## Compare two spec versions
 
@@ -74,7 +80,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e "backend[dev]"
 ```
 
-Offline machines: build wheels on a connected machine with `pip download -d wheels -e backend` (or `pip wheel`) and install with `pip install --no-index --find-links wheels ...`.
+Offline machines: build wheels on a connected machine with `pip download -d wheels -e backend` (or `pip wheel`) and install with `pip install --no-index --find-links wheels ...`; also run `specforge prefetch-models --out docling-models` there and copy the folder (see *Convert a spec to Markdown*). Docling pulls in PyTorch; for a CPU-only machine install `torch torchvision` from `https://download.pytorch.org/whl/cpu` first to avoid the multi-GB CUDA wheels.
 
 ## Run it: backend, UI, and everything together
 
@@ -205,7 +211,7 @@ Requirements cannot be seen in a log of submissions. `POST /api/sets/{id}/exec/d
 ## Tests and CI
 
 ```bash
-make test     # 334 tests
+make test     # 345 tests (one runs real Docling only with SPECFORGE_TEST_DOCLING=1)
 make lint
 ```
 
@@ -226,7 +232,7 @@ docs/            ARCHITECTURE.md, IMPLEMENTATION_PLAN.md
 
 ## Known limitations
 
-* PDF: tables are detected from ruled lines (PyMuPDF, with pdfplumber as a low-quality fallback). Nested tables inside PDF cells are recorded as separate tables with a `nested_table` note; DOCX nesting is exact. Docling is not wired in yet.
+* PDF: tables are detected from ruled lines (PyMuPDF, with pdfplumber as a low-quality fallback). Nested tables inside PDF cells are recorded as separate tables with a `nested_table` note; DOCX nesting is exact. Docling is not wired into the spec parser yet (it is used by the Markdown converter).
 * PDF captions are expected *above* their table (carried over page breaks).
 * DOCX cross-references use text patterns; native `REF` fields are not resolved yet.
 * Cross-version section drift (a MI 2.0 reference to Base section numbers from another revision) is handled by user choice, not by title matching.

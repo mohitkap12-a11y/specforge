@@ -4,6 +4,10 @@
     result = convert_file("spec.pdf")
     result.markdown, result.stats, result.warnings
 
+Two engines: "docling" (the default; layout model + TableFormer, best for tables) and "builtin" (PyMuPDF /
+python-docx, no models, fast). The default comes from `SPECFORGE_CONVERT_ENGINE`; if Docling is not installed the
+builtin engine is used with a warning.
+
 Nothing is stored in the workspace; this is a pure file -> text utility used by the API (`POST /api/convert/markdown`)
 and the CLI (`specforge to-md`).
 """
@@ -22,6 +26,7 @@ from . import md
 from .md import Code, Heading, Item, Table
 
 SUPPORTED = (".pdf", ".docx", ".doc")
+ENGINES = ("docling", "builtin")
 
 
 class ConversionError(Exception):
@@ -35,6 +40,7 @@ class ConvertResult:
     source_format: str
     stats: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    engine: str = "builtin"
 
 
 def sniff(path: str | Path) -> str:
@@ -79,10 +85,77 @@ def _title_of(blocks, meta: dict, filename: str) -> str:
     return first.text.strip() if first else Path(filename).stem
 
 
-def convert_file(path: str | Path, filename: str | None = None, front_matter: bool = True) -> ConvertResult:
+def default_engine() -> str:
+    e = os.environ.get("SPECFORGE_CONVERT_ENGINE", "docling").strip().lower()
+    return e if e in ENGINES else "docling"
+
+
+def _words(body: str) -> int:
+    return len(re.findall(r"\w+", re.sub(r"[#*|`>\-]+", " ", body)))
+
+
+def _front(body: str, title: str, filename: str, fmt: str, pages: int | None, engine: str) -> str:
+    head = ["---", f"title: {json.dumps(title, ensure_ascii=False)}", f"source: {json.dumps(filename, ensure_ascii=False)}", f"format: {fmt}"]
+    if pages is not None:
+        head.append(f"pages: {pages}")
+    head.append(f"engine: {engine}")
+    return "\n".join(head + ["---", "", body])
+
+
+def convert_file(path: str | Path, filename: str | None = None, front_matter: bool = True, engine: str | None = None) -> ConvertResult:
     path = str(path)
     filename = filename or os.path.basename(path)
+    engine = (engine or default_engine()).lower()
+    if engine not in ENGINES:
+        raise ConversionError(f"Unknown conversion engine '{engine}'; use one of: {', '.join(ENGINES)}.")
     fmt = sniff(path)
+    warnings: list[str] = []
+    if engine == "docling":
+        from . import docling_engine
+
+        if docling_engine.available():
+            return _convert_docling(path, filename, fmt, front_matter)
+        warnings.append("Docling is not installed (pip install docling); the built-in converter was used, tables may be less accurate.")
+    res = _convert_builtin(path, filename, fmt, front_matter)
+    res.warnings[:0] = warnings
+    return res
+
+
+def _convert_docling(path: str, filename: str, fmt: str, front_matter: bool) -> ConvertResult:
+    from . import docling_engine
+
+    warnings: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="specforge-md-") as tmp:
+        src = _doc_to_docx(path, tmp) if fmt == "doc" else path
+        if Path(src).suffix.lower() not in (".pdf", ".docx"):
+            # docling picks the format from the extension; uploads are stored under a temp name
+            link = Path(tmp, "input." + ("pdf" if fmt == "pdf" else "docx"))
+            shutil.copyfile(src, link)
+            src = str(link)
+        try:
+            body, meta = docling_engine.convert(src)
+        except docling_engine.DoclingError as e:
+            raise ConversionError(str(e)) from e
+    body = body.strip() + "\n"
+    if not body.strip():
+        raise ConversionError("No text could be extracted from the file.")
+    if meta.get("partial"):
+        warnings.append("Docling converted the file only partially; some pages may be missing.")
+    t = (meta.get("title") or "").strip()
+    title = t or Path(filename).stem
+    stats = {"words": _words(body), "headings": meta["headings"], "tables": meta["tables"], "list_items": meta["list_items"],
+             "code_blocks": meta["code_blocks"], "characters": len(body)}
+    pages = meta.get("pages") if fmt == "pdf" else None
+    if pages is not None:
+        stats["pages"] = pages
+    if fmt == "pdf" and not stats["headings"]:
+        warnings.append("No headings were detected; the text is kept as plain paragraphs.")
+    if front_matter:
+        body = _front(body, title, filename, fmt, pages, "docling")
+    return ConvertResult(body, title, fmt, stats, warnings, "docling")
+
+
+def _convert_builtin(path: str, filename: str, fmt: str, front_matter: bool) -> ConvertResult:
     warnings: list[str] = []
     with tempfile.TemporaryDirectory(prefix="specforge-md-") as tmp:
         try:
@@ -112,8 +185,7 @@ def convert_file(path: str | Path, filename: str | None = None, front_matter: bo
     if meta.get("images_skipped"):
         warnings.append(f"{meta['images_skipped']} image(s) without alt text are not included in the Markdown.")
     title = _title_of(blocks, meta, filename)
-    words = len(re.findall(r"\w+", re.sub(r"[#*|`>\-]+", " ", body)))
-    stats = {"words": words, "headings": sum(isinstance(b, Heading) for b in blocks),
+    stats = {"words": _words(body), "headings": sum(isinstance(b, Heading) for b in blocks),
              "tables": sum(isinstance(b, Table) for b in blocks), "list_items": sum(isinstance(b, Item) for b in blocks),
              "code_blocks": sum(isinstance(b, Code) for b in blocks), "characters": len(body)}
     if fmt == "pdf":
@@ -123,11 +195,8 @@ def convert_file(path: str | Path, filename: str | None = None, front_matter: bo
     if body and not stats["words"]:
         warnings.append("The converted text is empty.")
     if front_matter:
-        head = ["---", f"title: {json.dumps(title, ensure_ascii=False)}", f"source: {json.dumps(filename, ensure_ascii=False)}", f"format: {fmt}"]
-        if fmt == "pdf":
-            head.append(f"pages: {meta['pages']}")
-        body = "\n".join(head + ["---", "", body])
-    return ConvertResult(body, title, fmt, stats, warnings)
+        body = _front(body, title, filename, fmt, meta["pages"] if fmt == "pdf" else None, "builtin")
+    return ConvertResult(body, title, fmt, stats, warnings, "builtin")
 
 
 def output_name(filename: str) -> str:
