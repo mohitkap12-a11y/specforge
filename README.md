@@ -205,7 +205,7 @@ Requirements cannot be seen in a log of submissions. `POST /api/sets/{id}/exec/d
 ## Tests and CI
 
 ```bash
-make test     # 238 tests, ~2.5 min
+make test     # 334 tests
 make lint
 ```
 
