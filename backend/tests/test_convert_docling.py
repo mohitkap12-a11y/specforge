@@ -199,7 +199,9 @@ def test_background_conversion_job(stub, pdf_file, ws):
         dl = client.get(f"/api/convert/markdown/jobs/{job}?download=true")
         assert dl.headers["content-disposition"].endswith("Widget.md") and "| 7:0" in dl.text
         folder = ws / "conversions"
-        assert [p.name for d in folder.iterdir() for p in d.iterdir()] == ["out.md"]   # the upload is deleted after converting
+        assert sorted(p.name for d in folder.iterdir() for p in d.iterdir()) == ["out.md", "source.pdf"]   # the original is kept
+        src = client.get(f"/api/convert/markdown/jobs/{job}/source")
+        assert src.status_code == 200 and src.content == pdf_file.read_bytes() and src.headers["content-disposition"].endswith('"Widget.pdf"')
 
         stub(status="failure")
         bad = _post(client, pdf_file, "w.pdf")
@@ -233,6 +235,8 @@ def test_finished_conversions_are_shared_with_every_user(stub, pdf_file, ws, mon
             m.setattr(appmod, "LOCAL_USER", {**appmod.LOCAL_USER, "username": "reader", "role": "user"})
             listed = client.get("/api/convert/markdown/jobs").json()
             assert [(c["source"], c["user"], c["mine"], c["can_remove"]) for c in listed] == [("Shared.pdf", "local", False, False)]
+            assert listed[0]["has_source"] is True
+            assert client.get(f"/api/convert/markdown/jobs/{done}/source").status_code == 200   # anyone downloads the original
             assert "| 7:0" in client.get(f"/api/convert/markdown/jobs/{done}").json()["markdown"]
             assert client.get(f"/api/convert/markdown/jobs/{done}?download=true").status_code == 200
             assert client.get(f"/api/convert/markdown/jobs/{failed}").status_code == 404    # someone else's failure is private
@@ -241,6 +245,24 @@ def test_finished_conversions_are_shared_with_every_user(stub, pdf_file, ws, mon
             m.setattr(appmod, "LOCAL_USER", {**appmod.LOCAL_USER, "username": "boss", "role": "admin"})
             assert client.get(f"/api/convert/markdown/jobs/{failed}").status_code == 409     # an admin sees it
             assert client.delete(f"/api/convert/markdown/jobs/{done}").json() == {"ok": True}
+
+
+def test_only_an_admin_deletes_a_finished_file(stub, pdf_file, ws, monkeypatch):
+    """Even its owner cannot delete a finished file; an owner can still dismiss a failed one."""
+    import specforge.api.app as appmod
+    from specforge.api.app import create_app
+
+    monkeypatch.setattr(appmod, "LOCAL_USER", {**appmod.LOCAL_USER, "role": "user"})
+    with TestClient(create_app()) as client:
+        done = _post(client, pdf_file, "Mine.pdf")
+        _wait(client, done)
+        stub(status="failure")
+        failed = _post(client, pdf_file, "Bad.pdf")
+        _wait(client, failed)
+        assert {c["source"]: c["can_remove"] for c in client.get("/api/convert/markdown/jobs").json()} == {"Mine.pdf": False, "Bad.pdf": True}
+        assert client.delete(f"/api/convert/markdown/jobs/{done}").status_code == 403
+        assert client.delete(f"/api/convert/markdown/jobs/{failed}").json() == {"ok": True}
+        assert client.get(f"/api/convert/markdown/jobs/{done}/source").status_code == 200
 
 
 def test_a_file_already_in_the_library_is_not_converted_again(stub, pdf_file, ws, monkeypatch):

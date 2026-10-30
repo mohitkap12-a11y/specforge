@@ -118,7 +118,9 @@ export type ConvertEngine = "docling" | "builtin";
  *  signed-in user's own queued, running, failed and cancelled ones. The Markdown itself is fetched on demand. */
 export interface ConversionEntry {
   job: number; source: string | null; state: Job["state"]; message: string | null; created: string; updated: string; error: string | null;
-  user: string | null; mine: boolean; can_remove: boolean;   // who converted it; only they or an admin may remove it
+  user: string | null; mine: boolean;   // who converted it
+  can_remove: boolean;   // a finished file only an admin deletes; its owner may cancel or dismiss one that is not finished
+  has_source: boolean;   // the uploaded original can be downloaded (GET /api/convert/markdown/jobs/{job}/source)
   cancelling: boolean;   // cancel asked; a running Docling conversion stops only when the current file is done
   result: Omit<MarkdownConversion, "markdown"> | null;
 }

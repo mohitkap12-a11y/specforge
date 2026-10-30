@@ -58,6 +58,7 @@ export const api = {
   markdownResult: (job: number) => req<MarkdownConversion>("GET", `/api/convert/markdown/jobs/${job}`),
   conversions: () => req<ConversionEntry[]>("GET", "/api/convert/markdown/jobs"),
   removeConversion: (job: number) => req("DELETE", `/api/convert/markdown/jobs/${job}`),
+  conversionSourceUrl: (job: number) => `/api/convert/markdown/jobs/${job}/source`,
   compareOptions: () => req<CompareOption[]>("GET", "/api/compare/options"),
   compare: (from_run: number, to_run: number) => req<Comparison>("POST", "/api/compare", { from_run, to_run }),
   comparisons: () => req<ComparisonRow[]>("GET", "/api/compare"),

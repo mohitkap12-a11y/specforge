@@ -51,7 +51,7 @@ function Conversion({ c }: { c: ConversionEntry }) {
   };
   const download = () => fetchMd().then((x) => saveFile(x.filename, x.markdown), (e) => push({ title: "Download failed", description: errText(e), tone: "bad" }));
   const remove = () => {
-    if (r && !c.mine && !window.confirm(`Remove ${c.source ?? "this file"} from the library? ${c.user ?? "Its owner"} converted it, and nobody will be able to open it any more.`)) return;
+    if (r && !window.confirm(`Delete ${c.source ?? "this file"} and its Markdown from the library? Nobody will be able to open or download it any more.`)) return;
     api.removeConversion(c.job).then(() => qc.invalidateQueries({ queryKey: ["conversions"] }), (e) => push({ title: "Remove failed", description: errText(e), tone: "bad" }));
   };
   return (
@@ -59,7 +59,11 @@ function Conversion({ c }: { c: ConversionEntry }) {
       <div className="card-head conv-head">
         <div className="grow">
           <div className="row">
-            <strong>{c.source ?? `Conversion #${c.job}`}</strong>
+            <strong>
+              {c.has_source
+                ? <a href={api.conversionSourceUrl(c.job)} download={c.source ?? undefined} title="Download the original file">{c.source ?? `Conversion #${c.job}`}</a>
+                : c.source ?? `Conversion #${c.job}`}
+            </strong>
             {working && <span className="spinner" aria-label="Converting" />}
             {working && <span className="muted small">{c.cancelling ? "Cancelling: stops when the current file is done…" : c.state === "queued" ? "Waiting for the previous file…" : c.message ?? "Converting…"}</span>}
             {c.state === "failed" && <Badge value="failed" label="Failed" />}
@@ -80,7 +84,7 @@ function Conversion({ c }: { c: ConversionEntry }) {
               <button className="primary" onClick={() => void download()}><Download size={14} /> Download .md</button>
             </>
           )}
-          {c.can_remove && <button aria-label="Remove from the list" title={working ? "Cancel and remove" : "Remove"} onClick={remove}><Trash2 size={14} /></button>}
+          {c.can_remove && <button aria-label={r ? "Delete from the library" : "Remove from the list"} title={working ? "Cancel and remove" : r ? "Delete (admins)" : "Remove"} onClick={remove}><Trash2 size={14} /></button>}
         </div>
       </div>
       {c.state === "failed" && <ErrorNote error={new Error(jobErrorText(c.error))} />}

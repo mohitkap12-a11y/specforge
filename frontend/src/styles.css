@@ -393,6 +393,7 @@ fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
 .md-image { margin: .6em 0; padding: 8px 12px; border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); }
 .md-more { padding: 16px 0; text-align: center; }
 .conv-head { flex-wrap: wrap; align-items: flex-start; } .conv-head > .grow { min-width: min(280px, 100%); } .conv-head strong { overflow-wrap: anywhere; }
+.conv-head strong a { color: var(--link); text-decoration: none; } .conv-head strong a:hover { text-decoration: underline; }
 mark.hit { background: color-mix(in srgb, #ffd33d 55%, transparent); color: inherit; border-radius: 2px; }
 mark.hit.cur { background: #ff9632; color: #000; outline: 2px solid #ff9632; }
 @media (max-width: 860px) { .md-outline { display: none; } .md-scroll { padding: 16px; } .modal-wrap { padding: 0; } .modal { height: 100%; border-radius: 0; } }

@@ -463,11 +463,10 @@ def create_app() -> FastAPI:
                 res = convert_file(path, filename=name, front_matter=front_matter, engine=engine)
                 prog(f"Converted {name}")       # a Docling run cannot be interrupted: a cancel asked meanwhile stops here
                 (folder / "out.md").write_text(res.markdown, encoding="utf-8")
+                os.replace(path, folder / f"source{suffix}")   # the original stays downloadable next to its Markdown
             except BaseException:      # failed or cancelled: nothing to keep
                 shutil.rmtree(folder, ignore_errors=True)
                 raise
-            finally:
-                Path(path).unlink(missing_ok=True)
             eventlog.emit("info", "api", f"Converted {name} to Markdown", user=user, format=res.source_format, engine=res.engine, **res.stats)
             return {**_conversion_json(name, res), "dir": folder.name}
         job = jobs.submit(conn(), "convert-markdown", work, {"filename": name, "user": user, "engine": engine, "dir": folder.name,
@@ -476,8 +475,17 @@ def create_app() -> FastAPI:
         audit(f"Conversion of {name} to Markdown queued", job_id=job, engine=engine or convert.default_engine())
         return {"job": job}
 
-    def _may_remove(payload: dict) -> bool:
+    def _owns(payload: dict) -> bool:
         return payload.get("user") == me()["username"] or me()["role"] == "admin"
+
+    def _may_remove(j: dict, payload: dict) -> bool:
+        """A finished file in the shared library only an admin deletes; its owner may still cancel or dismiss one that is not finished."""
+        return me()["role"] == "admin" or (j["state"] != "done" and payload.get("user") == me()["username"])
+
+    def _source_file(res: dict) -> Path | None:
+        """The uploaded original kept beside the Markdown (conversions made before it was kept have none)."""
+        d = _conversion_dir(res.get("dir"))
+        return next((f for f in d.glob("source.*") if f.is_file()), None) if d else None
 
     def _conversion_entry(j: dict) -> dict | None:
         """A conversion job as the To Markdown page lists it; None if its file is gone."""
@@ -489,7 +497,7 @@ def create_app() -> FastAPI:
         active = j["state"] in ("queued", "running")
         return {"job": j["id"], "source": payload.get("filename"), "state": j["state"], "message": j["message"], "created": j["created"],
                 "updated": j["updated"], "user": payload.get("user"), "mine": payload.get("user") == me()["username"],
-                "can_remove": _may_remove(payload),
+                "can_remove": _may_remove(j, payload), "has_source": j["state"] == "done" and _source_file(res) is not None,
                 "cancelling": active and jobs.cancel_requested(j["id"], DB), "error": j["error"],
                 "result": {k: v for k, v in res.items() if k != "dir"} if j["state"] == "done" else None}
 
@@ -497,7 +505,7 @@ def create_app() -> FastAPI:
         """A finished conversion is in the shared library; one still running, failed or cancelled only its owner (or an admin) sees."""
         j = jobs.get(conn(), job_id)
         payload = jloads(j["payload_json"], {}) if j else {}
-        if not j or j["type"] != "convert-markdown" or payload.get("hidden") or (j["state"] != "done" and not _may_remove(payload)):
+        if not j or j["type"] != "convert-markdown" or payload.get("hidden") or (j["state"] != "done" and not _owns(payload)):
             raise HTTPException(404, "conversion not found")
         return j
 
@@ -516,8 +524,8 @@ def create_app() -> FastAPI:
         """Remove a conversion (its owner or an admin): cancel it if it is still queued or running, delete its files and forget the file name."""
         j = _visible_conversion(job_id)
         payload = jloads(j["payload_json"], {})
-        if not _may_remove(payload):
-            raise HTTPException(403, "only the user who converted this file or an admin can remove it")
+        if not _may_remove(j, payload):
+            raise HTTPException(403, "only an admin can delete a converted file")
         if j["state"] in ("queued", "running"):
             jobs.cancel(job_id, DB)
         j = jobs.get(conn(), job_id)
@@ -545,6 +553,18 @@ def create_app() -> FastAPI:
             return Response(markdown, media_type="text/markdown; charset=utf-8",
                             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(res['filename'])}"})
         return {**{k: v for k, v in res.items() if k != "dir"}, "markdown": markdown}
+
+    @app.get("/api/convert/markdown/jobs/{job_id}/source")
+    def convert_markdown_source(job_id: int):
+        """Download the original PDF / DOC / DOCX a finished conversion was made from."""
+        j = _visible_conversion(job_id)
+        if j["state"] != "done":
+            raise HTTPException(409, f"the conversion is {j['state']}")
+        src = _source_file(jloads(j["result_json"], {}))
+        if src is None:
+            raise HTTPException(404, "the original file of this conversion was not kept; it was converted before originals were stored")
+        name = jloads(j["payload_json"], {}).get("filename") or src.name
+        return FileResponse(src, filename=name)
 
     # ------------------------------------------------------------------ compare two spec versions
     _summary_lock = threading.Lock()
