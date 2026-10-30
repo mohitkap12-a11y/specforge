@@ -9,6 +9,7 @@ from specforge.ingest import store
 from specforge.specquery import NotFound, QueryError, SpecLibrary, logical_tables, name_score, paginate
 
 H = {"accept": "application/json, text/event-stream", "content-type": "application/json"}
+LOCAL = "http://127.0.0.1:8000"      # without sign-in (the conftest default) the endpoint only answers requests addressed to localhost
 
 
 @pytest.fixture()
@@ -149,6 +150,67 @@ def test_a_slow_comparison_tells_the_agent_to_retry(lib, conn, monkeypatch):
     assert lib.comparison(d_from, d_to, wait=10) is not None
 
 
+def test_versions_named_in_the_spec_and_previous_relative_to_the_target(lib):
+    assert [d["version"] for d in lib._pair("nvme-base@2.4", None, None)] == ["2.3", "2.4"]
+    with pytest.raises(NotFound, match="older than 2.3"):          # 2.3 was asked for: not silently the latest pair
+        lib.changes("nvme-base@2.3")
+    with pytest.raises(NotFound, match="older than 2.3"):
+        lib.diff("NVMe Base 2.3", "Identify")
+    assert [d["version"] for d in lib._pair("base", "previous", "2.4")] == ["2.3", "2.4"]
+    with pytest.raises(NotFound, match="older than 2.3"):          # previous of 2.3, not of the latest
+        lib._pair("base", "previous", "2.3")
+
+
+def test_a_failed_comparison_is_not_started_again_on_every_call(lib, conn, monkeypatch):
+    from specforge import compare
+
+    def boom(*a, **k):
+        raise compare.CompareError("broken parse run")
+    monkeypatch.setattr(compare, "run_comparison", boom)
+    with pytest.raises(QueryError, match="broken parse run"):
+        lib.changes("base")
+    with pytest.raises(QueryError, match="failed recently"):
+        lib.diff("base", "Identify")
+    assert conn.execute("SELECT COUNT(*) FROM job WHERE type='compare'").fetchone()[0] == 1
+
+
+def test_read_raw_serves_converted_files_by_name(lib, conn, ws):
+    """A file converted on the To Markdown page but not parsed is read by its file name, even when the name looks like a spec."""
+    import json
+
+    folder = ws / "conversions" / "c1"
+    folder.mkdir(parents=True)
+    (folder / "out.md").write_text("# ECN 123\n\nIntro.\n\nThe new field NEWFLD is 4 bytes.\n\nEnd.\n", encoding="utf-8")
+    conn.execute("INSERT INTO job(type,state,payload_json,result_json) VALUES('convert-markdown','done',?,?)",
+                 (json.dumps({"filename": "nvme-mi-ecn-123.pdf", "sha256": "abc"}), json.dumps({"dir": "c1"})))
+    conn.commit()
+    assert "nvme-mi-ecn-123.pdf" in lib.list_specs()
+    md = lib.raw("nvme-mi-ecn-123.pdf")
+    assert "ECN 123" in md and "NEWFLD" in md
+    assert "NEWFLD" in lib.raw("ecn-123", around="NEWFLD", context=5)
+    with pytest.raises(NotFound, match="does not occur"):
+        lib.raw("nvme-mi-ecn-123.pdf", around="nothing like this")
+    with pytest.raises(QueryError, match="no parsed specification or converted file"):
+        lib.raw("frobnicator manual")
+
+
+def test_usage_figures_reset_and_forget_idle_clients(monkeypatch):
+    from specforge import mcp_server
+
+    u = mcp_server.Usage()
+    u.seen("10.0.0.1")
+    u.record("search_spec", {"query": "x"}, 5.0, "miss")
+    assert u.snapshot()["misses"] == 1
+    u.reset()
+    assert u.snapshot()["calls"] == 0 and u.snapshot()["client_count"] == 0
+    monkeypatch.setattr(mcp_server, "MAX_CLIENTS", 3)
+    for i in range(3):
+        u.seen(f"10.0.0.{i}")
+    u.clients["10.0.0.0"]["last_seen"] -= 2 * 86400            # idle for two days
+    u.seen("10.0.0.9")
+    assert set(u.clients) == {"10.0.0.1", "10.0.0.2", "10.0.0.9"}
+
+
 def test_tables_cut_over_pages_are_read_as_one():
     """As the PDF parser leaves the real Identify Controller structure: spacer columns, the caption repeated on later pages,
     uncaptioned pieces in between, a row repeated at a page break, and a caption fragment sharing the figure number."""
@@ -192,7 +254,7 @@ def rpc(c, method, params=None, i=1):
 def test_tools_over_streamable_http(lib):
     from specforge.api.app import create_app
 
-    with TestClient(create_app()) as c:
+    with TestClient(create_app(), base_url=LOCAL) as c:
         st, init = rpc(c, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}})
         assert st == 200 and init["result"]["serverInfo"]["name"] == "specforge" and "get_command_field" in init["result"]["instructions"]
         st, tl = rpc(c, "tools/list", {}, 2)
@@ -213,13 +275,13 @@ def test_tools_over_streamable_http(lib):
         assert s["usage"]["clients"][0]["calls"] == 2 and s["usage"]["recent_misses"][0]["tool"] == "get_section"
         assert {d["family"] for d in s["documents"]} == {"nvme-base", "nvme-mi", "nvme-nvm-cs"}
         info = c.get("/api/mcp/info").json()
-        assert info["url"] == "http://testserver/mcp" and info["sse_url"].endswith("/mcp/sse") and len(info["tools"]) == len(names)
+        assert info["url"] == "http://127.0.0.1:8000/mcp" and info["sse_url"].endswith("/mcp/sse") and len(info["tools"]) == len(names)
 
 
 def test_admin_switch_rate_limit_and_public_url(ws):
     from specforge.api.app import create_app
 
-    with TestClient(create_app()) as c:
+    with TestClient(create_app(), base_url=LOCAL) as c:
         assert c.put("/api/mcp/settings", json={"enabled": False}).status_code == 200
         st, r = rpc(c, "tools/list", {})
         assert st == 503 and "turned off" in r["error"]["message"]
@@ -233,6 +295,41 @@ def test_admin_switch_rate_limit_and_public_url(ws):
         assert c.put("/api/mcp/settings", json={"nope": 1}).status_code == 422
         c.put("/api/mcp/settings", json={"public_url": "http://specforge.lab:8000/"})
         assert c.get("/api/mcp/info").json()["url"] == "http://specforge.lab:8000/mcp"
+
+
+def test_without_sign_in_only_localhost_requests_are_answered(ws):
+    """Sign-in off means a localhost-only server: a page whose host name was rebound to 127.0.0.1 must not use it."""
+    from specforge.api.app import create_app
+
+    with TestClient(create_app(), base_url=LOCAL) as c:
+        assert rpc(c, "tools/list", {})[0] == 200
+        assert c.post("/mcp", headers={**H, "host": "evil.example:8000"}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).status_code == 403
+        assert c.post("/mcp", headers={**H, "origin": "http://evil.example"}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).status_code == 403
+        assert c.get("/mcp/sse", headers={"host": "evil.example"}).status_code == 403
+
+
+def test_a_diff_over_http_waits_for_its_comparison_without_hanging(lib, monkeypatch):
+    import threading
+
+    from specforge import compare
+    from specforge.api.app import create_app
+
+    gate = threading.Event()
+    real = compare.run_comparison
+    monkeypatch.setattr(compare, "run_comparison", lambda *a, **k: (gate.wait(20), real(*a, **k))[1])
+    with TestClient(create_app(), base_url=LOCAL) as c:
+        c.put("/api/mcp/settings", json={"compare_wait_s": 1})
+        __import__("time").sleep(2.1)
+        st, r = rpc(c, "tools/call", {"name": "diff", "arguments": {"spec": "base", "item": "Identify"}})
+        assert st == 200 and "being computed" in r["result"]["content"][0]["text"]
+        assert c.get("/api/health").status_code == 200
+        gate.set()
+        for _ in range(40):
+            st, r = rpc(c, "tools/call", {"name": "diff", "arguments": {"spec": "base", "item": "Identify"}})
+            if "being computed" not in r["result"]["content"][0]["text"]:
+                break
+            __import__("time").sleep(0.25)
+        assert "row added: 11h | O | Namespace Group list" in r["result"]["content"][0]["text"]
 
 
 def test_endpoint_needs_no_sign_in_but_status_is_admin_only(ws, monkeypatch):

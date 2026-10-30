@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import inspect
 import json
 import threading
 import time
@@ -23,6 +24,9 @@ from .specquery import NotFound, QueryError, SpecLibrary, summarize_args
 
 SLOW_MS = 2000
 RECENT = 200
+TOOL_THREADS = 8            # MCP tools run on their own threads: a burst of agent calls cannot take the web UI's threads
+MAX_CLIENTS = 5000          # client addresses remembered; idle ones (a day) are forgotten first
+LOOPBACK_NAMES = {"127.0.0.1", "localhost", "::1"}
 
 INSTRUCTIONS = """SpecForge serves the NVM Express specifications parsed on this server (Base, NVM / ZNS / KV command sets, NVMe-MI,
 transports, ECNs ... every version that was uploaded). Answers are Markdown that cite the specification, version, section or
@@ -49,6 +53,9 @@ class Usage:
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
+        self._clear()
+
+    def _clear(self) -> None:
         self.started = time.time()
         self.tools: dict[str, dict[str, Any]] = {}
         self.clients: dict[str, dict[str, Any]] = {}
@@ -59,11 +66,20 @@ class Usage:
         self.rate_limited = 0
         self.refused_disabled = 0
 
-    def seen(self, ip: str) -> None:
+    def reset(self) -> None:
         with self.lock:
-            c = self.clients.setdefault(ip, {"ip": ip, "first_seen": time.time(), "requests": 0, "calls": 0, "limited": 0})
+            self._clear()
+
+    def seen(self, ip: str) -> None:
+        now = time.time()
+        with self.lock:
+            if ip not in self.clients and len(self.clients) >= MAX_CLIENTS:
+                idle = [k for k, c in self.clients.items() if now - c.get("last_seen", 0) > 86400]
+                for k in idle or sorted(self.clients, key=lambda k: self.clients[k].get("last_seen", 0))[:MAX_CLIENTS // 10]:
+                    self.clients.pop(k, None)
+            c = self.clients.setdefault(ip, {"ip": ip, "first_seen": now, "requests": 0, "calls": 0, "limited": 0})
             c["requests"] += 1
-            c["last_seen"] = time.time()
+            c["last_seen"] = now
 
     def limited(self, ip: str) -> None:
         with self.lock:
@@ -102,7 +118,8 @@ class Usage:
             now = time.time()
             clients = sorted(({**c, "active": now - c.get("last_seen", 0) < 900} for c in self.clients.values()),
                              key=lambda c: -c.get("last_seen", 0))
-            return {"since": self.started, "tools": sorted(tools, key=lambda t: -t["calls"]), "clients": clients,
+            return {"since": self.started, "tools": sorted(tools, key=lambda t: -t["calls"]), "clients": clients[:500],
+                    "client_count": len(clients), "active_clients": sum(1 for c in clients if c["active"]),
                     "calls": sum(t["calls"] for t in tools), "errors": sum(t["errors"] for t in tools), "misses": sum(t["misses"] for t in tools),
                     "rate_limited": self.rate_limited, "refused_disabled": self.refused_disabled,
                     "recent": list(self.recent)[:50], "recent_misses": list(self.misses)[:50], "recent_slow": list(self.slow)[:50],
@@ -139,7 +156,31 @@ def build_server(lib: SpecLibrary, usage: Usage | None = None, log_calls: Callab
     from mcp.server.mcpserver.exceptions import ToolError
     from mcp.types import ToolAnnotations
 
+    import anyio
+
     usage = usage or Usage()
+    limiter: list[anyio.CapacityLimiter] = []
+
+    async def run(fn: Callable[..., Any], *args: Any) -> Any:
+        """fn on the MCP tool threads (not the thread pool the web UI's routes share)."""
+        if not limiter:
+            limiter.append(anyio.CapacityLimiter(TOOL_THREADS))
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args), limiter=limiter[0])
+
+    async def wait_comparison(spec: str, from_version: str | None, to_version: str | None) -> str | None:
+        """Start (or join) the comparison a diff needs and wait for it without holding a thread: None when it is ready,
+        else what to tell the agent."""
+        d_from, d_to = await run(lib._pair, spec, from_version, to_version)
+        state, n = await run(lib.start_comparison, d_from, d_to)
+        deadline = time.monotonic() + lib.compare_wait_s
+        while state == "running":
+            if await run(lib.poll_comparison, n, d_from, d_to) is not None:
+                return None
+            if time.monotonic() >= deadline:
+                return lib._computing(d_from, d_to)
+            await anyio.sleep(0.5)
+        return None
+
     server = MCPServer(name="specforge", title="SpecForge specifications", version=__version__, instructions=INSTRUCTIONS, log_level="WARNING",
                        description="Read-only lookups in the NVMe / NVMe-MI specifications parsed by SpecForge")
     read_only = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
@@ -147,12 +188,14 @@ def build_server(lib: SpecLibrary, usage: Usage | None = None, log_calls: Callab
     def tool(fn: Callable[..., Any]) -> Callable[..., Any]:
         """Register fn as a tool that records its use, turns lookup failures into tool errors the agent can read, and treats
         'nothing found' as a miss."""
+        is_async = inspect.iscoroutinefunction(fn)
+
         @functools.wraps(fn)
-        def wrapped(**kwargs: Any) -> str:
+        async def wrapped(**kwargs: Any) -> str:
             t0 = time.monotonic()
             outcome, err = "ok", None
             try:
-                res = fn(**kwargs)
+                res = await fn(**kwargs) if is_async else await run(functools.partial(fn, **kwargs))
                 if isinstance(res, tuple):          # (markdown, hit count) from search
                     res, n = res
                     outcome = "ok" if n else "miss"
@@ -234,19 +277,23 @@ def build_server(lib: SpecLibrary, usage: Usage | None = None, log_calls: Callab
         return lib.reference(text, spec, version, page)
 
     @tool
-    def list_changes(spec: str, from_version: str | None = None, to_version: str | None = None, impact: str | None = None,
+    async def list_changes(spec: str, from_version: str | None = None, to_version: str | None = None, impact: str | None = None,
                      kind: str | None = None, query: str | None = None, page: int = 1) -> str:
         """What changed between two versions of a specification (default: the latest version vs the version before it): commands
         and data structures added / modified / removed, then every change ranked by impact (breaking, new, changed, clarification,
         editorial). Filter with impact, kind (section | table) or query. Computed on the server the first time, then kept."""
-        return lib.changes(spec, from_version, to_version, impact, kind, query, page)
+        if msg := await wait_comparison(spec, from_version, to_version):
+            return msg
+        return await run(lib.changes, spec, from_version, to_version, impact, kind, query, page)
 
     @tool
-    def diff(spec: str, item: str, from_version: str | None = None, to_version: str | None = None, page: int = 1) -> str:
+    async def diff(spec: str, item: str, from_version: str | None = None, to_version: str | None = None, page: int = 1) -> str:
         """The exact changes to one item between two versions (default: latest vs previous): a command ("Identify"), a data structure,
         a section ("5.2") or a figure ("Figure 103"); sentences added / removed / reworded with their shall / should level, table rows
         added / removed / changed with old and new values."""
-        return lib.diff(spec, item, from_version, to_version, page)
+        if msg := await wait_comparison(spec, from_version, to_version):
+            return msg
+        return await run(lib.diff, spec, item, from_version, to_version, page)
 
     @tool
     def read_raw(spec: str, version: str | None = None, around: str | None = None, context: int = 40, page: int = 1) -> str:
@@ -276,11 +323,13 @@ class McpEndpoint:
     """ASGI app for every path under /mcp: the admin switch, the rate limit and the client list, in front of the Streamable HTTP
     transport (/mcp) and the HTTP+SSE transport (/mcp/sse, /mcp/messages/)."""
 
-    def __init__(self, lib: SpecLibrary, settings: Callable[[], dict], ip_of: Callable[[Any], str], usage: Usage | None = None):
+    def __init__(self, lib: SpecLibrary, settings: Callable[[], dict], ip_of: Callable[[Any], str], usage: Usage | None = None,
+                 local_only: bool = False):
         from mcp.server.transport_security import TransportSecuritySettings
         from starlette.routing import Mount, Router
 
         self.lib, self.settings, self.ip_of = lib, settings, ip_of
+        self.local_only = local_only        # sign-in off: the server listens on localhost only, so must every request's Host / Origin
         self.usage = usage or Usage()
         self.limiter = RateLimiter()
         self._cfg: tuple[float, dict] = (0.0, {})
@@ -307,6 +356,14 @@ class McpEndpoint:
     def refresh(self) -> None:
         self._cfg = (0.0, {})
 
+    @staticmethod
+    def _loopback(req) -> bool:
+        from urllib.parse import urlsplit
+
+        host = urlsplit("//" + (req.headers.get("host") or "")).hostname
+        origin = req.headers.get("origin")
+        return host in LOOPBACK_NAMES and (not origin or urlsplit(origin).hostname in LOOPBACK_NAMES)
+
     @contextlib.asynccontextmanager
     async def lifespan(self):
         async with self.server.session_manager.run():
@@ -326,7 +383,11 @@ class McpEndpoint:
         from starlette.requests import Request
 
         path = scope.get("path", "")
-        ip = self.ip_of(Request(scope))
+        req = Request(scope)
+        if self.local_only and not self._loopback(req):
+            # a web page whose host name was rebound to 127.0.0.1 must not reach a local, sign-in-free server
+            return await self._reply(send, 403, "Refused: without sign-in this endpoint only answers requests addressed to localhost.")
+        ip = self.ip_of(req)
         cfg = self.cfg()
         if not cfg.get("enabled", True):
             self.usage.refused_disabled += 1

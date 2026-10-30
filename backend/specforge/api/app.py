@@ -159,7 +159,7 @@ def create_app() -> FastAPI:
     AUTH = config.auth_enabled()
     app.add_middleware(AuthGate, enabled=AUTH)
     speclib = specquery.SpecLibrary(DB)
-    mcp = mcp_server.McpEndpoint(speclib, lambda: config.load_settings(get_conn()), client_ip)
+    mcp = mcp_server.McpEndpoint(speclib, lambda: config.load_settings(get_conn()), client_ip, local_only=not AUTH)
     app.add_middleware(McpDispatch, endpoint=mcp)
     _inner_lifespan = app.router.lifespan_context
 
@@ -513,7 +513,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/mcp/reset-stats")
     def mcp_reset_stats():
-        mcp.usage.__init__()
+        mcp.usage.reset()
         audit("MCP usage figures reset")
         return {"ok": True}
 

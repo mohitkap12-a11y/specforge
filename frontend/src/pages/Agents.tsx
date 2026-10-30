@@ -172,12 +172,11 @@ function Status() {
   const d: McpStatus | undefined = st.data;
   if (!d) return <Loading q={st} />;
   const u = d.usage;
-  const active = u.clients.filter((c) => c.active).length;
   return (
     <>
       <div className="grid" style={{ marginBottom: 16 }}>
         <div className="card"><div className="muted small">Endpoint</div><h2>{!d.settings.enabled ? <span className="badge bad">Off</span> : d.running ? <span className="badge ok">Serving</span> : <span className="badge warn">Starting</span>}</h2><div className="small mono">{d.url}</div></div>
-        <div className="card"><div className="muted small">Machines (active in the last 15 min)</div><h2>{u.clients.length} ({active})</h2></div>
+        <div className="card"><div className="muted small">Machines (active in the last 15 min)</div><h2>{u.client_count} ({u.active_clients})</h2></div>
         <div className="card"><div className="muted small">Tool calls</div><h2>{u.calls}</h2><div className="small muted">since {new Date(u.since * 1000).toLocaleString()}</div></div>
         <div className="card"><div className="muted small">Errors · not found · rate limited</div><h2>{u.errors} · {u.misses} · {u.rate_limited}</h2></div>
       </div>

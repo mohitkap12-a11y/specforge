@@ -74,6 +74,7 @@ _VERSION_IN = re.compile(r"(?<![\d.])(?:v|rev(?:ision)?\s*)?(\d+\.\d+(?:\.\d+)?[
 _DWORD = re.compile(r"\b(?:command\s+)?dword\s*(\d+)\b|\bcdw\s*(\d+)\b|\bdw\s*(\d+)\b|\bnmd\s*([01])\b", re.I)
 # "Command Dword 10", "Command Dwords 10 and 11", NVMe-MI "NMD0" / "NVMe Management Dword 0" (checked first: it also says "Dword 0")
 _CAP_DWORDS = re.compile(r"\b(?:NMD\s*|management\s+dword\s*)([01])\b|\b(?:(?:command|request)\s+)?dwords?\s+(\d+)(?:\s*(?:to|-|–|—|and)\s*(\d+))?", re.I)
+FAILED_FOR = 600        # seconds a failed comparison is reported instead of being started again
 REF_ROWS = 80           # a referenced table up to this size is printed with the answer; a bigger one is named, to open with get_table
 
 
@@ -624,6 +625,8 @@ class SpecLibrary:
         q = query.strip()
         m_fig = re.fullmatch(r"(?:fig(?:ure)?|table)\.?\s*(\d+[A-Za-z]?)", q, re.I)
         m_sec = re.fullmatch(r"(?:§|sec(?:tion)?\.?\s*)?(\d+(?:\.\d+)+|\d+)", q, re.I)
+        if not (m_fig or m_sec):
+            return []
         out = []
         for d in docs:
             ir = self.ir(d)
@@ -1061,9 +1064,9 @@ class SpecLibrary:
     def _pair(self, spec: str | None, from_version: str | None, to_version: str | None) -> tuple[dict, dict]:
         if not spec:
             raise QueryError("name the specification to compare (e.g. 'nvme-base')")
-        d_to, _ = self.resolve_doc(spec, to_version or "latest")
+        d_to, _ = self.resolve_doc(spec, to_version)          # "nvme-base@2.0" / "NVMe Base 2.0" name the version compared
         docs = self.families()[d_to["family"]]
-        if from_version:
+        if from_version and _norm_version(from_version) not in ("previous", "prior", "prev", "older"):
             d_from, _ = self.pick_version(docs, from_version)
         else:
             older = [x for x in docs if version_key(x["version"]) < version_key(d_to["version"])]
@@ -1075,38 +1078,53 @@ class SpecLibrary:
             raise QueryError("choose two different versions")
         return d_from, d_to
 
-    def comparison(self, d_from: dict, d_to: dict, wait: float | None = None) -> int | None:
-        """The stored comparison of two parse runs; computed through the job queue when there is none (one job per pair, however
-        many agents ask at once). None when it is still running after `wait` seconds."""
+    def start_comparison(self, d_from: dict, d_to: dict) -> tuple[str, int]:
+        """("done", comparison id) when the pair is compared, else ("running", job id) of the job computing it: queued here when
+        there is none (one job per pair, however many agents ask at once). A comparison that failed in the last FAILED_FOR is
+        reported again rather than started again, so asking repeatedly cannot keep the queue busy with it."""
         c = self.conn()
         sql = "SELECT id FROM spec_compare WHERE run_a=? AND run_b=? AND algo=? ORDER BY id DESC LIMIT 1"
-        r = row(c, sql, (d_from["run_id"], d_to["run_id"], compare.ALGO_VERSION))
-        if r:
-            return r["id"]
-        payload = {"from_run": d_from["run_id"], "to_run": d_to["run_id"], "source": "mcp"}
+        pair = (d_from["run_id"], d_to["run_id"])
+        if r := row(c, sql, (*pair, compare.ALGO_VERSION)):
+            return "done", r["id"]
         with self._compare_lock:
-            r = row(c, sql, (d_from["run_id"], d_to["run_id"], compare.ALGO_VERSION))
-            if r:
-                return r["id"]
-            busy = row(c, "SELECT id FROM job WHERE type='compare' AND state IN ('queued','running') AND json_extract(payload_json,'$.from_run')=? "
-                          "AND json_extract(payload_json,'$.to_run')=? ORDER BY id DESC LIMIT 1", (d_from["run_id"], d_to["run_id"]))
-            if busy:
-                job_id = busy["id"]
-            else:
-                a, b = d_from["run_id"], d_to["run_id"]
-                job_id = jobs.submit(c, "compare", lambda cc, prog: {"compare_id": compare.run_comparison(cc, a, b, progress=prog)}, payload,
-                                     self.db(), user="mcp", label=f"Compare {d_from['family']} {d_from['version']} → {d_to['version']} (MCP)")
+            if r := row(c, sql, (*pair, compare.ALGO_VERSION)):
+                return "done", r["id"]
+            of_pair = "type='compare' AND json_extract(payload_json,'$.from_run')=? AND json_extract(payload_json,'$.to_run')=?"
+            if busy := row(c, f"SELECT id FROM job WHERE {of_pair} AND state IN ('queued','running') ORDER BY id DESC LIMIT 1", pair):
+                return "running", busy["id"]
+            if failed := row(c, f"SELECT error FROM job WHERE {of_pair} AND state='failed' AND updated >= datetime('now', ?) "
+                                f"ORDER BY id DESC LIMIT 1", (*pair, f"-{FAILED_FOR} seconds")):
+                raise QueryError(f"comparing {spec_name(d_from)} with {d_to['version']} failed recently (not retried for "
+                                 f"{FAILED_FOR // 60} minutes): {str(failed['error'] or '').splitlines()[0][:300]}")
+            a, b = pair
+            job_id = jobs.submit(c, "compare", lambda cc, prog: {"compare_id": compare.run_comparison(cc, a, b, progress=prog)},
+                                 {"from_run": a, "to_run": b, "source": "mcp"}, self.db(), user="mcp",
+                                 label=f"Compare {d_from['family']} {d_from['version']} → {d_to['version']} (MCP)")
+            return "running", job_id
+
+    def poll_comparison(self, job_id: int, d_from: dict, d_to: dict) -> int | None:
+        """The comparison id once the job is done, None while it runs; raises when it failed."""
+        j = row(self.conn(), "SELECT state, error, result_json FROM job WHERE id=?", (job_id,))
+        if j and j["state"] == "done":
+            return (jloads(j["result_json"], {}) or {}).get("compare_id")
+        if not j or j["state"] in ("failed", "cancelled"):
+            raise QueryError(f"comparing {spec_name(d_from)} with {d_to['version']} failed: "
+                             f"{str((j or {}).get('error') or 'job missing').splitlines()[0][:300]}")
+        return None
+
+    def comparison(self, d_from: dict, d_to: dict, wait: float | None = None) -> int | None:
+        """The stored comparison of two parse runs, waiting up to `wait` seconds for one being computed (None if still running).
+        Blocks its thread while it waits: the MCP server waits asynchronously instead (mcp_server.wait_comparison)."""
+        state, n = self.start_comparison(d_from, d_to)
         deadline = time.monotonic() + (self.compare_wait_s if wait is None else wait)
-        while True:
-            j = row(c, "SELECT state, error, result_json FROM job WHERE id=?", (job_id,))
-            if j and j["state"] == "done":
-                return (jloads(j["result_json"], {}) or {}).get("compare_id")
-            if not j or j["state"] in ("failed", "cancelled"):
-                raise QueryError(f"comparing {spec_name(d_from)} with {d_to['version']} failed: "
-                                 f"{(j or {}).get('error', 'job missing')!s:.300}")
+        while state == "running":
+            if (cid := self.poll_comparison(n, d_from, d_to)) is not None:
+                return cid
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.25)
+        return n
 
     def _computing(self, d_from: dict, d_to: dict) -> str:
         return (f"The comparison of {spec_name(d_from)} with {d_to['version']} is being computed on the server (it is done once, then kept). "
@@ -1296,19 +1314,17 @@ class SpecLibrary:
 
     def raw(self, spec: str | None, version: str | None = None, around: str | None = None, context: int = 40, page: int = 1) -> str:
         f, title, note = None, "", ""
-        try:
-            d, note = self.resolve_doc(spec, version)
-            f, title = self._markdown_file(sha=d["sha256"]), spec_name(d)
-        except NotFound:
-            if not spec:
-                raise
-            want = clean(spec).lower()
-            for r in self.raw_only():
-                if want in r["filename"].lower():
-                    f, title = self._markdown_file(dir_=r["dir"]), r["filename"]
-                    break
-            if f is None:
-                raise
+        want = clean(spec or "").lower()
+        # a converted file named by its file name first: the fuzzy spec-name matching would take "nvme-mi-ecn-123.pdf" for NVMe-MI
+        lib_hit = next((r for r in self.raw_only() if len(want) >= 3 and (want == r["filename"].lower() or want in r["filename"].lower())), None)
+        if lib_hit:
+            f, title = self._markdown_file(dir_=lib_hit["dir"]), lib_hit["filename"]
+        else:
+            try:
+                d, note = self.resolve_doc(spec, version)
+                f, title = self._markdown_file(sha=d["sha256"]), spec_name(d)
+            except QueryError:
+                raise QueryError(f"no parsed specification or converted file matches '{spec}' (list_specs lists both)") from None
         if f is None:
             raise NotFound(f"{title} has no Docling Markdown on this server (it was parsed without a To Markdown conversion)")
         text = f.read_text(encoding="utf-8", errors="replace")
