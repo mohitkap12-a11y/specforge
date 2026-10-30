@@ -96,6 +96,7 @@ def _title_of(blocks, meta: dict, filename: str) -> str:
 # Conversions run one at a time on this thread (Docling is CPU-heavy and its converter is not thread-safe); the API
 # hands work here instead of blocking a request thread while another conversion holds the engine.
 _serial = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sf-convert")
+QUEUE = "docling"      # the name of its first-come-first-served line, as jobs waiting in it record it
 
 
 def serial_pool() -> ThreadPoolExecutor:

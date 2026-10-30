@@ -1,4 +1,4 @@
-import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, ParserEngine, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, ParserEngine, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, ResetPreview, ResetScope, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -54,10 +54,10 @@ export const api = {
   specs: () => req<SpecDoc[]>("GET", "/api/specs"),
   upload: (files: File[]) => { const f = new FormData(); files.forEach((x) => f.append("files", x)); return req<SpecDoc[]>("POST", "/api/specs/upload", f); },
   toMarkdown: (file: File, frontMatter = true, engine?: ConvertEngine) => { const f = new FormData(); f.append("file", file); return req<MarkdownConversion>("POST", `/api/convert/markdown${qs({ front_matter: frontMatter ? undefined : "false", engine })}`, f); },
-  toMarkdownJob: (file: File, frontMatter = true, engine?: ConvertEngine) => { const f = new FormData(); f.append("file", file); return req<{ job: number; reused?: boolean }>("POST", `/api/convert/markdown/jobs${qs({ front_matter: frontMatter ? undefined : "false", engine })}`, f); },
+  toMarkdownJob: (file: File, frontMatter = true, engine?: ConvertEngine) => { const f = new FormData(); f.append("file", file); return req<{ job: number; reused?: boolean; joined?: string }>("POST", `/api/convert/markdown/jobs${qs({ front_matter: frontMatter ? undefined : "false", engine })}`, f); },
   markdownResult: (job: number) => req<MarkdownConversion>("GET", `/api/convert/markdown/jobs/${job}`),
   conversions: () => req<ConversionEntry[]>("GET", "/api/convert/markdown/jobs"),
-  removeConversion: (job: number) => req("DELETE", `/api/convert/markdown/jobs/${job}`),
+  removeConversion: (job: number) => req<{ ok: boolean; handed_to?: string; left?: boolean }>("DELETE", `/api/convert/markdown/jobs/${job}`),
   conversionSourceUrl: (job: number) => `/api/convert/markdown/jobs/${job}/source`,
   compareOptions: () => req<CompareOption[]>("GET", "/api/compare/options"),
   compare: (from_run: number, to_run: number) => req<Comparison>("POST", "/api/compare", { from_run, to_run }),
@@ -68,7 +68,7 @@ export const api = {
   deleteComparison: (id: number) => req("DELETE", `/api/compare/${id}`),
   patchSpec: (id: number, b: { family?: string; version?: string }) => req("PATCH", `/api/specs/${id}`, b),
   deleteSpec: (id: number) => req("DELETE", `/api/specs/${id}`),
-  parse: (id: number, activate = false, engine?: ParserEngine) => req<{ job: number }>("POST", `/api/specs/${id}/parse${qs({ activate: activate ? "true" : undefined, engine })}`),
+  parse: (id: number, activate = false, engine?: ParserEngine) => req<{ job: number; joined?: string }>("POST", `/api/specs/${id}/parse${qs({ activate: activate ? "true" : undefined, engine })}`),
   specFromConversion: (job: number) => req<{ document: SpecDoc; job: number }>("POST", `/api/specs/from-conversion/${job}`),
   activateRun: (id: number) => req("POST", `/api/runs/${id}/activate`),
   tree: (run: number) => req<TreeNode[]>("GET", `/api/runs/${run}/tree`),
@@ -139,12 +139,14 @@ export const api = {
 
   logs: (f: { after_id?: number; before_id?: number; limit?: number; level?: string; source?: string; job_id?: number; q?: string }) =>
     req<{ items: LogEvent[]; newest_id: number; has_older: boolean; sources: string[] }>("GET", `/api/logs${qs(f)}`),
-  resetWorkspace: () => req<{ ok: boolean }>("POST", "/api/reset"),
+  resetPreview: (scope: ResetScope) => req<ResetPreview>("GET", `/api/reset${qs({ scope })}`),
+  resetWorkspace: (scope: ResetScope) => req<{ ok: boolean; deleted: Record<string, number> }>("POST", "/api/reset", { scope }),
   clearLogs: () => req<{ deleted: number }>("DELETE", "/api/logs"),
   activeJobs: () => req<Job[]>("GET", "/api/jobs?state=active"),
   jobs: () => req<Job[]>("GET", "/api/jobs"),
   job: (id: number) => req<Job>("GET", `/api/jobs/${id}`),
-  cancelJob: (id: number) => req("POST", `/api/jobs/${id}/cancel`),
+  /** handed_to: the owner cancelled a job others had asked for too; it goes on, owned by the first of them. */
+  cancelJob: (id: number) => req<{ ok: boolean; handed_to?: string }>("POST", `/api/jobs/${id}/cancel`),
 };
 export const fileUrl = (docId: number) => `/api/documents/${docId}/file`;
 

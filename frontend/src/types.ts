@@ -14,6 +14,14 @@ export type ParserEngine = "auto" | "docling" | "builtin";
 export interface Job {
   id: number; type: string; state: "queued" | "running" | "done" | "failed" | "cancelled";
   progress: number; total: number; message: string | null; error: string | null; result: Record<string, any> | null; created?: string;
+  label?: string | null;          // what it is about ("Parse nvme-base 2.4")
+  user?: string | null;           // who asked for it (null: the CLI, or a job older than owners)
+  mine?: boolean;                 // the signed-in user asked for it (started it, or joined it by asking for the same work)
+  can_cancel?: boolean;           // its owner or an admin
+  queue?: string | null;          // the first-come-first-served line it waits in ("docling")
+  ahead?: number;                 // queued: jobs that run before it in that line
+  ahead_of?: { label: string; user: string | null } | null;   // queued: the one running there now
+  payload?: Record<string, any>;  // what it works on (compare_id, set_id, document_id, filename, ...)
 }
 export interface TreeNode { key: string; number: string | null; title: string; parent_key: string | null; page_from: number | null; page_to: number | null }
 export interface SectionData {
@@ -125,6 +133,7 @@ export interface ConversionEntry {
   can_remove: boolean;   // a finished file only an admin deletes; its owner may cancel or dismiss one that is not finished
   has_source: boolean;   // the uploaded original can be downloaded (GET /api/convert/markdown/jobs/{job}/source)
   cancelling: boolean;   // cancel asked; a running Docling conversion stops only when the current file is done
+  ahead: number; ahead_of: Job["ahead_of"];   // queued: its place in the conversion queue
   result: Omit<MarkdownConversion, "markdown"> | null;
 }
 export interface MarkdownConversion {
@@ -181,3 +190,7 @@ export interface AppUser {
 }
 /** `auth` false: the server runs without sign-in (single local user, who is admin). */
 export interface Me { auth: boolean; user: AppUser | null; pending: number }
+
+export type ResetScope = "comparisons" | "coverage" | "specs" | "all";
+/** What a reset would delete, and the queued or running jobs of that area that stop it for now. */
+export interface ResetPreview { scope: ResetScope; counts: Record<string, number>; blocked_by: { id: number; label: string; user: string | null }[] }

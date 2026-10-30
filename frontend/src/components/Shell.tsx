@@ -3,7 +3,8 @@ import { Link, NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ChevronLeft, Info, Layers, LogOut, Menu, Moon, Search, Sun, UserRound } from "lucide-react";
 import { api } from "../api";
-import { useJobs } from "./jobs";
+import { isActive, useJobs } from "./jobs";
+import { Bell } from "./Bell";
 import { CommandPalette } from "./CommandPalette";
 import { GROUPS, NAV, navFor } from "./nav";
 import { useAuth } from "./auth";
@@ -18,11 +19,11 @@ export function Shell({ children }: { children: ReactNode }) {
   const [menu, setMenu] = useState(false);           // mobile drawer
   const [palette, setPalette] = useState(false);
   const [theme, setTheme] = useTheme();
-  const { active } = useJobs();
+  const { jobs } = useJobs();
   const { me, user, isAdmin, canManageUsers, signOut } = useAuth();
   const pages = navFor(canManageUsers);
   const health = useQuery({ queryKey: ["health"], queryFn: api.health, staleTime: 60_000 });
-  const running = active.filter((j) => j.state === "running" || j.state === "queued").length;
+  const running = jobs.filter(isActive).length;
   const tool = GROUPS.find((g) => g.key === NAV.find((n) => (n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to)))?.group)?.title ?? null;
   const current = NAV.find((n) => (n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to)));
 
@@ -87,9 +88,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <button className="iconbtn menu-btn" aria-label="Open menu" onClick={() => setMenu(true)}><Menu size={18} /></button>
           <div className="crumbs"><span>SpecForge</span><span>/</span>{tool && <><span>{tool}</span><span>/</span></>}<strong>{current?.label ?? "Page"}</strong></div>
           <button className="iconbtn search-mobile" aria-label="Search pages and actions" onClick={() => setPalette(true)}><Search size={17} /></button>
-          <Link to="/activity" className="iconbtn" aria-label={running ? `${running} jobs running, open activity` : "Open activity"} title="Activity">
-            {running > 0 ? <span className="spinner" /> : <span className="dot ok" style={{ position: "static", boxShadow: "none" }} />}
-          </Link>
+          <Bell />
           <button className="iconbtn" aria-label={dark ? "Switch to light theme" : "Switch to dark theme"} title="Toggle theme" onClick={() => setTheme(dark ? "light" : "dark")}>
             {dark ? <Sun size={17} /> : <Moon size={17} />}
           </button>
