@@ -463,6 +463,8 @@ def create_app() -> FastAPI:
                 res = convert_file(path, filename=name, front_matter=front_matter, engine=engine)
                 prog(f"Converted {name}")       # a Docling run cannot be interrupted: a cancel asked meanwhile stops here
                 (folder / "out.md").write_text(res.markdown, encoding="utf-8")
+                if res.docling is not None:     # the Specs tab parses from this instead of running Docling again
+                    (folder / "docling.json").write_text(json.dumps(res.docling), encoding="utf-8")
                 os.replace(path, folder / f"source{suffix}")   # the original stays downloadable next to its Markdown
             except BaseException:      # failed or cancelled: nothing to keep
                 shutil.rmtree(folder, ignore_errors=True)
@@ -580,10 +582,11 @@ def create_app() -> FastAPI:
         """Every spec in the data store, with the parse run that would be compared (the active one, else the newest successful one)."""
         out = []
         for d in rows(conn(), "SELECT * FROM spec_document ORDER BY family, id"):
-            runs = rows(conn(), "SELECT id,active,status,parser_version FROM parse_run WHERE document_id=? AND status='done' ORDER BY active DESC, id DESC", (d["id"],))
+            runs = rows(conn(), "SELECT id,active,status,parser_version,stats_json FROM parse_run WHERE document_id=? AND status='done' ORDER BY active DESC, id DESC", (d["id"],))
             r = runs[0] if runs else None
             out.append({"doc_id": d["id"], "family": d["family"], "version": d["version"], "filename": d["filename"], "pages": d["pages"],
                         "run_id": r["id"] if r else None, "parsed": r is not None,
+                        "engine": (jloads(r["stats_json"], {}) or {}).get("engine", "builtin") if r else None,
                         "outdated": bool(r and r["parser_version"] != config.PARSER_VERSION)})
         out.sort(key=lambda o: (o["family"], [(0, int(t), "") if t.isdigit() else (1, 0, t.lower()) for t in re.split(r"(\d+)", o["version"]) if t], o["doc_id"]))
         return out
@@ -677,6 +680,7 @@ def create_app() -> FastAPI:
                 r["stats"], r["audit"] = jloads(r.pop("stats_json"), {}), jloads(r.pop("audit_json"), {})
                 r["outdated"] = r["parser_version"] != config.PARSER_VERSION
             d["runs"] = runs
+            d["docling"] = store.find_docling(conn(), d, copy=False) is not None   # a Docling conversion is ready to parse from
         return docs
 
     @app.patch("/api/specs/{doc_id}")
@@ -696,17 +700,63 @@ def create_app() -> FastAPI:
         audit(f"Deleted spec #{doc_id} and its parse runs", "warn", document_id=doc_id)
         return {"ok": True}
 
-    @app.post("/api/specs/{doc_id}/parse")
-    def parse(doc_id: int, activate: bool = Query(False)):
-        if not row(conn(), "SELECT 1 AS x FROM spec_document WHERE id=?", (doc_id,)):
+    def _library_add(c, src: str, name: str, user: str, res) -> None:
+        """Put a Docling conversion made for the Specs tab into the To Markdown library, so it is converted only once."""
+        folder = Path(tempfile.mkdtemp(dir=_conversions_dir()))
+        (folder / "out.md").write_text(res.markdown, encoding="utf-8")
+        (folder / "docling.json").write_text(json.dumps(res.docling), encoding="utf-8")
+        shutil.copyfile(src, folder / f"source{Path(src).suffix.lower()}")
+        payload = {"filename": name, "user": user, "engine": "docling", "dir": folder.name, "sha256": _sha256_of(src), "front_matter": True}
+        c.execute("INSERT INTO job(type,state,payload_json,result_json,message) VALUES('convert-markdown','done',?,?,?)",
+                  (json.dumps(payload), json.dumps({**_conversion_json(name, res), "dir": folder.name}), f"Converted {name}"))
+        c.commit()
+
+    def _start_parse(doc_id: int, activate: bool | None, engine: str | None) -> int:
+        d = row(conn(), "SELECT * FROM spec_document WHERE id=?", (doc_id,))
+        if not d:
             raise HTTPException(404, "document not found")
-        st = settings()
+        if engine is not None and engine not in store.ENGINES:
+            raise HTTPException(400, f"Unknown parser engine '{engine}'; use one of: {', '.join(store.ENGINES)}.")
+        st, user = settings(), me()["username"]
+        need_docling = engine == "docling" and store.find_docling(conn(), d, copy=False) is None
 
         def work(c, prog):
-            rid = store.run_parse(c, doc_id, st, progress=lambda s, a, b: prog(f"{s} {a}/{b}", a, b), activate=True if activate else None)
+            if need_docling and store.find_docling(c, d) is None:
+                # Docling runs on the converter's thread, one file at a time, like the To Markdown page; the result
+                # joins that page's library so neither tool converts this file again
+                prog(f"Converting {d['filename']} with Docling (large specs take a while)")
+                res = convert.submit(d["path"], filename=d["filename"] or Path(d["path"]).name, engine="docling").result()
+                if res.engine != "docling" or res.docling is None:
+                    raise RuntimeError("Docling is not available on this server: " + "; ".join(res.warnings or ["no document returned"]))
+                _library_add(c, d["path"], d["filename"] or Path(d["path"]).name, user, res)
+            rid = store.run_parse(c, doc_id, st, progress=lambda s, a, b: prog(f"{s} {a}/{b}", a, b), activate=activate, engine=engine)
             return {"run_id": rid}
-        audit(f"Parse requested for spec #{doc_id}", document_id=doc_id, activate=activate)
-        return {"job": jobs.submit(conn(), "parse", work, {"document_id": doc_id}, DB)}
+        audit(f"Parse requested for spec #{doc_id}", document_id=doc_id, activate=activate, engine=engine or "auto")
+        return jobs.submit(conn(), "parse", work, {"document_id": doc_id, "engine": engine or "auto"}, DB)
+
+    @app.post("/api/specs/{doc_id}/parse")
+    def parse(doc_id: int, activate: bool = Query(False), engine: str | None = Query(None)):
+        """engine: auto (Docling when the file has a Docling conversion, else built-in), docling (converts it first if
+        needed) or builtin."""
+        return {"job": _start_parse(doc_id, True if activate else None, engine)}
+
+    @app.post("/api/specs/from-conversion/{job_id}")
+    def spec_from_conversion(job_id: int):
+        """Add the original of a To Markdown conversion to the specs and parse it, from its Docling conversion when it has one."""
+        j = _visible_conversion(job_id)
+        if j["state"] != "done":
+            raise HTTPException(409, f"the conversion is {j['state']}")
+        res = jloads(j["result_json"], {})
+        src = _source_file(res)
+        if src is None:
+            raise HTTPException(409, "the original file of this conversion was not kept (it was converted before originals were stored); "
+                                     "upload it on the Specs page instead")
+        if src.suffix.lower() not in (".pdf", ".docx"):
+            raise HTTPException(409, "legacy .doc files cannot be added to the specs; save it as .docx or PDF and upload that")
+        name = jloads(j["payload_json"], {}).get("filename") or src.name
+        d = store.register_document(conn(), src, filename=name)
+        audit(f"Added {name} from the To Markdown library as {d['family']} {d['version']}", document_id=d["id"], job_id=job_id)
+        return {"document": d, "job": _start_parse(d["id"], None, None)}
 
     @app.post("/api/runs/{run_id}/activate")
     def activate(run_id: int):

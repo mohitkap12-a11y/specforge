@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Download, Eye, FileDown, Search, Trash2, UploadCloud, X } from "lucide-react";
+import { Copy, Download, Eye, FilePlus2, FileDown, Search, Trash2, UploadCloud, X } from "lucide-react";
 import { api } from "../api";
 import { MarkdownPreview } from "../components/MarkdownPreview";
 import { Badge, Empty, ErrorNote, PageHeader, Segmented, Switch } from "../components/ui";
@@ -37,6 +37,7 @@ async function copyLater(text: Promise<string>): Promise<void> {
 
 function Conversion({ c }: { c: ConversionEntry }) {
   const { push } = useToast();
+  const { track } = useJobs();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const r = c.result;
@@ -50,6 +51,13 @@ function Conversion({ c }: { c: ConversionEntry }) {
       .then(() => push({ title: "Markdown copied", tone: "ok" }), (e) => push({ title: "Copy failed", description: errText(e), tone: "bad" }));
   };
   const download = () => fetchMd().then((x) => saveFile(x.filename, x.markdown), (e) => push({ title: "Download failed", description: errText(e), tone: "bad" }));
+  const addToSpecs = () => api.specFromConversion(c.job).then(
+    ({ document: d, job }) => {
+      track(job, `Parse ${d.family} ${d.version}`);
+      qc.invalidateQueries({ queryKey: ["specs"] });
+      push({ title: `Added to Specs as ${d.family} ${d.version}`, description: r?.engine === "docling" ? "Parsing from this Docling conversion; no new conversion is needed." : "Parsing with the built-in parser (this file was converted without Docling).", tone: "ok" });
+    },
+    (e) => push({ title: "Could not add to Specs", description: errText(e), tone: "bad" }));
   const remove = () => {
     if (r && !window.confirm(`Delete ${c.source ?? "this file"} and its Markdown from the library? Nobody will be able to open or download it any more.`)) return;
     api.removeConversion(c.job).then(() => qc.invalidateQueries({ queryKey: ["conversions"] }), (e) => push({ title: "Remove failed", description: errText(e), tone: "bad" }));
@@ -81,6 +89,7 @@ function Conversion({ c }: { c: ConversionEntry }) {
             <>
               <button onClick={() => setOpen(true)}><Eye size={14} /> Preview</button>
               <button onClick={copy}><Copy size={14} /> Copy</button>
+              {c.has_source && !/\.doc$/i.test(c.source ?? "") && <button onClick={() => void addToSpecs()} title="Parse this spec for Explorer, Compare and Coverage from this conversion"><FilePlus2 size={14} /> Add to Specs</button>}
               <button className="primary" onClick={() => void download()}><Download size={14} /> Download .md</button>
             </>
           )}

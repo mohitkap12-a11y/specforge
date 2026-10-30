@@ -5,14 +5,16 @@ import { api } from "../api";
 import { FileUp, UploadCloud } from "lucide-react";
 import { Badge, Empty, ErrorNote, Loading, PageHeader } from "../components/ui";
 import { useJobs } from "../components/jobs";
-import type { ParseRun, SpecDoc } from "../types";
+import type { ParseRun, ParserEngine, SpecDoc } from "../types";
+
+const engineOf = (run: ParseRun) => (run.stats?.engine === "docling" ? "docling" : "builtin");
 
 function RunRow({ doc, run, prev }: { doc: SpecDoc; run: ParseRun; prev?: ParseRun }) {
   const { track } = useJobs();
   const qc = useQueryClient();
   const [diff, setDiff] = useState<Record<string, any> | null>(null);
   const act = useMutation({ mutationFn: () => api.activateRun(run.id), onSuccess: () => qc.invalidateQueries() });
-  const reparse = useMutation({ mutationFn: () => api.parse(doc.id), onSuccess: (r) => track(r.job, `Reparse ${doc.family} ${doc.version}`) });
+  const reparse = useMutation({ mutationFn: () => api.parse(doc.id, false, engineOf(run)), onSuccess: (r) => track(r.job, `Reparse ${doc.family} ${doc.version}`) });
   const cmp = useMutation({ mutationFn: () => api.runDiff(prev!.id, run.id), onSuccess: setDiff });
   const ready = run.audit?.coverage_ready;
   return (
@@ -21,7 +23,10 @@ function RunRow({ doc, run, prev }: { doc: SpecDoc; run: ParseRun; prev?: ParseR
         <td>#{run.id} {run.active ? <Badge value="active" label="active" /> : null}</td>
         <td><Badge value={run.status} /></td>
         <td>{run.audit?.score !== undefined ? <>{Math.round(run.audit.score * 100)}% <Badge value={ready ? "ok" : "warning"} label={ready ? "coverage-ready" : "not ready"} /></> : "–"}</td>
-        <td className="muted small">{run.parser_version}{run.outdated ? " (reparse available)" : ""}</td>
+        <td className="muted small">
+          {run.status === "done" && <Badge value={engineOf(run) === "docling" ? "ok" : "info"} label={engineOf(run) === "docling" ? "Docling" : "Built-in"} />}{" "}
+          {run.parser_version}{run.outdated ? " (reparse available)" : ""}
+        </td>
         <td className="row">
           {run.status === "done" && <Link to={`/explorer?run=${run.id}`}>Open</Link>}
           {run.status === "done" && !run.active && <button disabled={act.isPending} onClick={() => act.mutate()}>Set active</button>}
@@ -46,13 +51,18 @@ function DocCard({ doc }: { doc: SpecDoc }) {
   const [fam, setFam] = useState(doc.family);
   const [ver, setVer] = useState(doc.version);
   const save = useMutation({ mutationFn: () => api.patchSpec(doc.id, { family: fam, version: ver }), onSuccess: () => qc.invalidateQueries() });
-  const parse = useMutation({ mutationFn: () => api.parse(doc.id, true), onSuccess: (r) => track(r.job, `Parse ${doc.family} ${doc.version}`) });
+  const [engine, setEngine] = useState<ParserEngine>("auto");
+  const parse = useMutation({
+    mutationFn: () => api.parse(doc.id, true, engine === "auto" ? undefined : engine),
+    onSuccess: (r) => { track(r.job, `Parse ${doc.family} ${doc.version}`); qc.invalidateQueries({ queryKey: ["specs"] }); },
+  });
   const del = useMutation({ mutationFn: () => api.deleteSpec(doc.id), onSuccess: () => qc.invalidateQueries() });
   const dirty = fam !== doc.family || ver !== doc.version;
   return (
     <div className="card">
       <div className="row">
         <strong className="grow">{doc.filename ?? doc.title}</strong>
+        {doc.docling && <span title="This file was converted with Docling (To Markdown library): parsing reuses that conversion"><Badge value="ok" label="Docling conversion ready" /></span>}
         <span className="muted small">{doc.format.toUpperCase()}{doc.pages ? ` · ${doc.pages} pages` : ""}</span>
       </div>
       <div className="row" style={{ margin: "8px 0" }}>
@@ -60,6 +70,12 @@ function DocCard({ doc }: { doc: SpecDoc }) {
         <label>Version <input value={ver} onChange={(e) => setVer(e.target.value)} size={8} /></label>
         <button disabled={!dirty || !fam.trim() || !ver.trim() || save.isPending} onClick={() => save.mutate()}>Save</button>
         <span className="grow" />
+        <select value={engine} onChange={(e) => setEngine(e.target.value as ParserEngine)} aria-label="Parser"
+          title="Docling rebuilds tables (merged cells, multi-row headers, tables over several pages) far better than the built-in parser">
+          <option value="auto">{doc.docling ? "Docling (conversion ready)" : "Auto: Docling if converted, else built-in"}</option>
+          {!doc.docling && <option value="docling">Docling: convert first (slow)</option>}
+          <option value="builtin">Built-in (fast)</option>
+        </select>
         <button className="primary" disabled={parse.isPending} onClick={() => parse.mutate()}>{doc.runs.length ? "Parse again" : "Parse"}</button>
         <button className="danger" disabled={del.isPending} onClick={() => { if (confirm(`Delete ${doc.filename ?? doc.family} and all its parse runs?`)) del.mutate(); }}>Delete</button>
       </div>
@@ -86,7 +102,7 @@ export default function SpecsPage() {
   const onFiles = (list: FileList | null) => { if (list?.length) upload.mutate(Array.from(list)); if (input.current) input.current.value = ""; };
   return (
     <>
-      <PageHeader title="Specs" description="Upload specification documents and parse them into sections, tables, bit fields and normative statements, with an audit of what was found." />
+      <PageHeader title="Specs" description={<>Upload specification documents and parse them into sections, tables, bit fields and normative statements, with an audit of what was found. Parsing uses Docling (accurate tables) whenever the file has been converted on the <Link to="/convert">To Markdown</Link> page; a spec converted there can also be added here with one click, and is never converted twice.</>} />
       <div className={`dropzone ${over ? "over" : ""}`}
         onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
         onDrop={(e) => { e.preventDefault(); setOver(false); onFiles(e.dataTransfer.files); }}>

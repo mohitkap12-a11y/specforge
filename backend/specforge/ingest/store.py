@@ -78,9 +78,54 @@ def parse_config(settings: dict) -> dict:
     return {"table_strategy": p.get("table_strategy", "auto")}
 
 
+# ----------------------------------------------------------------------------- docling
+
+ENGINES = ("auto", "docling", "builtin")   # auto: Docling when a Docling conversion of the file exists, else built-in
+
+
+class NoDoclingConversion(ValueError):
+    """The Docling engine was asked for but nothing converted this file with Docling yet."""
+
+
+def docling_path(doc: dict) -> Path:
+    """Where the DoclingDocument of a registered spec is kept (beside its content-addressed file)."""
+    return workspace_dir() / "specs" / f"{doc['sha256'][:16]}.docling.json"
+
+
+def _library_docling(conn: sqlite3.Connection, sha: str) -> Path | None:
+    """docling.json of a finished To Markdown conversion of the same file (same bytes), newest first."""
+    root = (workspace_dir() / "conversions").resolve()
+    for j in rows(conn, "SELECT result_json FROM job WHERE type='convert-markdown' AND state='done' "
+                        "AND json_extract(payload_json, '$.hidden') IS NULL AND json_extract(payload_json, '$.sha256') = ? "
+                        "ORDER BY id DESC", (sha,)):
+        d = (jloads(j["result_json"], {}) or {}).get("dir") or ""
+        f = (root / d / "docling.json").resolve()
+        if d and f.parent.parent == root and f.is_file():
+            return f
+    return None
+
+
+def find_docling(conn: sqlite3.Connection, doc: dict, copy: bool = True) -> Path | None:
+    """The spec's DoclingDocument: its own copy, else one from the To Markdown library (copied in, so deleting the
+    conversion later does not lose it). None when the file was never converted with Docling."""
+    own = docling_path(doc)
+    if own.is_file():
+        return own
+    found = _library_docling(conn, doc["sha256"])
+    if found is None or not copy:
+        return found
+    tmp = own.with_suffix(".tmp")
+    shutil.copyfile(found, tmp)
+    tmp.replace(own)
+    return own
+
+
 def run_parse(conn: sqlite3.Connection, document_id: int, settings: dict | None = None, workers: int | None = None,
-              progress: ProgressFn | None = None, activate: bool | None = None) -> int:
-    """Parse a registered document into a new parse_run. Returns the run id."""
+              progress: ProgressFn | None = None, activate: bool | None = None, engine: str | None = None) -> int:
+    """Parse a registered document into a new parse_run. Returns the run id.
+
+    engine: "docling" builds the IR from the file's Docling conversion (NoDoclingConversion if there is none), "builtin"
+    runs the PyMuPDF / OOXML parsers, "auto" (the default, or settings parser.engine) uses Docling when it can."""
     import os
 
     from ..core.config import load_settings
@@ -92,22 +137,36 @@ def run_parse(conn: sqlite3.Connection, document_id: int, settings: dict | None 
     if not doc:
         raise KeyError(f"document {document_id}")
     cfg = parse_config(settings)
+    engine = (engine or settings.get("parser", {}).get("engine") or "auto").lower()
+    if engine not in ENGINES:
+        raise ValueError(f"Unknown parser engine '{engine}'; use one of: {', '.join(ENGINES)}")
+    dj = find_docling(conn, doc) if engine != "builtin" else None
+    if engine == "docling" and dj is None:
+        raise NoDoclingConversion(f"{doc['filename']} has no Docling conversion yet; convert it on the To Markdown page "
+                                  "or parse it with the Docling engine from the Specs page, which converts it first")
+    cfg["engine"] = "docling" if dj is not None else "builtin"
     cur = conn.execute("INSERT INTO parse_run(document_id,parser_version,config_hash,status) VALUES(?,?,?, 'running')",
                        (document_id, PARSER_VERSION, stable_hash(cfg)))
     run_id = cur.lastrowid
     conn.commit()
     t0 = time.monotonic()
-    eventlog.emit("info", "parser", f"Parsing {doc['family']} {doc['version']} ({doc['format'].upper()}, {doc['filename']}) as run #{run_id}",
+    eventlog.emit("info", "parser", f"Parsing {doc['family']} {doc['version']} ({doc['format'].upper()}, {doc['filename']}) as run #{run_id}"
+                  f" with the {'Docling' if dj is not None else 'built-in'} parser",
                   run_id=run_id, document_id=document_id, parser_version=PARSER_VERSION, config=cfg)
     try:
         w = workers if workers is not None else settings.get("parser", {}).get("workers", 0)
         w = w or max(1, (os.cpu_count() or 2) - 1)
-        if doc["format"] == "pdf":
+        if dj is not None:
+            from .docling_ir import parse_docling_file
+
+            spec = parse_docling_file(str(dj), doc["path"], doc["family"], doc["version"], progress=progress)
+        elif doc["format"] == "pdf":
             spec = parse_pdf(doc["path"], doc["family"], doc["version"], workers=w, progress=progress)
         else:
             spec = parse_docx(doc["path"], doc["family"], doc["version"],
                               progress=(lambda s, a, b: progress(s, a, b)) if progress else None)
         spec.family, spec.version = doc["family"], doc["version"]
+        spec.stats.setdefault("engine", "builtin")
         eventlog.emit("info", "parser", f"Extracted {spec.pages} pages: {len(spec.sections) - 1} sections, {len(spec.tables)} tables, {len(spec.requirements)} normative statements",
                       run_id=run_id, workers=w)
         apply_corrections(conn, spec)

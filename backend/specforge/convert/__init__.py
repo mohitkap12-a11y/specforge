@@ -42,6 +42,7 @@ class ConvertResult:
     stats: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     engine: str = "builtin"
+    docling: dict | None = None     # the DoclingDocument (Docling engine only): the spec parser reuses it
 
 
 def sniff(path: str | Path) -> str:
@@ -200,7 +201,7 @@ def _convert_docling(path: str, filename: str, fmt: str, front_matter: bool) -> 
         warnings.append("No headings were detected; the text is kept as plain paragraphs.")
     if front_matter:
         body = _front(body, title, filename, fmt, pages, "docling")
-    return ConvertResult(body, title, fmt, stats, warnings, "docling")
+    return ConvertResult(body, title, fmt, stats, warnings, "docling", meta.get("document"))
 
 
 def _convert_builtin(path: str, filename: str, fmt: str, front_matter: bool) -> ConvertResult:

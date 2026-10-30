@@ -7,7 +7,10 @@ export interface ParseRun {
 export interface SpecDoc {
   id: number; family: string; version: string; title: string | null; filename: string | null;
   format: string; pages: number | null; runs: ParseRun[];
+  docling: boolean;   // a Docling conversion of this file exists (its own, or in the To Markdown library): parsing reuses it
 }
+/** auto: Docling when the file has a Docling conversion, else built-in. */
+export type ParserEngine = "auto" | "docling" | "builtin";
 export interface Job {
   id: number; type: string; state: "queued" | "running" | "done" | "failed" | "cancelled";
   progress: number; total: number; message: string | null; error: string | null; result: Record<string, any> | null; created?: string;
@@ -130,7 +133,7 @@ export interface MarkdownConversion {
   warnings: string[];
 }
 
-export interface CompareOption { doc_id: number; family: string; version: string; filename: string | null; pages: number | null; run_id: number | null; parsed: boolean; outdated: boolean }
+export interface CompareOption { doc_id: number; family: string; version: string; filename: string | null; pages: number | null; run_id: number | null; parsed: boolean; outdated: boolean; engine: "docling" | "builtin" | null }
 export type Impact = "breaking" | "new" | "changed" | "clarification" | "editorial";
 export interface CompareChapter { chapter: string; title: string; total: number; score: number; breaking: number; new: number; changed: number; clarification: number; editorial: number }
 export interface CompareSide { run_id: number; family: string; version: string; sections: number; tables: number; requirements: number }

@@ -1,4 +1,4 @@
-import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, ParserEngine, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -68,7 +68,8 @@ export const api = {
   deleteComparison: (id: number) => req("DELETE", `/api/compare/${id}`),
   patchSpec: (id: number, b: { family?: string; version?: string }) => req("PATCH", `/api/specs/${id}`, b),
   deleteSpec: (id: number) => req("DELETE", `/api/specs/${id}`),
-  parse: (id: number, activate = false) => req<{ job: number }>("POST", `/api/specs/${id}/parse${qs({ activate: activate ? "true" : undefined })}`),
+  parse: (id: number, activate = false, engine?: ParserEngine) => req<{ job: number }>("POST", `/api/specs/${id}/parse${qs({ activate: activate ? "true" : undefined, engine })}`),
+  specFromConversion: (job: number) => req<{ document: SpecDoc; job: number }>("POST", `/api/specs/from-conversion/${job}`),
   activateRun: (id: number) => req("POST", `/api/runs/${id}/activate`),
   tree: (run: number) => req<TreeNode[]>("GET", `/api/runs/${run}/tree`),
   section: (run: number, key: string) => req<SectionData>("GET", `/api/runs/${run}/section${qs({ key })}`),
