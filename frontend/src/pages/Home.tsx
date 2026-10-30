@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, FileDown, Gauge, GitCompareArrows, Sparkles } from "lucide-react";
+import { ArrowRight, Bot, FileDown, Gauge, GitCompareArrows, Sparkles } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { api } from "../api";
 
@@ -23,7 +23,7 @@ function Tool({ icon: Icon, tone, name, tagline, points, to, cta, links, foot }:
   );
 }
 
-/** The landing page: SpecForge is three separate tools; each card says what it does and what it needs. */
+/** The landing page: SpecForge is separate tools on one spec library; each card says what it does and what it needs. */
 export default function HomePage() {
   const specs = useQuery({ queryKey: ["specs"], queryFn: api.specs });
   const comps = useQuery({ queryKey: ["comparisons"], queryFn: api.comparisons });
@@ -32,8 +32,8 @@ export default function HomePage() {
     <>
       <section className="hero">
         <span className="badge violet"><Sparkles size={12} /> Local-first · works offline</span>
-        <h1>Three tools for NVMe specifications.</h1>
-        <p>Turn a spec into Markdown, see exactly what a new revision changed, and measure what your tests cover. Each tool stands on its own; compare and coverage share the library of specs you upload once.</p>
+        <h1>Tools for NVMe specifications.</h1>
+        <p>Turn a spec into Markdown, see exactly what a new revision changed, measure what your tests cover, and let your coding agent look the specs up. Each tool stands on its own; they share the library of specs you upload once.</p>
       </section>
       <div className="tools">
         <Tool icon={FileDown} tone="convert" name="Spec Converter" tagline="Any PDF, DOC or DOCX into a clean Markdown file."
@@ -46,6 +46,9 @@ export default function HomePage() {
         <Tool icon={Gauge} tone="coverage" name="Coverage Tool" tagline="Which commands, fields and requirements do your tests actually cover?"
           points={["Builds the list of everything that can be covered from the specs", "Derives one scenario per executed test from your command log", "Covered / partial / not covered with evidence; Excel, HTML, CSV, JSON reports"]}
           to="/workflow" cta="Open the coverage workflow" links={[{ to: "/specs", label: "Specs" }, { to: "/coverage", label: "Coverage" }, { to: "/reports", label: "Reports" }]} />
+        <Tool icon={Bot} tone="agents" name="Spec MCP" tagline="Your coding agent asks the parsed specs instead of guessing."
+          points={["One MCP endpoint for OpenCode, Roo Code and Claude Code; no account or key", "Command Dwords and fields, data structures, sections and figures, with page citations", "What changed between versions, computed once on the server"]}
+          to="/agents" cta="Connect your agent" foot={<>{parsed} parsed spec(s) served</>} />
       </div>
       <p className="muted small" style={{ marginTop: 18 }}>Code decides what exists, what changed and what is covered; AI only describes and drafts, and never changes a verdict. Every parse and AI call is visible in <Link to="/activity">Activity</Link>.</p>
     </>

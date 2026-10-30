@@ -19,6 +19,7 @@ dependencies = [
   "pyyaml>=6.0",
   "python-multipart>=0.0.9",
   "docling>=2.19",             # default spec -> Markdown engine (layout model + TableFormer)
+  "mcp>=2.3,<3",               # the MCP server for coding agents (/mcp, `specforge mcp`); written against the 2.x API (MCPServer)
 ]
 
 [project.optional-dependencies]

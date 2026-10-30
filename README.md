@@ -1,14 +1,15 @@
 # specforge
 
-**Three offline tools for NVMe / NVMe-MI specifications**, each with its own place in the app (sidebar groups and the Home page):
+**Offline tools for NVMe / NVMe-MI specifications**, each with its own place in the app (sidebar groups and the Home page):
 
 | Tool | What it does | Where |
 |---|---|---|
 | **Spec Converter** | Any PDF / DOC / DOCX into one clean Markdown file | UI *To Markdown*, `specforge to-md`, `POST /api/convert/markdown` |
 | **Spec Compare** | Pick two versions of a spec from your library (e.g. NVMe 2.3 and 2.4): every new / removed / modified section, table and requirement, ranked by impact, plus an optional AI summary | UI *Compare versions*, `specforge compare`, `/api/compare` |
 | **Coverage Tool** | Which commands, fields and requirements your tests cover (everything below) | UI *Coverage Tool* group (Workflow, Specs, Explorer, ... Reports) |
+| **Spec MCP** | Coding agents (OpenCode, Roo Code, Claude Code ...) look up the parsed specs: Command Dword fields, data structures, sections, figures, and what changed between versions | `http://<server>/mcp`, UI *MCP for agents*, `specforge mcp` |
 
-Compare and Coverage share the library of specs uploaded and parsed on the **Specs** page; the Converter is stateless.
+Compare, Coverage and the MCP endpoint share the library of specs uploaded and parsed on the **Specs** page; the Converter is stateless.
 
 ## Coverage tool
 
@@ -36,6 +37,7 @@ Scenario and command **coverage for the NVMe / NVMe-MI specifications**, fully o
 | Ollama / OpenCode providers, AI scenario generation with grounding and validation | implemented, tested against a mock Ollama server and a stub `opencode` binary |
 | REST API, CLI, Excel/HTML/CSV/JSON reports | implemented, tested |
 | React UI (all pages: Dashboard, Specs, Explorer, Sets, Catalog, Scenarios, Command DBs, Coverage, Reports, Jobs, Settings) | implemented in `frontend/`; checked in a browser against the synthetic demo. Not yet exercised on real specs |
+| MCP endpoint for coding agents (`/mcp`, `/mcp/sse`, `specforge mcp`), guide and admin status pages | implemented, tested with the MCP Python SDK client over Streamable HTTP, SSE and stdio, and queried against the real Base 2.4 / MI 2.2 / NVM Command Set 1.3 parsed with the built-in engine; not yet tried from OpenCode / Roo Code / Claude Code against a Docling-parsed library |
 | Real NVMe specs (`docs/specifications/`: Base 2.4, MI 2.2, NVM Command Set 1.3) | run end to end once (parse, references, catalog, cross-command generation, approval, import, coverage, export); parser audit passes with 0 errors on all three, warnings remain (see "Before trusting real-spec results"); not yet run against a real command log or a local model |
 
 ## Convert a spec to Markdown
@@ -69,6 +71,34 @@ How it works: both versions are compared from their *parsed model*, not as flat 
 5. Optional **AI summary**: per chapter the model sees the top detected changes (with ids) and writes a headline and points citing those ids; a second call writes the overall summary, breaking changes and what to review, and one call per table writes a one-line description of each command / structure row. Ids the model was not shown are dropped, so it cannot invent a change. It uses the same `generate` model as the rest of the AI features (Settings); without AI you still get the full change list and a factual overview.
 
 The result is stored (filter, search and page it in the UI) and exports to a Markdown report. Limits: tested on synthetic specs, not yet on the real NVMe versions; a section whose title was rewritten *and* renumbered is reported as removed + added.
+
+## Spec MCP: the specs for coding agents
+
+`specforge serve` also serves an [MCP](https://modelcontextprotocol.io) endpoint, so a coding agent can ask the parsed specifications instead of answering from memory, e.g. *"what is in Command Dword 10 of Identify in NVMe Base 2.4?"* or *"what changed in Identify since the previous version?"*. Answers are Markdown citing the spec, version, section or figure and page.
+
+* **Endpoint:** `http://<server>:<port>/mcp` (Streamable HTTP, stateless, JSON responses) and `http://<server>:<port>/mcp/sse` for clients that only speak the older HTTP+SSE transport. No sign-in and no key: it is open to everyone who can reach the server and only reads the parsed specs (the web UI and `/api/` still need sign-in).
+* **Setup:** the *MCP for agents* page (sidebar group *Spec MCP*) has ready-to-paste configuration for OpenCode (`opencode.json`, `"type": "remote"`), Roo Code (`mcp_settings.json` / `.roo/mcp.json`, `"type": "streamable-http"`) and Claude Code (`claude mcp add --transport http --scope user specforge http://<server>:<port>/mcp`), a *Test the endpoint* button, and a rule to add to AGENTS.md / CLAUDE.md. Admins set the URL it shows (*Public URL*) when users reach the server by a name the server does not see.
+* **Tools** (all read-only):
+
+  | Tool | Answers |
+  |---|---|
+  | `list_specs` | every parsed spec and version, and how to name them |
+  | `search_spec` | keyword search over sections, figures and table rows (NVMe abbreviations expanded: CDW10, CNS, NSID, LBAF ...) |
+  | `get_section`, `get_table` | a section (with its tables, optionally its sub-sections) or a figure |
+  | `list_commands`, `get_command` | commands with opcode, section and Command Dword tables, and where other specs extend them |
+  | `get_command_field` | one Command Dword (`10`, `CDW10`, `NMD0`) or field (`CNS`) with the value tables its description refers to |
+  | `get_structure` | a data structure / log page / descriptor, optionally the row of one byte offset or field (`Identify Controller`, `MDTS`) |
+  | `resolve_reference` | "Figure 312", "section 3.1 of the NVM Express NVM Command Set Specification" |
+  | `list_changes`, `diff` | what changed between two versions (default: latest vs the one before), overall or for one command, structure, section or figure |
+  | `read_raw` | the Docling Markdown of a document (also converted-but-not-parsed files), paged or around a phrase |
+
+  Resources: `specforge://specs` and `specforge://<family>@<version>/sec:<n>` / `fig:<n>`.
+* **Versions:** a spec is named by id (`nvme-base`), short name (`base`, `mi`, `nvm`, `zns` ...) or title; without a version the latest parsed one is used and the answer says so; `previous` is the version before it.
+* **Comparisons** an agent asks for are computed once through the job queue (type `compare`, owner `mcp`; one job however many agents ask at the same time) and kept; a tool waits up to *compare wait* seconds (default 60), then tells the agent to retry.
+* **Long answers** are paged at about 30k tokens (`page=2` ...); a referenced table over 80 rows is named with its link rather than printed.
+* **Built from the parsed model**, not the flat Markdown: tables the PDF parser split over pages are read as one table (Identify Controller is one 325-row table), empty spacer columns are dropped, and a figure number that the parser gave to a caption fragment as well resolves to the real table. Parser warnings on a section or table are shown with the answer.
+* **Admins** (*MCP for agents → Status*): turn the endpoint on / off, rate limit per client address (default 120 requests per minute; `0` = none), one Activity-log line per call (source `mcp`), calls / errors / not-found / slow calls per tool, the client addresses (no names are recorded), and the search index per spec version (built at startup and on first use; *Rebuild* re-indexes). Usage figures are kept in memory since the server started.
+* **Local / testing:** `specforge mcp` serves the same tools over stdio against this machine's workspace.
 
 ## Install
 
@@ -254,6 +284,7 @@ CI (`.github/workflows/ci.yml`) runs lint and the test suite on Python 3.11 and 
 backend/specforge/
   ingest/    pdf.py docx.py normalize.py semantics.py audit.py store.py ir.py
   refs.py catalog.py scenarios.py crossgen.py cmddb.py execscen.py coverage.py reports.py jobs.py cli.py
+  specquery.py mcp_server.py   spec lookups for agents / the MCP server (/mcp, `specforge mcp`)
   llm/       base.py ollama.py opencode.py service.py
   api/app.py REST + SSE
   devtools/synth.py synthetic spec and command-DB generator

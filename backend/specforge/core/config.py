@@ -21,6 +21,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "llm": {"max_concurrency": 2, "max_retries": 2},
     "logging": {"min_level": "info", "capture_prompts": True, "preview_chars": 4000},  # capture_prompts: keep LLM prompts/replies in the activity log
     "mi_layout": {},  # overrides for the NVMe-MI header layout, see cmddb.MI_DEFAULT_LAYOUT
+    # the MCP endpoint (/mcp) for coding agents: on/off, requests per minute per address (0: no limit), how long a tool waits for a
+    # version comparison it started, one Activity-log line per call, and the URL agents use (empty: the address the UI is reached at)
+    "mcp": {"enabled": True, "rate_limit_per_min": 120, "compare_wait_s": 60, "log_calls": True, "public_url": ""},
 }
 
 

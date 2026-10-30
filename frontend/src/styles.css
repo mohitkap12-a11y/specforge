@@ -302,6 +302,7 @@ table.t { width: 100%; border-collapse: collapse; }
 .tool h2 { margin: 2px 0 0; font-size: 18px; } .tool-tag { margin: 0; color: var(--text-2); }
 .tool ul { margin: 4px 0 14px; padding-left: 18px; color: var(--text-2); font-size: 13px; display: grid; gap: 5px; }
 .tool-ic { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; }
+.tool.agents .tool-ic { background: var(--warn-bg); color: var(--warn); } .tool.agents { border-top: 3px solid var(--warn); }
 .tool.convert .tool-ic { background: var(--info-bg); color: var(--info); } .tool.compare .tool-ic { background: var(--violet-bg); color: var(--violet); } .tool.coverage .tool-ic { background: var(--ok-bg); color: var(--ok); }
 .tool.convert { border-top: 3px solid var(--info); } .tool.compare { border-top: 3px solid var(--violet); } .tool.coverage { border-top: 3px solid var(--ok); }
 .tool-foot { padding-top: 8px; border-top: 1px solid var(--border); }
