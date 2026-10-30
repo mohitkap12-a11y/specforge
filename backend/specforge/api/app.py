@@ -3,6 +3,7 @@ signed-in user unless the server runs with --no-auth (see AuthGate and auth.py).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__, auth, catalog, cmddb, compare, compare_ai, convert, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
+from .. import mcp_server, specquery
 from ..crossgen import generate_cross_scenarios
 from ..convert import ENGINES, ConversionError, SUPPORTED, convert_file, output_name
 from ..core import config
@@ -56,7 +58,8 @@ def safe_join(root: Path, rel: str) -> Path | None:
 PUBLIC = {("POST", "/api/auth/login"), ("POST", "/api/auth/register"), ("POST", "/api/auth/logout"), ("GET", "/api/auth/me")}
 # Admin only: user management, global settings, wiping shared data.
 ADMIN_ONLY = {("PUT", "/api/settings"), ("GET", "/api/reset"), ("POST", "/api/reset"), ("DELETE", "/api/logs"),
-              ("GET", "/api/fs/browse")}     # lists the server's folders: other users type or drop a path instead
+              ("GET", "/api/fs/browse"),     # lists the server's folders: other users type or drop a path instead
+              ("GET", "/api/mcp/status"), ("PUT", "/api/mcp/settings"), ("POST", "/api/mcp/reindex"), ("POST", "/api/mcp/reset-stats")}
 ADMIN_PREFIX = "/api/users"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # With login turned off (`serve --no-auth`, localhost only) the single local user is the admin.
@@ -89,6 +92,20 @@ def client_ip(req: Request) -> str:
 
 def admin_only(method: str, path: str) -> bool:
     return (method, path) in ADMIN_ONLY or path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/")
+
+
+class McpDispatch:
+    """Sends every request under /mcp to the MCP endpoint (mcp_server.McpEndpoint), ahead of the routes and the web UI's catch-all.
+    /mcp is outside /api/ on purpose: agents connect without a session (the endpoint is read-only and open to the network)."""
+
+    def __init__(self, app, endpoint):
+        self.app, self.endpoint = app, endpoint
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", "")
+        if scope["type"] == "http" and (path == "/mcp" or path.startswith("/mcp/")):
+            return await self.endpoint(scope, receive, send)
+        return await self.app(scope, receive, send)
 
 
 class AuthGate:
@@ -141,6 +158,16 @@ def create_app() -> FastAPI:
     DB = str(config.db_path())
     AUTH = config.auth_enabled()
     app.add_middleware(AuthGate, enabled=AUTH)
+    speclib = specquery.SpecLibrary(DB)
+    mcp = mcp_server.McpEndpoint(speclib, lambda: config.load_settings(get_conn()), client_ip, local_only=not AUTH)
+    app.add_middleware(McpDispatch, endpoint=mcp)
+    _inner_lifespan = app.router.lifespan_context
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(a):
+        async with mcp.lifespan(), _inner_lifespan(a) as state:      # the MCP session manager runs while the app does
+            yield state
+    app.router.lifespan_context = _lifespan
 
     def conn():
         return get_conn()
@@ -246,6 +273,7 @@ def create_app() -> FastAPI:
             eventlog.emit("warn", "system", f"{failed} job(s) were interrupted by the previous shutdown and marked failed")
         if resumed:
             eventlog.emit("info", "system", f"{resumed} queued conversion(s) and parse(s) resumed after the restart, in their old order")
+        threading.Thread(target=_mcp_warm_index, name="sf-mcp-index", daemon=True).start()
         if AUTH and not auth.count_admins(conn()):
             eventlog.emit("warn", "system", "Sign-in is on but there is no admin account yet: run `specforge user create <name> --admin` on the server")
         elif not AUTH:
@@ -401,17 +429,106 @@ def create_app() -> FastAPI:
         audit("Settings saved", sections=sorted(body) if isinstance(body, dict) else [])
         return saved
 
+    # ------------------------------------------------------------------ MCP endpoint (/mcp): guide for everyone, status for admins
+    MCP_SETTINGS = {"enabled": bool, "log_calls": bool, "rate_limit_per_min": (0, 100_000), "compare_wait_s": (1, 600), "public_url": str}
+
+    def _mcp_warm_index():
+        """Index every served parse run for search in the background, so the first agent query does not wait for it."""
+        try:
+            r = speclib.index_all()
+            if r["built"] or r["pruned"]:
+                eventlog.emit("info", "mcp", f"MCP search index ready: {r['built']} document(s) indexed, {r['pruned']} stale removed", **r)
+        except Exception as e:  # noqa: BLE001  the endpoint still works, the index is built on first use
+            eventlog.emit("warn", "mcp", f"MCP search index warm-up failed: {e!r}")
+
+    def _mcp_url(request: Request) -> str:
+        """What agents should connect to: the admin's public URL when set, else this request's own address."""
+        base = (settings().get("mcp") or {}).get("public_url") or ""
+        if not base:
+            host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost:8000"
+            base = f"{'https' if is_https(request) else 'http'}://{host}"
+        return base.rstrip("/") + "/mcp"
+
+    @app.get("/api/mcp/info")
+    async def mcp_info(request: Request):
+        """For the MCP guide page: the endpoint, whether it is on, and the tools an agent sees."""
+        cfg = (await run_in_threadpool(settings)).get("mcp") or {}
+        tools = [{"name": t.name, "description": t.description, "params": sorted((t.input_schema or {}).get("properties", {})),
+                  "required": (t.input_schema or {}).get("required", [])} for t in await mcp.server.list_tools()]
+        specs = await run_in_threadpool(lambda: [{"family": d["family"], "version": d["version"], "title": d["title"]} for d in speclib.documents()])
+        return {"url": _mcp_url(request), "sse_url": _mcp_url(request) + "/sse", "enabled": bool(cfg.get("enabled", True)),
+                "rate_limit_per_min": cfg.get("rate_limit_per_min", 120), "running": mcp.running, "tools": tools, "specs": specs,
+                "version": __version__}
+
+    @app.get("/api/mcp/status")
+    def mcp_status(request: Request):
+        cfg = settings().get("mcp") or {}
+        idx = speclib.index_state()
+        docs = []
+        for d in speclib.documents():
+            i = idx.get(d["run_id"])
+            state = "missing" if not i else ("current" if i["run_created"] == d["run_created"] and i["version"] == specquery.INDEX_VERSION else "outdated")
+            docs.append({"family": d["family"], "version": d["version"], "run_id": d["run_id"], "index": state,
+                         "entries": i["entries"] if i else 0, "built": i["built"] if i else None, "seconds": i["seconds"] if i else None})
+        busy = row(conn(), "SELECT id FROM job WHERE type='mcp-index' AND state IN ('queued','running') ORDER BY id DESC LIMIT 1")
+        return {"settings": {k: cfg.get(k) for k in MCP_SETTINGS}, "url": _mcp_url(request), "running": mcp.running,
+                "usage": mcp.usage.snapshot(), "documents": docs, "index_job": busy["id"] if busy else None,
+                "comparisons_by_mcp": conn().execute("SELECT COUNT(*) FROM job WHERE type='compare' AND user='mcp'").fetchone()[0]}
+
+    @app.put("/api/mcp/settings")
+    def mcp_settings(body: Any = Body(...)):
+        if not isinstance(body, dict) or not body or any(k not in MCP_SETTINGS for k in body):
+            raise HTTPException(422, f"send one or more of: {', '.join(MCP_SETTINGS)}")
+        for k, v in body.items():
+            kind = MCP_SETTINGS[k]
+            if kind is bool and not isinstance(v, bool):
+                raise HTTPException(422, f"{k} must be true or false")
+            if isinstance(kind, tuple) and not (isinstance(v, int) and not isinstance(v, bool) and kind[0] <= v <= kind[1]):
+                raise HTTPException(422, f"{k} must be a whole number from {kind[0]} to {kind[1]}")
+            if kind is str:
+                if not isinstance(v, str) or (v.strip() and not re.fullmatch(r"https?://[^\s/]+(?:/[^\s]*)?", v.strip())):
+                    raise HTTPException(422, f"{k} must be empty or a URL like http://specforge.example:8000")
+                body[k] = v.strip().rstrip("/")
+        cur = settings()
+        saved = config.save_settings(conn(), {**cur, "mcp": {**(cur.get("mcp") or {}), **body}})
+        mcp.refresh()
+        audit("MCP settings saved: " + ", ".join(f"{k}={v}" for k, v in body.items()), **body)
+        return {k: saved["mcp"].get(k) for k in MCP_SETTINGS}
+
+    @app.post("/api/mcp/reindex")
+    def mcp_reindex():
+        busy = row(conn(), "SELECT id FROM job WHERE type='mcp-index' AND state IN ('queued','running') ORDER BY id DESC LIMIT 1")
+        if busy:
+            return {"job": busy["id"], "reused": True}
+
+        def work(c, prog):
+            lib = specquery.SpecLibrary(DB)
+            docs = lib.documents()
+            for i, d in enumerate(docs):
+                prog(f"indexing {d['family']} {d['version']}", i, len(docs))
+                lib.ensure_index(d, force=True)
+            return {"documents": len(docs), "pruned": lib.prune_index()}
+        audit("MCP search index rebuild requested")
+        return {"job": submit_job("mcp-index", work, {}, label="Rebuild the MCP search index")}
+
+    @app.post("/api/mcp/reset-stats")
+    def mcp_reset_stats():
+        mcp.usage.reset()
+        audit("MCP usage figures reset")
+        return {"ok": True}
+
     # What each reset deletes. Parse runs, comparisons, catalogs, scenarios and coverage depend on the specs (ON DELETE
     # CASCADE), so resetting the specs takes them along; coverage is what came from the test executions (imported command
     # DBs and what was derived from them) and leaves the specs, sets, catalogs and drafted scenarios alone.
     RESET_SCOPES = {
-        "comparisons": {"delete": ("spec_compare",), "files": (), "blocked_by": {"compare-summary"},
+        "comparisons": {"delete": ("spec_compare",), "files": (), "blocked_by": {"compare", "compare-summary"},
                         "message": "saved spec comparisons removed"},
         "coverage": {"delete": ("cmd_source",), "files": ("cmddb-uploads",),
                      "blocked_by": {"import-cmddb", "exec-analyze", "exec-describe", "coverage"},
                      "message": "imported command DBs, the scenarios derived from them and coverage runs removed"},
         "specs": {"delete": ("spec_document", "spec_set", "correction", "enrichment"), "files": ("specs", "uploads"),
-                  "blocked_by": {"parse", "catalog", "cross-scenarios", "exec-analyze", "exec-describe", "coverage", "compare-summary"},
+                  "blocked_by": {"parse", "catalog", "cross-scenarios", "exec-analyze", "exec-describe", "coverage", "compare", "compare-summary",
+                                 "mcp-index"},
                   "message": "specs, parse runs, sets, catalogs, scenarios, comparisons and coverage runs removed "
                              "(To Markdown library and imported command DBs kept)"},
         "all": {"delete": ("spec_document", "spec_set", "cmd_source", "correction", "llm_cache", "enrichment", "job", "event_log"),

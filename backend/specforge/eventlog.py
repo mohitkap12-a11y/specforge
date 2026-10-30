@@ -20,7 +20,7 @@ from .core.config import db_path
 from .core.db import connect
 
 LEVELS = {"debug": 10, "info": 20, "warn": 30, "error": 40}
-SOURCES = ("job", "parser", "catalog", "scenarios", "agent", "llm", "import", "coverage", "api", "system")
+SOURCES = ("job", "parser", "catalog", "scenarios", "agent", "llm", "import", "coverage", "api", "mcp", "system")
 MAX_QUEUE = 20000          # beyond this the oldest queued events are dropped rather than growing memory without bound
 KEEP_ROWS = 100_000        # retention: the newest rows kept in the table
 PRUNE_EVERY = 2000         # inserts into one database between retention passes

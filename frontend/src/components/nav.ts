@@ -1,8 +1,8 @@
 import type { LucideIcon } from "lucide-react";
-import { Activity, BookOpen, Users, Database, FileBarChart, FileDown, FlaskConical, Gauge, GitCompareArrows, Home, Layers, ListChecks, ListTree, Settings as Cog, FileText } from "lucide-react";
+import { Activity, Bot, BookOpen, Users, Database, FileBarChart, FileDown, FlaskConical, Gauge, GitCompareArrows, Home, Layers, ListChecks, ListTree, Settings as Cog, FileText } from "lucide-react";
 
-/** SpecForge is three separate tools that share one library of parsed specs. */
-export type NavGroup = "home" | "convert" | "compare" | "coverage" | "system";
+/** SpecForge's tools share one library of parsed specs: converter, compare, coverage, and the MCP endpoint that serves the specs to coding agents. */
+export type NavGroup = "home" | "convert" | "compare" | "coverage" | "agents" | "system";
 export interface NavItem { to: string; label: string; icon: LucideIcon; desc: string; group: NavGroup; adminOnly?: boolean }
 export const NAV: NavItem[] = [
   { to: "/", label: "Home", icon: Home, desc: "The three tools: convert, compare and coverage", group: "home" },
@@ -17,6 +17,8 @@ export const NAV: NavItem[] = [
   { to: "/scenarios", label: "Scenarios", icon: FlaskConical, desc: "What the tests executed, one scenario per test case", group: "coverage" },
   { to: "/coverage", label: "Coverage", icon: Gauge, desc: "Run and inspect coverage", group: "coverage" },
   { to: "/reports", label: "Reports", icon: FileBarChart, desc: "Export Excel, HTML, CSV, JSON", group: "coverage" },
+  // not "/mcp": that path is the endpoint agents connect to
+  { to: "/agents", label: "MCP for agents", icon: Bot, desc: "Connect OpenCode, Roo Code or Claude Code to the parsed specs (MCP endpoint, setup guide, admin status)", group: "agents" },
   { to: "/activity", label: "Activity", icon: Activity, desc: "Live logs and jobs: what the system and AI agents are doing", group: "system" },
   { to: "/users", label: "Users", icon: Users, desc: "Approve access requests, add users, roles, passwords (admins)", group: "system", adminOnly: true },
   { to: "/settings", label: "Settings", icon: Cog, desc: "AI providers, models, parser, logging, theme", group: "system" },
@@ -28,4 +30,5 @@ export const GROUPS: { key: NavGroup; title: string | null; blurb?: string }[] =
   { key: "convert", title: "Spec Converter", blurb: "PDF / DOC / DOCX to Markdown" },
   { key: "compare", title: "Spec Compare", blurb: "What changed between two versions" },
   { key: "coverage", title: "Coverage Tool", blurb: "Measure test coverage of the specs" },
+  { key: "agents", title: "Spec MCP", blurb: "Spec lookups for coding agents" },
 ];

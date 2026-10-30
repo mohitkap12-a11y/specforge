@@ -18,6 +18,7 @@ import CoveragePage from "./pages/Coverage";
 import ReportsPage from "./pages/Reports";
 import UsersPage from "./pages/Users";
 import AccountPage from "./pages/Account";
+import AgentsPage from "./pages/Agents";
 import { useAuth } from "./components/auth";
 
 export default function App() {
@@ -40,6 +41,7 @@ export default function App() {
         <Route path="/cmddb" element={<CommandDBsPage />} />
         <Route path="/coverage" element={<CoveragePage />} />
         <Route path="/reports" element={<ReportsPage />} />
+        <Route path="/agents" element={<AgentsPage />} />
         <Route path="/activity" element={<ActivityPage />} />
         <Route path="/jobs" element={<Navigate to="/activity?tab=jobs" replace />} />
         <Route path="/settings" element={<SettingsPage />} />

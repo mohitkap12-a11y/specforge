@@ -1,3 +1,4 @@
+import type { McpInfo, McpSettings, McpStatus } from "./types";
 import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, ParserEngine, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, ResetPreview, ResetScope, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
@@ -147,6 +148,20 @@ export const api = {
   job: (id: number) => req<Job>("GET", `/api/jobs/${id}`),
   /** handed_to: the owner cancelled a job others had asked for too; it goes on, owned by the first of them. */
   cancelJob: (id: number) => req<{ ok: boolean; handed_to?: string }>("POST", `/api/jobs/${id}/cancel`),
+
+  mcpInfo: () => req<McpInfo>("GET", "/api/mcp/info"),
+  mcpStatus: () => req<McpStatus>("GET", "/api/mcp/status"),
+  mcpSettings: (b: Partial<McpSettings>) => req<McpSettings>("PUT", "/api/mcp/settings", b),
+  mcpReindex: () => req<{ job: number; reused?: boolean }>("POST", "/api/mcp/reindex"),
+  mcpResetStats: () => req<{ ok: boolean }>("POST", "/api/mcp/reset-stats"),
+  /** What an agent sees: the endpoint's tool list, asked the way an agent asks it (JSON-RPC over Streamable HTTP). */
+  mcpProbe: async () => {
+    const r = await fetch("/mcp", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }) });
+    const body = await r.json().catch(() => null);
+    if (!r.ok || !body?.result) throw new ApiError(r.status, body?.error?.message ?? `the endpoint answered ${r.status}`);
+    return (body.result.tools as { name: string }[]).length;
+  },
 };
 export const fileUrl = (docId: number) => `/api/documents/${docId}/file`;
 

@@ -288,6 +288,13 @@ def cmd_models(a):
             print(name, "error:", e)
 
 
+def cmd_mcp(a):
+    """The MCP tools over stdio, against this machine's workspace (the shared server serves them over HTTP at /mcp)."""
+    from .mcp_server import run_stdio
+
+    run_stdio(str(config.db_path()))
+
+
 KIND_HELP = "command-history databases (a file, or a folder of them: one database per test script): read the NVMe (CommandHistoryTable, default) or NVMe-MI (MICommandHistoryTable) commands"
 
 
@@ -327,6 +334,8 @@ def main(argv=None):
     s.add_argument("--kind", choices=cmddb.KINDS, help=KIND_HELP)
     s.add_argument("--show-tests", type=int, default=50, help="list the coverage of this many tests"); s.set_defaults(fn=cmd_coverage)
     s = sub.add_parser("models", help="list models from Ollama and OpenCode"); s.set_defaults(fn=cmd_models)
+    s = sub.add_parser("mcp", help="serve the MCP spec tools over stdio (local testing; agents normally use http://<server>/mcp)")
+    s.set_defaults(fn=cmd_mcp)
     a = p.parse_args(argv)
     a.fn(a)
 
