@@ -199,13 +199,14 @@ export interface ResetPreview { scope: ResetScope; counts: Record<string, number
 export interface McpTool { name: string; description: string; params: string[]; required: string[] }
 export interface McpInfo { url: string; sse_url: string; enabled: boolean; rate_limit_per_min: number; running: boolean; tools: McpTool[];
   specs: { family: string; version: string; title: string | null }[]; version: string }
-export interface McpSettings { enabled: boolean; log_calls: boolean; rate_limit_per_min: number; compare_wait_s: number; public_url: string }
+export interface McpSettings { enabled: boolean; log_calls: boolean; rate_limit_per_min: number; compare_wait_s: number; public_url: string; library_search: boolean }
 export interface McpCall { ts: number; tool: string; args: string; ms: number; outcome: "ok" | "miss" | "error"; ip: string; error?: string }
 export interface McpToolStats { tool: string; calls: number; errors: number; misses: number; slow: number; avg_ms: number; max_ms: number; last?: number }
 export interface McpClient { ip: string; first_seen: number; last_seen?: number; requests: number; calls: number; limited: number; active: boolean }
 export interface McpStatus {
   settings: McpSettings; url: string; running: boolean; index_job: number | null; comparisons_by_mcp: number;
   documents: { family: string; version: string; run_id: number; index: "current" | "outdated" | "missing"; entries: number; built: string | null; seconds: number | null }[];
+  library: { filename: string; dir: string; index: "current" | "outdated" | "missing"; entries: number; built: string | null; seconds: number | null }[];
   usage: { since: number; client_count: number; active_clients: number; calls: number; errors: number; misses: number; rate_limited: number; refused_disabled: number; tools: McpToolStats[];
     clients: McpClient[]; recent: McpCall[]; recent_misses: McpCall[]; recent_slow: McpCall[]; recent_errors: McpCall[] };
 }

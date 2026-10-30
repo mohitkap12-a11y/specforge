@@ -23,7 +23,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "mi_layout": {},  # overrides for the NVMe-MI header layout, see cmddb.MI_DEFAULT_LAYOUT
     # the MCP endpoint (/mcp) for coding agents: on/off, requests per minute per address (0: no limit), how long a tool waits for a
     # version comparison it started, one Activity-log line per call, and the URL agents use (empty: the address the UI is reached at)
-    "mcp": {"enabled": True, "rate_limit_per_min": 120, "compare_wait_s": 60, "log_calls": True, "public_url": ""},
+    "mcp": {"enabled": True, "rate_limit_per_min": 120, "compare_wait_s": 60, "log_calls": True, "public_url": "",
+            "library_search": True},
 }
 
 

@@ -194,6 +194,143 @@ def test_read_raw_serves_converted_files_by_name(lib, conn, ws):
         lib.raw("frobnicator manual")
 
 
+LIB_MD = """---
+title: "ECN 123: New Feature"
+source: "nvme-ecn-123.pdf"
+engine: builtin
+---
+
+###### Table of Contents
+
+5.2.14 Identify command ........ 12
+
+### 5.2.14 Identify command
+
+The Identify command returns a data buffer.
+
+**5.2.14.2.1**
+
+**Identify Controller Data Structure (CNS 01h)**
+
+The Identify Controller data structure is returned to the host.
+
+**Figure 338: Identify – Identify Controller Data Structure**
+
+| Bytes |  | Description |
+| --- | --- | --- |
+|  |  | 1 |
+| 77 |  | Maximum Data Transfer Size (MDTS): the largest transfer in units of CAP.MPSMIN. |
+
+**Figure 338: Identify – Identify Controller Data Structure**
+
+| Bytes |  | Description |
+| --- | --- | --- |
+| 79:78 |  | Controller ID (CNTLID): the NVM subsystem unique controller identifier. |
+
+### 5.2.15 Keep Alive command
+
+The Keep Alive command restarts the Keep Alive Timer when the keep alive timeout expires.
+"""
+
+
+def test_converted_documents_are_searched_and_opened_by_section_or_lines(lib, conn, ws):
+    """A converted-only document is indexed from its Markdown: section text, tables (continuations stitched) and rows, each hit
+    naming the read_raw call that opens it; deleting the conversion drops its entries."""
+    import json
+
+    from specforge.specquery import library_entries
+
+    folder = ws / "conversions" / "c9"
+    folder.mkdir(parents=True)
+    (folder / "out.md").write_text(LIB_MD, encoding="utf-8")
+    conn.execute("INSERT INTO job(type,state,payload_json,result_json) VALUES('convert-markdown','done',?,?)",
+                 (json.dumps({"filename": "nvme-ecn-123.pdf", "sha256": "e123"}), json.dumps({"dir": "c9"})))
+    conn.commit()
+
+    e = library_entries(LIB_MD, "lib:c9", "nvme-ecn-123.pdf")
+    tables = [x for x in e if x[5] == "table"]
+    assert len(tables) == 1 and tables[0][0] == "Figure 338" and tables[0][4].startswith("lib:c9|5.2.14.2.1|T")
+    rows_ = [x[2] for x in e if x[5] == "row"]
+    assert rows_ == ["77 | Maximum Data Transfer Size (MDTS): the largest transfer in units of CAP.MPSMIN.",
+                     "79:78 | Controller ID (CNTLID): the NVM subsystem unique controller identifier."]   # no spacer, no repeated header
+    assert not any("........" in x[2] for x in e)                                                        # no table of contents
+
+    md, n = lib.search("maximum data transfer size")
+    assert n >= 1 and "nvme-ecn-123.pdf (converted, not parsed), §5.2.14.2.1" in md and "Figure 338" in md
+    line = LIB_MD.splitlines().index("| 77 |  | Maximum Data Transfer Size (MDTS): the largest transfer in units of CAP.MPSMIN. |") + 1
+    assert f"line {line}" in md and f'lines="{line}"' in md
+    md, _ = lib.search("keep alive timeout expires", spec="ecn-123")
+    assert md.splitlines()[2].startswith("Searched: nvme-ecn-123.pdf")
+    ka = LIB_MD.splitlines().index("The Keep Alive command restarts the Keep Alive Timer when the keep alive timeout expires.") + 1
+    assert '§5.2.15 Keep Alive command' in md and f'read_raw(spec="nvme-ecn-123.pdf", lines="{ka}-{ka}")' in md   # just that piece
+
+    sec = lib.raw("nvme-ecn-123.pdf", section="5.2.14.2.1")
+    assert sec.startswith("# nvme-ecn-123.pdf — §5.2.14.2.1 Identify Controller Data Structure (CNS 01h), lines")
+    assert "CNTLID" in sec and "Keep Alive" not in sec
+    assert "CNTLID" in lib.raw("ecn-123", section="Identify command") and "Keep Alive" not in lib.raw("ecn-123", section="5.2.14")
+    assert "Keep Alive Timer" in lib.raw("ecn-123", section="keep alive command")
+    assert lib.raw("ecn-123", lines=f"{line}-{line}").endswith("CAP.MPSMIN. |")
+    with pytest.raises(NotFound, match="no section"):
+        lib.raw("ecn-123", section="9.9")
+    with pytest.raises(QueryError, match="reversed"):
+        lib.raw("ecn-123", lines="40-30")
+    with pytest.raises(NotFound, match="is not one of them"):
+        lib.raw("ecn-123", lines="9999")
+    with pytest.raises(QueryError, match="not both"):
+        lib.raw("ecn-123", section="5.2.15", lines="3")
+    inside = lib.raw("ecn-123", section="5.2.14.2.1", around="CNTLID", context=5)       # around within the section only
+    assert "in §5.2.14.2.1" in inside and "CNTLID" in inside
+    with pytest.raises(NotFound, match="5.2.15"):
+        lib.raw("ecn-123", section="5.2.15", around="CNTLID")
+
+    # a spec's own names stay the spec, even when a converted file's name contains them
+    conn.execute("INSERT INTO job(type,state,payload_json,result_json) VALUES('convert-markdown','done',?,?)",
+                 (json.dumps({"filename": "nvme-base-ecn-042.pdf", "sha256": "e042"}), json.dumps({"dir": "c9"})))
+    conn.commit()
+    searched = next(ln for ln in lib.search("Identify", spec="base")[0].splitlines() if ln.startswith("Searched:"))
+    assert searched.startswith("Searched: nvme-base 2.4") and "ecn" not in searched
+    assert lib.search("Identify", spec="base-ecn")[0].count("nvme-base-ecn-042.pdf (converted") >= 1
+    md, _ = lib.search("Identify", version="2.3")                                         # a version: converted docs not claimed
+    assert "every converted document" not in md and "converted documents have no version" in md
+
+    lib.library_search = False                       # the admin switch: not searched, still indexed and readable
+    md, _ = lib.search("maximum data transfer size")
+    assert "nvme-ecn-123.pdf" not in md and "converted documents are not searched" in md
+    with pytest.raises(QueryError, match="turned off"):
+        lib.search("keep alive", spec="ecn-123")
+    assert "Keep Alive Timer" in lib.raw("ecn-123", section="5.2.15")
+    assert lib.lib_index_state()["c9"]["entries"] == len(e)
+    lib.library_search = True
+
+    conn.execute("DELETE FROM job WHERE type='convert-markdown'")
+    conn.commit()
+    assert lib.prune_lib_index() == 1
+    assert conn.execute("SELECT COUNT(*) FROM mcp_fts WHERE run_id='lib:c9'").fetchone()[0] == 0
+
+
+def test_converted_document_entries_split_tables_keep_their_kind_and_keys_round_trip():
+    from specforge.specquery import LIB_PIECE, library_entries, lib_key, parse_lib_key
+
+    md = "\n".join([
+        "### 3.1 Opcodes", "", "**Table 7: Opcodes**", "", "| Op | Name |", "| --- | --- |", "| 01h | Read |", "",
+        "Some text between.", "", "| Field | Meaning |", "| --- | --- |", "| A | first |", "",
+        "Another paragraph.", "", "| Bits | Use |", "| --- | --- |", "| 0 | second |", "",
+        "### 3.2 Blob", "", "x" * (LIB_PIECE * 3)])
+    e = library_entries(md, "lib:d", "doc.pdf")
+    tabs = [x for x in e if x[5] == "table"]
+    assert [t[0] for t in tabs] == ["Table 7", "", ""] and tabs[0][1] == "Opcodes"     # "Table", not "Figure"; 3 tables, not 1
+    assert [parse_lib_key(t[4])["hi"] for t in tabs] == [7, 13, 19]                       # each spans only its own lines
+    blob = [x for x in e if x[5] == "section" and x[0] == "3.2"]
+    assert len(blob[0][2]) == LIB_PIECE and max(len(x[2]) for x in blob) <= LIB_PIECE * 2             # a run with no space is still cut
+    cut = "\n".join(["### 5 S", "", "**Figure 9: Data**", "", "| B | D |", "| --- | --- |", "| 0 | a |", "", "**LPA:** text of a field",
+                     "", "| Bits | D |", "| --- | --- |", "| 1 | b |", "", "**Figure 9: Data**", "", "| B | D |", "| --- | --- |", "| 2 | c |"])
+    tabs = [x for x in library_entries(cut, "lib:d", "d.pdf") if x[5] == "table"]
+    assert len(tabs) == 1 and tabs[0][2].splitlines()[1:] == ["0 | a", "Bits | D", "1 | b", "2 | c"]   # all inside Figure 9
+    k = lib_key("lib:d", "5.2", "T", 10, 20, 15)
+    assert parse_lib_key(k) == {"rid": "lib:d", "sec": "5.2", "kind": "T", "lo": 10, "hi": 20, "row": 15}
+    assert parse_lib_key("lib:d|doc") is None
+
+
 def test_usage_figures_reset_and_forget_idle_clients(monkeypatch):
     from specforge import mcp_server
 
@@ -295,6 +432,9 @@ def test_admin_switch_rate_limit_and_public_url(ws):
         assert c.put("/api/mcp/settings", json={"nope": 1}).status_code == 422
         c.put("/api/mcp/settings", json={"public_url": "http://specforge.lab:8000/"})
         assert c.get("/api/mcp/info").json()["url"] == "http://specforge.lab:8000/mcp"
+        assert c.get("/api/mcp/status").json()["settings"]["library_search"] is True     # on by default
+        assert c.put("/api/mcp/settings", json={"library_search": "no"}).status_code == 422
+        assert c.put("/api/mcp/settings", json={"library_search": False}).json()["library_search"] is False
 
 
 def test_without_sign_in_only_localhost_requests_are_answered(ws):
