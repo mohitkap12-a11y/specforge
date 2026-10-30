@@ -57,7 +57,7 @@ export const api = {
   toMarkdownJob: (file: File, frontMatter = true, engine?: ConvertEngine) => { const f = new FormData(); f.append("file", file); return req<{ job: number; reused?: boolean; joined?: string }>("POST", `/api/convert/markdown/jobs${qs({ front_matter: frontMatter ? undefined : "false", engine })}`, f); },
   markdownResult: (job: number) => req<MarkdownConversion>("GET", `/api/convert/markdown/jobs/${job}`),
   conversions: () => req<ConversionEntry[]>("GET", "/api/convert/markdown/jobs"),
-  removeConversion: (job: number) => req("DELETE", `/api/convert/markdown/jobs/${job}`),
+  removeConversion: (job: number) => req<{ ok: boolean; handed_to?: string; left?: boolean }>("DELETE", `/api/convert/markdown/jobs/${job}`),
   conversionSourceUrl: (job: number) => `/api/convert/markdown/jobs/${job}/source`,
   compareOptions: () => req<CompareOption[]>("GET", "/api/compare/options"),
   compare: (from_run: number, to_run: number) => req<Comparison>("POST", "/api/compare", { from_run, to_run }),
@@ -145,7 +145,8 @@ export const api = {
   activeJobs: () => req<Job[]>("GET", "/api/jobs?state=active"),
   jobs: () => req<Job[]>("GET", "/api/jobs"),
   job: (id: number) => req<Job>("GET", `/api/jobs/${id}`),
-  cancelJob: (id: number) => req("POST", `/api/jobs/${id}/cancel`),
+  /** handed_to: the owner cancelled a job others had asked for too; it goes on, owned by the first of them. */
+  cancelJob: (id: number) => req<{ ok: boolean; handed_to?: string }>("POST", `/api/jobs/${id}/cancel`),
 };
 export const fileUrl = (docId: number) => `/api/documents/${docId}/file`;
 

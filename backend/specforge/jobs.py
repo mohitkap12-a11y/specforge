@@ -134,24 +134,40 @@ def cancel_requested(job_id: int, db_file: str) -> bool:
     return bool(e and e.is_set())
 
 
-def _overlay(j: dict | None, conn) -> dict | None:
+def _overlay(j: dict | None, conn, lines: dict[str, list[dict]] | None = None) -> dict | None:
+    """The job row with the live progress of a running job and, for a queued one, its place in line. `lines` (from
+    _lines) lets a list of jobs share one query instead of one per queued job."""
     if j and j["state"] == "running":
         with _plock:
             p = _progress.get((db_file_of(conn), j["id"]))
         if p:
             j["message"], j["progress"], j["total"] = p
     if j:
-        j.update(position(conn, j))
+        if lines is None:
+            lines = _lines(conn, j["queue"]) if j["state"] == "queued" and j.get("queue") else {}
+        j.update(_position(j, lines))
     return j
 
 
-def position(conn, j: dict) -> dict:
-    """Where a queued job stands in its line: {"ahead": jobs that run before it, "ahead_of": the one running now}.
-    Its executor starts jobs in the order they were queued, which is id order."""
+def _lines(conn, queue: str | None = None) -> dict[str, list[dict]]:
+    """Queued and running jobs per queue, in the order their executor starts them (id order). A job whose cancel is
+    pending has given up its place: it is skipped when it reaches the worker."""
+    db = db_file_of(conn)
+    sql = "SELECT id, state, label, type, user, queue FROM job WHERE state IN ('queued','running') AND queue IS NOT NULL"
+    found = rows(conn, sql + (" AND queue=?" if queue else "") + " ORDER BY id", (queue,) if queue else ())
+    with _plock:
+        live = [j for j in found if j["state"] == "running" or not ((e := _cancel.get((db, j["id"]))) and e.is_set())]
+    out: dict[str, list[dict]] = {}
+    for j in live:
+        out.setdefault(j["queue"], []).append(j)
+    return out
+
+
+def _position(j: dict, lines: dict[str, list[dict]]) -> dict:
+    """Where a queued job stands in its line: {"ahead": jobs that run before it, "ahead_of": the one running now}."""
     if j.get("state") != "queued" or not j.get("queue"):
         return {"ahead": 0, "ahead_of": None}
-    before = rows(conn, "SELECT id, state, label, type, user FROM job WHERE queue=? AND state IN ('queued','running') AND id<? "
-                        "ORDER BY state='running' DESC, id", (j["queue"], j["id"]))
+    before = [b for b in lines.get(j["queue"], []) if b["id"] < j["id"]]
     run = next((b for b in before if b["state"] == "running"), None)
     return {"ahead": len(before), "ahead_of": {"label": run["label"] or run["type"], "user": run["user"]} if run else None}
 
@@ -161,17 +177,23 @@ def with_progress(j: dict | None, conn) -> dict | None:
     return _overlay(j, conn)
 
 
+def with_progress_all(found: list[dict], conn) -> list[dict]:
+    """with_progress for a list of job rows, reading the queues once."""
+    lines = _lines(conn) if any(j["state"] == "queued" and j.get("queue") for j in found) else {}
+    return [_overlay(j, conn, lines) for j in found]
+
+
 def get(conn, job_id: int) -> dict | None:
     return _overlay(row(conn, "SELECT * FROM job WHERE id=?", (job_id,)), conn)
 
 
 def recent(conn, limit: int = 50) -> list[dict]:
-    return [_overlay(x, conn) for x in rows(conn, "SELECT * FROM job ORDER BY id DESC LIMIT ?", (limit,))]
+    return with_progress_all(rows(conn, "SELECT * FROM job ORDER BY id DESC LIMIT ?", (limit,)), conn)
 
 
 def active(conn) -> list[dict]:
     """Every queued or running job (not limited like recent())."""
-    return [_overlay(x, conn) for x in rows(conn, "SELECT * FROM job WHERE state IN ('queued','running') ORDER BY id DESC")]
+    return with_progress_all(rows(conn, "SELECT * FROM job WHERE state IN ('queued','running') ORDER BY id DESC"), conn)
 
 
 def recover_interrupted(conn, resumable: Iterable[str] = ()) -> tuple[int, list[dict]]:

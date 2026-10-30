@@ -5,6 +5,7 @@ import { api } from "../api";
 import { useAuth } from "./auth";
 import { isActive, queueText, useJobs, type TrackedJob } from "./jobs";
 import { Badge } from "./ui";
+import { useToast } from "./Toasts";
 
 const elapsed = (since: number) => {
   const s = Math.max(0, Math.round((Date.now() - since) / 1000));
@@ -15,6 +16,7 @@ const elapsed = (since: number) => {
  *  and those that finished since the page was opened. Replaces the stack of floating progress cards. */
 export function Bell() {
   const { jobs, clearFinished } = useJobs();
+  const { push } = useToast();
   const { user, isAdmin, me } = useAuth();
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLDivElement>(null);
@@ -35,6 +37,9 @@ export function Bell() {
     return () => { document.removeEventListener("mousedown", away); document.removeEventListener("keydown", esc); if (h) clearInterval(h); };
   }, [open, active.length]);
 
+  const cancel = (j: TrackedJob) => api.cancelJob(j.id).then(
+    (r) => { if (r.handed_to) push({ title: `${j.label}: handed to ${r.handed_to}`, description: `${r.handed_to} asked for the same, so it keeps its place in the queue for them; it is no longer yours.`, tone: "info" }); },
+    (e) => push({ title: "Cancel failed", description: e instanceof Error ? e.message : String(e), tone: "bad" }));
   const whose = (j: TrackedJob) => (me.auth && j.user && j.user !== user.username ? ` · ${j.user}` : "");
   const item = (j: TrackedJob) => (
     <li key={j.id} className="bell-item">
@@ -51,7 +56,7 @@ export function Bell() {
       <div className="row small">
         <Link to={`/activity?job=${j.id}`} onClick={() => setOpen(false)}>View logs</Link>
         <span className="grow" />
-        {isActive(j) && j.can_cancel && <button className="sm danger" onClick={() => api.cancelJob(j.id).catch(() => {})}>Cancel</button>}
+        {isActive(j) && j.can_cancel && <button className="sm danger" onClick={() => cancel(j)}>Cancel</button>}
       </div>
     </li>
   );

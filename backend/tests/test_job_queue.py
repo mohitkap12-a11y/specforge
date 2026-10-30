@@ -39,9 +39,16 @@ def test_a_queued_job_knows_its_place_in_line(conn):
     assert jobs.get(conn, other)["ahead"] == 0                    # another line: nothing ahead of it there
     jobs.cancel(second, db)
     assert jobs.get(conn, third)["ahead"] == 1                    # a cancelled job no longer holds a place
+    fourth = jobs.submit(conn, "parse", lambda c, p: None, db_file=db, pool=pool, queue="q", label="Parse D")
+    conn.execute("UPDATE job SET state='queued' WHERE id=?", (second,))   # a cancel still pending: the row is not flipped yet
+    conn.commit()
+    with jobs._plock:
+        jobs._cancel[(db, second)] = threading.Event()
+        jobs._cancel[(db, second)].set()
+    assert jobs.get(conn, fourth)["ahead"] == 2 and [j["ahead"] for j in jobs.active(conn) if j["id"] == fourth] == [2]
     release.set()
-    _until(lambda: jobs.get(conn, third)["state"] == "done")
-    assert jobs.get(conn, second)["state"] == "cancelled"
+    _until(lambda: jobs.get(conn, fourth)["state"] == "done")
+    assert jobs.get(conn, second)["state"] in ("cancelled", "queued")
 
 
 def test_restart_keeps_conversions_and_parses_queued_in_their_order(conn):
@@ -73,7 +80,7 @@ def test_a_conversion_and_a_parse_queued_before_a_restart_run_after_it(stub, pdf
     lost = c.execute("INSERT INTO job(type,state,payload_json) VALUES('convert-markdown','queued',?)",       # queued by an older version
                      (json.dumps({"filename": "Old.pdf", "dir": "gone"}),)).lastrowid
     doc = store.register_document(c, real_pdf, filename=real_pdf.name)
-    parse = c.execute("INSERT INTO job(type,state,payload_json,user) VALUES('parse','queued',?,'bob')",
+    parse = c.execute("INSERT INTO job(type,state,payload_json,user,queue) VALUES('parse','queued',?,'bob','docling')",
                       (json.dumps({"document_id": doc["id"], "engine": "auto"}),)).lastrowid
     c.commit()
     with TestClient(create_app()) as client:
@@ -84,6 +91,12 @@ def test_a_conversion_and_a_parse_queued_before_a_restart_run_after_it(stub, pdf
         assert client.get("/api/specs").json()[0]["runs"][0]["status"] == "done"
         old = client.get(f"/api/jobs/{lost}").json()
         assert old["state"] == "failed" and "not resumed" in old["error"]
+        assert client.get(f"/api/jobs/{parse}").json()["queue"] is None     # needs no conversion: not counted in that queue
+        from specforge import eventlog
+        eventlog.drain(2.0)
+        said = [r[0] for r in c.execute("SELECT message FROM event_log WHERE source='system'")]
+        assert "1 job(s) were interrupted by the previous shutdown and marked failed" in said
+        assert "2 queued conversion(s) and parse(s) resumed after the restart, in their old order" in said
 
 
 def test_parses_that_need_docling_wait_in_the_conversion_queue_and_others_do_not(docling_stub, real_pdf, ws):  # noqa: F811
@@ -99,12 +112,16 @@ def test_parses_that_need_docling_wait_in_the_conversion_queue_and_others_do_not
         assert again == {"job": first["job"], "joined": "local"}        # asking again follows the job already queued
         j = client.get(f"/api/jobs/{first['job']}").json()
         assert (j["state"], j["queue"], j["label"], j["mine"], j["can_cancel"]) == ("queued", "docling", "Parse nvme-base 2.4", True, True)
+        activating = client.post(f"/api/specs/{doc['id']}/parse?engine=docling&activate=true").json()
+        assert "joined" not in activating and activating["job"] != first["job"]    # would not activate if it joined the first
+        assert client.post(f"/api/specs/{doc['id']}/parse?engine=docling&activate=true").json() == {"job": activating["job"], "joined": "local"}
         quick = client.post(f"/api/specs/{doc['id']}/parse?engine=builtin").json()["job"]   # no conversion needed: not queued behind it
         assert _wait(client, quick)["state"] == "done"
         assert client.get(f"/api/jobs/{first['job']}").json()["state"] == "queued" and docling_stub == []
         release.set()
         busy.result(5)
         assert _wait(client, first["job"])["state"] == "done" and len(docling_stub) == 1
+        assert _wait(client, activating["job"])["state"] == "done" and len(docling_stub) == 1   # converted once
 
 
 @pytest.fixture()
@@ -147,10 +164,31 @@ def test_users_follow_their_own_jobs_join_the_same_file_and_cancel_only_their_ow
         assert "Base.pdf" in [e["source"] for e in bob.get("/api/convert/markdown/jobs").json()]
 
         assert bob.post(f"/api/jobs/{spec}/cancel").status_code == 403
-        assert ann.post(f"/api/jobs/{own}/cancel").status_code == 403
+        assert ann.post(f"/api/jobs/{own}/cancel").status_code == 404                   # not hers to see
+        assert ann.get(f"/api/jobs/{own}").status_code == 404 and ann.get(f"/api/jobs/{own}/events").status_code == 404
+        assert root.get(f"/api/jobs/{own}").status_code == 200
+
+        # ann drops the conversion bob joined: it goes on for bob instead of being cancelled
+        assert ann.post(f"/api/jobs/{spec}/cancel").json() == {"ok": True, "handed_to": "bob"}
+        j = bob.get(f"/api/jobs/{spec}").json()
+        assert (j["state"], j["user"], j["can_cancel"]) == ("running", "bob", True) and ann.get(f"/api/jobs/{spec}").status_code == 404
+
+        # a third file both ask for: ann joins bob's queued request, then stops following it; bob's stays
+        third = _post(bob, pdf_file, "Third.pdf")
+        data3 = pdf_file.read_bytes() + b"\n%Third.pdf"
+        assert ann.post("/api/convert/markdown/jobs", files={"file": ("t.pdf", io.BytesIO(data3))}).json()["joined"] == "bob"
+        assert next(e for e in ann.get("/api/convert/markdown/jobs").json() if e["job"] == third)["can_remove"] is True
+        assert ann.delete(f"/api/convert/markdown/jobs/{third}").json() == {"ok": True, "left": True}
+        assert third not in [e["job"] for e in ann.get("/api/convert/markdown/jobs").json()]
+        assert bob.get(f"/api/jobs/{third}").json()["state"] == "queued"
+        # bob removes it after ann joined again: handed to her
+        ann.post("/api/convert/markdown/jobs", files={"file": ("t.pdf", io.BytesIO(data3))})
+        assert bob.delete(f"/api/convert/markdown/jobs/{third}").json() == {"ok": True, "handed_to": "ann"}
+
         assert root.post(f"/api/jobs/{own}/cancel").status_code == 200
         gate.gate.set()
         assert _wait(bob, spec)["state"] == "done" and _wait(bob, own)["state"] == "cancelled"
+        assert _wait(ann, third)["state"] == "done"
         assert bob.get("/api/reset").status_code == 403 and bob.post("/api/reset", json={"scope": "comparisons"}).status_code == 403
     finally:
         gate.gate.set()
@@ -177,6 +215,8 @@ def test_reset_one_area_at_a_time(ws, demo_dir):
         (library / "out.md").write_text("# kept")
 
         assert client.get("/api/reset?scope=nope").status_code == 400
+        assert client.post("/api/reset", json={"scope": []}).status_code == 400
+        assert client.post("/api/reset", json=["all"]).status_code == 422
         assert client.get("/api/reset?scope=coverage").json()["counts"] == {"command_dbs": 1, "executed_scenarios": 0, "coverage_runs": 0}
         assert client.get("/api/reset?scope=specs").json()["counts"]["comparisons"] == 1
 
@@ -198,5 +238,6 @@ def test_reset_one_area_at_a_time(ws, demo_dir):
         assert client.get("/api/specs").json() == [] and client.get("/api/sets").json() == []
         assert (library / "out.md").is_file()                                            # the To Markdown library is kept
 
-        assert client.post("/api/reset", json={"scope": "all"}).status_code == 200
+        r = client.post("/api/reset", json={"scope": None})                  # null means everything, said as such
+        assert r.status_code == 200 and r.json()["scope"] == "all"
         assert not library.exists()

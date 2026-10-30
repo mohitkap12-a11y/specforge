@@ -21,6 +21,7 @@ export interface Job {
   queue?: string | null;          // the first-come-first-served line it waits in ("docling")
   ahead?: number;                 // queued: jobs that run before it in that line
   ahead_of?: { label: string; user: string | null } | null;   // queued: the one running there now
+  payload?: Record<string, any>;  // what it works on (compare_id, set_id, document_id, filename, ...)
 }
 export interface TreeNode { key: string; number: string | null; title: string; parent_key: string | null; page_from: number | null; page_to: number | null }
 export interface SectionData {

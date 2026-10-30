@@ -113,7 +113,7 @@ function Summary({ comp }: { comp: Comparison }) {
       track(r.job, `AI summary of comparison #${comp.id}`, () => { setWaiting(false); qc.invalidateQueries({ queryKey: ["comparison", comp.id] }); });
     },
   });
-  const writing = waiting || run.isPending || jobs.some((j) => j.type === "compare-summary" && isActive(j));   // also covers a job started before a page reload
+  const writing = waiting || run.isPending || jobs.some((j) => j.type === "compare-summary" && isActive(j) && j.payload?.compare_id === comp.id);   // also covers a job started before a page reload
   const ai = comp.ai;
   return (
     <div className="card">

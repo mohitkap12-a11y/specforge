@@ -168,25 +168,48 @@ def create_app() -> FastAPI:
     def job_owner(j: dict) -> str | None:
         return j.get("user") or jloads(j.get("payload_json"), {}).get("user")   # conversions recorded their owner before jobs had one
 
-    def watches(j: dict) -> bool:
+    def watched_ids() -> set[int]:
+        """Jobs the signed-in user joined (asked for while someone else's identical request was queued or running)."""
+        return {r[0] for r in conn().execute("SELECT job_id FROM job_watcher WHERE user=?", (me()["username"],))}
+
+    def watches(j: dict, watched: set[int] | None = None) -> bool:
         """The signed-in user asked for this job: they started it, or joined it when they asked for the same work."""
-        u = me()["username"]
-        return job_owner(j) == u or row(conn(), "SELECT 1 AS x FROM job_watcher WHERE job_id=? AND user=?", (j["id"], u)) is not None
+        return job_owner(j) == me()["username"] or j["id"] in (watched if watched is not None else watched_ids())
+
+    def visible(j: dict, watched: set[int] | None = None) -> bool:
+        return me()["role"] == "admin" or watches(j, watched)
 
     def watch(job_id: int) -> None:
         conn().execute("INSERT OR IGNORE INTO job_watcher(job_id, user) VALUES(?, ?)", (job_id, me()["username"]))
         conn().commit()
 
+    def hand_over(j: dict) -> str | None:
+        """The owner drops a queued or running job that others joined: the job stays, in its place in line, and the
+        user who joined it first owns it now (their request did not queue a job of its own). Returns that user."""
+        nxt = row(conn(), "SELECT user FROM job_watcher WHERE job_id=? AND user<>? ORDER BY rowid LIMIT 1", (j["id"], job_owner(j) or ""))
+        if not nxt:
+            return None
+        c = conn()
+        c.execute("DELETE FROM job_watcher WHERE job_id=? AND user=?", (j["id"], nxt["user"]))
+        c.execute("UPDATE job SET user=?, payload_json=json_set(payload_json, '$.user', ?) WHERE id=?", (nxt["user"], nxt["user"], j["id"]))
+        c.commit()
+        audit(f"Job #{j['id']} ({j['label'] or j['type']}) dropped by {job_owner(j)}; {nxt['user']}, who asked for the same, owns it now",
+              job_id=j["id"], new_owner=nxt["user"])
+        return nxt["user"]
+
     def may_cancel(j: dict) -> bool:
         return me()["role"] == "admin" or (job_owner(j) is not None and job_owner(j) == me()["username"])
 
-    def job_json(j: dict) -> dict:
-        j = {**j, "user": job_owner(j), "mine": watches(j), "can_cancel": may_cancel(j)}
+    def job_json(j: dict, watched: set[int] | None = None) -> dict:
+        payload = jloads(j.get("payload_json"), {}) or {}
+        j = {**j, "user": job_owner(j), "mine": watches(j, watched), "can_cancel": may_cancel(j),
+             "payload": {k: v for k, v in payload.items() if k not in ("dir", "upload", "sha256")}}   # what it is about (set, comparison, spec)
         j.pop("payload_json", None)
         return j
 
-    def resume(j: dict) -> None:
-        """Schedule a conversion or parse that was waiting (or running) when the server stopped, in its old place in line."""
+    def resume(j: dict) -> bool:
+        """Schedule a conversion or parse that was waiting (or running) when the server stopped, in its old place in line.
+        False (and the job marked failed) when it cannot run any more."""
         p = jloads(j["payload_json"], {})
         try:
             if p.get("hidden"):
@@ -196,30 +219,33 @@ def create_app() -> FastAPI:
                 upload = folder / p["upload"] if folder and p.get("upload") else None
                 if upload is None or not upload.is_file():
                     raise LookupError("its uploaded file is gone (it was queued before queued jobs survived a restart)")
-                work = _convert_work(p["filename"], folder, str(upload), p.get("front_matter", True), p.get("engine"), j["user"] or p.get("user"))
-                jobs.schedule(j["id"], j["type"], work, DB, convert.serial_pool())
+                work, pool = _convert_work(p["filename"], folder, str(upload), p.get("front_matter", True), p.get("engine"), j["user"] or p.get("user")), convert.serial_pool()
             else:
                 d = row(conn(), "SELECT * FROM spec_document WHERE id=?", (p.get("document_id"),))
                 if d is None:
                     raise LookupError("its spec was deleted")
                 work, pool = _parse_work(d, p.get("activate"), None if p.get("engine") in (None, "auto") else p["engine"], j["user"], None)
-                jobs.schedule(j["id"], j["type"], work, DB, pool)
         except (LookupError, KeyError) as e:
             conn().execute("UPDATE job SET state='failed', error=?, updated=CURRENT_TIMESTAMP WHERE id=?",
                            (f"interrupted by restart and not resumed: {e}", j["id"]))
             conn().commit()
+            return False
+        # a parse whose file was converted meanwhile no longer waits in the conversion queue: say so, or it counts as ahead of others
+        conn().execute("UPDATE job SET queue=? WHERE id=?", (convert.QUEUE if pool is not None else None, j["id"]))
+        conn().commit()
+        jobs.schedule(j["id"], j["type"], work, DB, pool)
+        return True
 
     @app.on_event("startup")
     def _startup():
         n, again = jobs.recover_interrupted(conn(), resumable=("convert-markdown", "parse"))
         eventlog.configure(settings())
         eventlog.emit("info", "system", f"SpecForge {__version__} started", workspace=str(config.workspace_dir()), parser_version=config.PARSER_VERSION)
-        if n:
-            eventlog.emit("warn", "system", f"{n} job(s) were interrupted by the previous shutdown and marked failed")
-        for j in again:
-            resume(j)
-        if again:
-            eventlog.emit("info", "system", f"{len(again)} queued conversion(s) and parse(s) resumed after the restart, in their old order")
+        resumed = sum(resume(j) for j in again)
+        if failed := n + len(again) - resumed:
+            eventlog.emit("warn", "system", f"{failed} job(s) were interrupted by the previous shutdown and marked failed")
+        if resumed:
+            eventlog.emit("info", "system", f"{resumed} queued conversion(s) and parse(s) resumed after the restart, in their old order")
         if AUTH and not auth.count_admins(conn()):
             eventlog.emit("warn", "system", "Sign-in is on but there is no admin account yet: run `specforge user create <name> --admin` on the server")
         elif not AUTH:
@@ -412,10 +438,12 @@ def create_app() -> FastAPI:
                     "jobs": n("SELECT COUNT(*) FROM job"), "log_events": n("SELECT COUNT(*) FROM event_log")}
         return out
 
-    def _reset_scope(scope: str | None) -> dict:
-        if (spec := RESET_SCOPES.get(scope or "all")) is None:
-            raise HTTPException(400, f"Unknown reset '{scope}'; use one of: {', '.join(RESET_SCOPES)}.")
-        return spec
+    def _reset_scope(scope: Any) -> tuple[str, dict]:
+        """(scope, what it deletes); a missing or null scope is 'all', anything that is not a known name is a 400."""
+        scope = "all" if scope is None else scope
+        if not isinstance(scope, str) or scope not in RESET_SCOPES:
+            raise HTTPException(400, f"Unknown reset {json.dumps(scope)}; use one of: {', '.join(RESET_SCOPES)}.")
+        return scope, RESET_SCOPES[scope]
 
     def _reset_blockers(spec: dict) -> list[dict]:
         return [j for j in jobs.active(conn()) if spec["blocked_by"] is None or j["type"] in spec["blocked_by"]]
@@ -423,7 +451,7 @@ def create_app() -> FastAPI:
     @app.get("/api/reset")
     def reset_preview(scope: str = Query("all")):
         """What POST /api/reset with this scope would delete, and the running jobs that stop it for now."""
-        spec = _reset_scope(scope)
+        scope, spec = _reset_scope(scope)
         return {"scope": scope, "counts": _reset_counts(scope),
                 "blocked_by": [{"id": j["id"], "label": j["label"] or j["type"], "user": j["user"]} for j in _reset_blockers(spec)]}
 
@@ -432,8 +460,9 @@ def create_app() -> FastAPI:
         """Wipe what one area produced: scope 'comparisons', 'coverage' (what came from test executions), 'specs' (and
         everything built on them) or 'all' (the default: also command DBs, the To Markdown library, jobs, the log and the AI
         cache). Settings and user accounts are always kept. Refused while a job of that area is queued or running."""
-        scope = (body or {}).get("scope", "all") if isinstance(body, dict) else "all"
-        spec = _reset_scope(scope)
+        if body is not None and not isinstance(body, dict):
+            raise HTTPException(422, 'the body is {"scope": "comparisons" | "coverage" | "specs" | "all"}')
+        scope, spec = _reset_scope((body or {}).get("scope"))
         if busy := _reset_blockers(spec):
             raise HTTPException(409, f"{len(busy)} job(s) of this area are still queued or running ("
                                      + ", ".join(j["label"] or j["type"] for j in busy[:3])
@@ -620,21 +649,18 @@ def create_app() -> FastAPI:
             return {**_conversion_json(name, res), "dir": folder.name}
         return work
 
-    def _owns(j: dict) -> bool:
-        return me()["role"] == "admin" or watches(j)
-
-    def _may_remove(j: dict, payload: dict) -> bool:
-        """A finished file in the shared library only an admin deletes; its owner may still cancel or dismiss one that is not finished."""
-        return me()["role"] == "admin" or (j["state"] != "done" and payload.get("user") == me()["username"])
+    def _may_remove(j: dict, watched: set[int] | None = None) -> bool:
+        """A finished file in the shared library only an admin deletes; one that is not finished its owner may cancel or
+        dismiss, and a user who joined it may stop following it (see convert_markdown_remove)."""
+        return me()["role"] == "admin" or (j["state"] != "done" and watches(j, watched))
 
     def _source_file(res: dict) -> Path | None:
         """The uploaded original kept beside the Markdown (conversions made before it was kept have none)."""
         d = _conversion_dir(res.get("dir"))
         return next((f for f in d.glob("source.*") if f.is_file()), None) if d else None
 
-    def _conversion_entry(j: dict) -> dict | None:
-        """A conversion job as the To Markdown page lists it; None if its file is gone."""
-        j = jobs.with_progress(j, conn())
+    def _conversion_entry(j: dict, watched: set[int]) -> dict | None:
+        """A conversion job (with its live progress filled in) as the To Markdown page lists it; None if its file is gone."""
         payload = jloads(j["payload_json"], {})
         res = jloads(j["result_json"], None) or {}
         if j["state"] == "done" and safe_join(_conversions_dir(), f"{res.get('dir', '')}/out.md") is None:
@@ -642,7 +668,7 @@ def create_app() -> FastAPI:
         active = j["state"] in ("queued", "running")
         return {"job": j["id"], "source": payload.get("filename"), "state": j["state"], "message": j["message"], "created": j["created"],
                 "updated": j["updated"], "user": payload.get("user"), "mine": payload.get("user") == me()["username"],
-                "can_remove": _may_remove(j, payload), "has_source": j["state"] == "done" and _source_file(res) is not None,
+                "can_remove": _may_remove(j, watched), "has_source": j["state"] == "done" and _source_file(res) is not None,
                 "cancelling": active and jobs.cancel_requested(j["id"], DB), "error": j["error"],
                 "ahead": j["ahead"], "ahead_of": j["ahead_of"],     # its place in the conversion queue while it waits
                 "result": {k: v for k, v in res.items() if k != "dir"} if j["state"] == "done" else None}
@@ -651,7 +677,7 @@ def create_app() -> FastAPI:
         """A finished conversion is in the shared library; one still running, failed or cancelled only its owner (or an admin) sees."""
         j = jobs.get(conn(), job_id)
         payload = jloads(j["payload_json"], {}) if j else {}
-        if not j or j["type"] != "convert-markdown" or payload.get("hidden") or (j["state"] != "done" and not _owns(j)):
+        if not j or j["type"] != "convert-markdown" or payload.get("hidden") or (j["state"] != "done" and not visible(j)):
             raise HTTPException(404, "conversion not found")
         return j
 
@@ -665,15 +691,24 @@ def create_app() -> FastAPI:
                              "OR id IN (SELECT job_id FROM job_watcher WHERE user = ?)) "
                              "AND (state IN ('queued','running') OR updated >= datetime('now', ?)))) ORDER BY id DESC",
                      (u, u, f"-{CONVERT_KEEP_SECONDS} seconds"))
-        return [e for j in found if (e := _conversion_entry(j)) is not None]
+        watched = watched_ids()
+        return [e for j in jobs.with_progress_all(found, conn()) if (e := _conversion_entry(j, watched)) is not None]
 
     @app.delete("/api/convert/markdown/jobs/{job_id}")
     def convert_markdown_remove(job_id: int):
         """Remove a conversion (its owner or an admin): cancel it if it is still queued or running, delete its files and forget the file name."""
         j = _visible_conversion(job_id)
         payload = jloads(j["payload_json"], {})
-        if not _may_remove(j, payload):
+        if not _may_remove(j):
             raise HTTPException(403, "only an admin can delete a converted file")
+        u = me()["username"]
+        if j["state"] != "done" and job_owner(j) != u and conn().execute(
+                "DELETE FROM job_watcher WHERE job_id=? AND user=?", (job_id, u)).rowcount:
+            conn().commit()          # joined someone else's: stop following it (it stays theirs), or dismiss it if it ended
+            audit("Stopped following a conversion asked for by someone else", job_id=job_id)
+            return {"ok": True, "left": True}
+        if j["state"] in ("queued", "running") and job_owner(j) == u and (to := hand_over(j)):
+            return {"ok": True, "handed_to": to}      # others asked for the same file: it goes on for them
         if j["state"] in ("queued", "running"):
             jobs.cancel(job_id, DB)
         j = jobs.get(conn(), job_id)
@@ -878,7 +913,8 @@ def create_app() -> FastAPI:
         return work, (convert.serial_pool() if need_docling else None)
 
     def _start_parse(doc_id: int, activate: bool | None, engine: str | None) -> dict:
-        """{job}; {job, joined: owner} when the same spec is already queued or being parsed with the same engine."""
+        """{job}; {job, joined: owner} when the same spec is already queued or being parsed with the same engine and the
+        same choice to activate the result (joining a parse that does not activate would drop a request to activate)."""
         d = row(conn(), "SELECT * FROM spec_document WHERE id=?", (doc_id,))
         if not d:
             raise HTTPException(404, "document not found")
@@ -886,7 +922,8 @@ def create_app() -> FastAPI:
             raise HTTPException(400, f"Unknown parser engine '{engine}'; use one of: {', '.join(store.ENGINES)}.")
         same = row(conn(), "SELECT * FROM job WHERE type='parse' AND state IN ('queued','running') "
                            "AND json_extract(payload_json, '$.document_id') = ? AND json_extract(payload_json, '$.engine') = ? "
-                           "ORDER BY id LIMIT 1", (doc_id, engine or "auto"))
+                           "AND json_extract(payload_json, '$.activate') IS ? ORDER BY id LIMIT 1",
+                   (doc_id, engine or "auto", 1 if activate else None))
         if same and not jobs.cancel_requested(same["id"], DB):
             watch(same["id"])
             audit(f"Parse of spec #{doc_id} requested while it is already queued or running; following job #{same['id']}",
@@ -1654,32 +1691,39 @@ def create_app() -> FastAPI:
     def list_jobs(state: str | None = None):
         """An admin sees every job; another user the jobs they asked for (started or joined)."""
         found = jobs.active(conn()) if state == "active" else jobs.recent(conn())    # active: however old (recent() is capped)
-        if me()["role"] != "admin":
-            found = [j for j in found if watches(j)]
-        return [job_json(j) for j in found]
+        watched = watched_ids()
+        return [job_json(j, watched) for j in found if visible(j, watched)]
+
+    def _visible_job(job_id: int) -> dict:
+        """A job the signed-in user may look at (theirs, one they joined, or any for an admin); 404 otherwise."""
+        j = jobs.get(conn(), job_id)
+        if not j or not visible(j):
+            raise HTTPException(404)
+        return j
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: int):
-        j = jobs.get(conn(), job_id)
-        if not j:
-            raise HTTPException(404)
+        j = _visible_job(job_id)
         j["result"] = jloads(j.pop("result_json"), None)
         return job_json(j)
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: int):
-        """The user who started a job, or an admin, may cancel it (others who joined it only follow it)."""
-        j = jobs.get(conn(), job_id)
-        if not j:
-            raise HTTPException(404)
+        """The user who started a job, or an admin, may cancel it (others who joined it only follow it). When its owner
+        cancels a job others joined, it is not cancelled: the first of them owns it now ({ok, handed_to})."""
+        j = _visible_job(job_id)
         if not may_cancel(j):
             raise HTTPException(403, f"only {job_owner(j) or 'an admin'} or an admin can cancel this job")
+        if j["state"] in ("queued", "running") and job_owner(j) == me()["username"] and (to := hand_over(j)):
+            return {"ok": True, "handed_to": to}
         jobs.cancel(job_id, DB)
         audit(f"Cancel requested for job #{job_id} ({j['label'] or j['type']})", job_id=job_id)
         return {"ok": True}
 
     @app.get("/api/jobs/{job_id}/events")
     async def job_events(job_id: int):
+        await asyncio.to_thread(_visible_job, job_id)
+
         async def gen():
             last = None
             while True:

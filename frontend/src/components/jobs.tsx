@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 import type { Job } from "../types";
 import { useAuth } from "./auth";
 
@@ -41,10 +41,38 @@ export function JobsProvider({ children }: { children: ReactNode }) {
     setJobs((j) => (j[id] ? { ...j, [id]: { ...j[id], requested: true } } : { ...j, [id]: { label, startedAt: Date.now(), requested: true, announced: false } }));
   }, []);
 
-  useEffect(() => {   // adopt jobs this page did not start (page refresh, another machine, the CLI)
+  const forget = useCallback((id: number) => {     // handed to someone else, or no longer ours to see
+    callbacks.current.delete(id);
+    setJobs((j) => { const { [id]: _gone, ...rest } = j; return rest; });
+  }, []);
+  /** A fresh copy of a job: say where a job this user just asked for stands, and react when one of theirs ends. */
+  const observe = useRef<(job: Job) => void>(() => {});
+  observe.current = (job: Job) => {
+    const e = entries.current[job.id];
+    const label = job.label ?? e?.label ?? job.type;
+    if (e?.requested && !e.announced) {
+      if (job.user && job.user !== user.username) noticeListener?.({ kind: "joined", job, label });
+      else if (job.state === "queued" && (job.ahead ?? 0) > 0) noticeListener?.({ kind: "queued", job, label });
+    }
+    setJobs((j) => ({ ...j, [job.id]: { ...(j[job.id] ?? { label, startedAt: Date.now(), requested: false }), job, announced: true } }));
+    if (FINAL.has(job.state)) {
+      callbacks.current.get(job.id)?.(job);
+      callbacks.current.delete(job.id);
+      if (e?.requested || job.mine) {      // an admin is not told about, nor refreshes for, everyone else's jobs
+        noticeListener?.({ kind: "finished", job, label });
+        qc.invalidateQueries();
+      }
+    }
+  };
+  const refresh = useCallback(async (id: number) => {
+    try { observe.current(await api.job(id)); } catch (err) { if (err instanceof ApiError && err.status === 404) forget(id); }
+  }, [forget]);
+
+  useEffect(() => {   // adopt jobs this page did not start (page refresh, another machine, the CLI) and keep them current
     let stop = false;
     const adopt = () => api.activeJobs().then((list) => {
       if (stop) return;
+      const listed = new Set(list.map((x) => x.id));
       setJobs((j) => {
         const next = { ...j };
         for (const job of list) {
@@ -54,43 +82,28 @@ export function JobsProvider({ children }: { children: ReactNode }) {
         }
         return next;
       });
+      // an adopted job that left the list has ended (or is not ours any more): one look for how it ended
+      for (const [k, v] of Object.entries(entries.current)) {
+        if (!v.requested && v.job && !FINAL.has(v.job.state) && !listed.has(Number(k))) void refresh(Number(k));
+      }
     }).catch(() => {});
     adopt();
     const h = setInterval(() => { if (document.visibilityState !== "hidden") adopt(); }, ADOPT_EVERY_MS);
     return () => { stop = true; clearInterval(h); };
-  }, []);
+  }, [refresh]);
 
-  const pending = Object.entries(jobs).filter(([, v]) => !v.job || !FINAL.has(v.job.state)).map(([k]) => Number(k));
+  // jobs this page asked for are followed closely (every second); the adopted ones come with the list above
+  const pending = Object.entries(jobs).filter(([, v]) => v.requested && (!v.job || !FINAL.has(v.job.state))).map(([k]) => Number(k));
   const pendingKey = pending.join(",");
   useEffect(() => {
     if (!pending.length) return;
     let stop = false;
-    const tick = async () => {
-      for (const id of pending) {
-        try {
-          const job = await api.job(id);
-          if (stop) return;
-          const e = entries.current[id];
-          const label = job.label ?? e?.label ?? job.type;
-          if (e?.requested && !e.announced) {     // first look at a job this user just asked for: say where it stands
-            if (job.user && job.user !== user.username) noticeListener?.({ kind: "joined", job, label });
-            else if (job.state === "queued" && (job.ahead ?? 0) > 0) noticeListener?.({ kind: "queued", job, label });
-          }
-          setJobs((j) => ({ ...j, [id]: { ...(j[id] ?? { label, startedAt: Date.now(), requested: false }), job, announced: true } }));
-          if (FINAL.has(job.state)) {
-            callbacks.current.get(id)?.(job);
-            callbacks.current.delete(id);
-            if (e?.requested || job.mine) noticeListener?.({ kind: "finished", job, label });   // an admin is not told about everyone's
-            qc.invalidateQueries();
-          }
-        } catch { /* transient: retry on the next tick */ }
-      }
-    };
+    const tick = async () => { for (const id of pending) { if (stop) return; await refresh(id); } };
     tick();
     const h = setInterval(tick, 1000);
     return () => { stop = true; clearInterval(h); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingKey, qc]);
+  }, [pendingKey, refresh]);
 
   const clearFinished = useCallback(() => setJobs((j) => Object.fromEntries(Object.entries(j).filter(([, v]) => !v.job || !FINAL.has(v.job.state)))), []);
 

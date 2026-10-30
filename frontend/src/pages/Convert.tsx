@@ -60,7 +60,10 @@ function Conversion({ c }: { c: ConversionEntry }) {
     (e) => push({ title: "Could not add to Specs", description: errText(e), tone: "bad" }));
   const remove = () => {
     if (r && !window.confirm(`Delete ${c.source ?? "this file"} and its Markdown from the library? Nobody will be able to open or download it any more.`)) return;
-    api.removeConversion(c.job).then(() => qc.invalidateQueries({ queryKey: ["conversions"] }), (e) => push({ title: "Remove failed", description: errText(e), tone: "bad" }));
+    api.removeConversion(c.job).then((res) => {
+      if (res.handed_to) push({ title: `${c.source ?? "File"}: handed to ${res.handed_to}`, description: `${res.handed_to} asked for the same file, so it keeps converting for them.`, tone: "info" });
+      qc.invalidateQueries({ queryKey: ["conversions"] });
+    }, (e) => push({ title: "Remove failed", description: errText(e), tone: "bad" }));
   };
   return (
     <div className="card">
@@ -84,7 +87,10 @@ function Conversion({ c }: { c: ConversionEntry }) {
           </div>
         </div>
         <div className="row">
-          {working && c.mine && !c.cancelling && <button onClick={() => api.cancelJob(c.job).then(() => qc.invalidateQueries({ queryKey: ["conversions"] }))}>Cancel</button>}
+          {working && c.mine && !c.cancelling && <button onClick={() => api.cancelJob(c.job).then((res) => {
+            if (res.handed_to) push({ title: `${c.source ?? "File"}: handed to ${res.handed_to}`, description: `${res.handed_to} asked for the same file, so it keeps converting for them.`, tone: "info" });
+            qc.invalidateQueries({ queryKey: ["conversions"] });
+          })}>Cancel</button>}
           {r && (
             <>
               <button onClick={() => setOpen(true)}><Eye size={14} /> Preview</button>
