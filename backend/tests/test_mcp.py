@@ -249,7 +249,7 @@ def test_converted_documents_are_searched_and_opened_by_section_or_lines(lib, co
 
     e = library_entries(LIB_MD, "lib:c9", "nvme-ecn-123.pdf")
     tables = [x for x in e if x[5] == "table"]
-    assert len(tables) == 1 and tables[0][0] == "338" and tables[0][4].startswith("lib:c9|5.2.14.2.1|T")
+    assert len(tables) == 1 and tables[0][0] == "Figure 338" and tables[0][4].startswith("lib:c9|5.2.14.2.1|T")
     rows_ = [x[2] for x in e if x[5] == "row"]
     assert rows_ == ["77 | Maximum Data Transfer Size (MDTS): the largest transfer in units of CAP.MPSMIN.",
                      "79:78 | Controller ID (CNTLID): the NVM subsystem unique controller identifier."]   # no spacer, no repeated header
@@ -261,7 +261,8 @@ def test_converted_documents_are_searched_and_opened_by_section_or_lines(lib, co
     assert f"line {line}" in md and f'lines="{line}"' in md
     md, _ = lib.search("keep alive timeout expires", spec="ecn-123")
     assert md.splitlines()[2].startswith("Searched: nvme-ecn-123.pdf")
-    assert '§5.2.15 Keep Alive command' in md and 'read_raw(spec="nvme-ecn-123.pdf", section="5.2.15")' in md
+    ka = LIB_MD.splitlines().index("The Keep Alive command restarts the Keep Alive Timer when the keep alive timeout expires.") + 1
+    assert '§5.2.15 Keep Alive command' in md and f'read_raw(spec="nvme-ecn-123.pdf", lines="{ka}-{ka}")' in md   # just that piece
 
     sec = lib.raw("nvme-ecn-123.pdf", section="5.2.14.2.1")
     assert sec.startswith("# nvme-ecn-123.pdf — §5.2.14.2.1 Identify Controller Data Structure (CNS 01h), lines")
@@ -271,6 +272,26 @@ def test_converted_documents_are_searched_and_opened_by_section_or_lines(lib, co
     assert lib.raw("ecn-123", lines=f"{line}-{line}").endswith("CAP.MPSMIN. |")
     with pytest.raises(NotFound, match="no section"):
         lib.raw("ecn-123", section="9.9")
+    with pytest.raises(QueryError, match="reversed"):
+        lib.raw("ecn-123", lines="40-30")
+    with pytest.raises(NotFound, match="is not one of them"):
+        lib.raw("ecn-123", lines="9999")
+    with pytest.raises(QueryError, match="not both"):
+        lib.raw("ecn-123", section="5.2.15", lines="3")
+    inside = lib.raw("ecn-123", section="5.2.14.2.1", around="CNTLID", context=5)       # around within the section only
+    assert "in §5.2.14.2.1" in inside and "CNTLID" in inside
+    with pytest.raises(NotFound, match="5.2.15"):
+        lib.raw("ecn-123", section="5.2.15", around="CNTLID")
+
+    # a spec's own names stay the spec, even when a converted file's name contains them
+    conn.execute("INSERT INTO job(type,state,payload_json,result_json) VALUES('convert-markdown','done',?,?)",
+                 (json.dumps({"filename": "nvme-base-ecn-042.pdf", "sha256": "e042"}), json.dumps({"dir": "c9"})))
+    conn.commit()
+    searched = next(ln for ln in lib.search("Identify", spec="base")[0].splitlines() if ln.startswith("Searched:"))
+    assert searched.startswith("Searched: nvme-base 2.4") and "ecn" not in searched
+    assert lib.search("Identify", spec="base-ecn")[0].count("nvme-base-ecn-042.pdf (converted") >= 1
+    md, _ = lib.search("Identify", version="2.3")                                         # a version: converted docs not claimed
+    assert "every converted document" not in md and "converted documents have no version" in md
 
     lib.library_search = False                       # the admin switch: not searched, still indexed and readable
     md, _ = lib.search("maximum data transfer size")
@@ -285,6 +306,29 @@ def test_converted_documents_are_searched_and_opened_by_section_or_lines(lib, co
     conn.commit()
     assert lib.prune_lib_index() == 1
     assert conn.execute("SELECT COUNT(*) FROM mcp_fts WHERE run_id='lib:c9'").fetchone()[0] == 0
+
+
+def test_converted_document_entries_split_tables_keep_their_kind_and_keys_round_trip():
+    from specforge.specquery import LIB_PIECE, library_entries, lib_key, parse_lib_key
+
+    md = "\n".join([
+        "### 3.1 Opcodes", "", "**Table 7: Opcodes**", "", "| Op | Name |", "| --- | --- |", "| 01h | Read |", "",
+        "Some text between.", "", "| Field | Meaning |", "| --- | --- |", "| A | first |", "",
+        "Another paragraph.", "", "| Bits | Use |", "| --- | --- |", "| 0 | second |", "",
+        "### 3.2 Blob", "", "x" * (LIB_PIECE * 3)])
+    e = library_entries(md, "lib:d", "doc.pdf")
+    tabs = [x for x in e if x[5] == "table"]
+    assert [t[0] for t in tabs] == ["Table 7", "", ""] and tabs[0][1] == "Opcodes"     # "Table", not "Figure"; 3 tables, not 1
+    assert [parse_lib_key(t[4])["hi"] for t in tabs] == [7, 13, 19]                       # each spans only its own lines
+    blob = [x for x in e if x[5] == "section" and x[0] == "3.2"]
+    assert len(blob[0][2]) == LIB_PIECE and max(len(x[2]) for x in blob) <= LIB_PIECE * 2             # a run with no space is still cut
+    cut = "\n".join(["### 5 S", "", "**Figure 9: Data**", "", "| B | D |", "| --- | --- |", "| 0 | a |", "", "**LPA:** text of a field",
+                     "", "| Bits | D |", "| --- | --- |", "| 1 | b |", "", "**Figure 9: Data**", "", "| B | D |", "| --- | --- |", "| 2 | c |"])
+    tabs = [x for x in library_entries(cut, "lib:d", "d.pdf") if x[5] == "table"]
+    assert len(tabs) == 1 and tabs[0][2].splitlines()[1:] == ["0 | a", "Bits | D", "1 | b", "2 | c"]   # all inside Figure 9
+    k = lib_key("lib:d", "5.2", "T", 10, 20, 15)
+    assert parse_lib_key(k) == {"rid": "lib:d", "sec": "5.2", "kind": "T", "lo": 10, "hi": 20, "row": 15}
+    assert parse_lib_key("lib:d|doc") is None
 
 
 def test_usage_figures_reset_and_forget_idle_clients(monkeypatch):
