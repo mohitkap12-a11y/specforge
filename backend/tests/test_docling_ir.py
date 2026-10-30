@@ -38,10 +38,12 @@ class Doc:
         self.d["body"]["children"].append({"$ref": self._text(label, text, page, layer="furniture")})
         return self
 
-    def table(self, page, rows, caption=None, spans=(), header_rows=1, label="table"):
-        """rows: list of lists of text; spans: (row, col, row_span, col_span) of cells covering more than one position."""
+    def table(self, page, rows, caption=None, spans=(), header_rows=1, label="table", children=()):
+        """rows: list of lists of text; spans: (row, col, row_span, col_span) of cells covering more than one position;
+        children: (label, text) of texts the table holds besides its caption (notes)."""
         ref = f"#/tables/{len(self.d['tables'])}"
         caps = [{"$ref": self._text("caption", caption, page, parent=ref)}] if caption else []
+        kids = caps + [{"$ref": self._text(lb, tx, page, parent=ref)} for lb, tx in children]
         nr, nc = len(rows), max(len(r) for r in rows)
         covered, cells = set(), []
         span_of = {(r, c): (rs, cs) for r, c, rs, cs in spans}
@@ -59,7 +61,7 @@ class Doc:
             for r in range(cell["start_row_offset_idx"], cell["end_row_offset_idx"]):
                 for c in range(cell["start_col_offset_idx"], cell["end_col_offset_idx"]):
                     grid[r][c] = dict(cell)          # Docling's export repeats a spanning cell in each position
-        self.d["tables"].append({"self_ref": ref, "parent": {"$ref": "#/body"}, "children": caps, "content_layer": "body", "label": label,
+        self.d["tables"].append({"self_ref": ref, "parent": {"$ref": "#/body"}, "children": kids, "content_layer": "body", "label": label,
                                  "prov": [{"page_no": page, "bbox": {}, "charspan": [0, 0]}], "captions": caps,
                                  "data": {"num_rows": nr, "num_cols": nc, "table_cells": cells, "grid": grid}})
         self.d["body"]["children"].append({"$ref": ref})
@@ -182,14 +184,92 @@ def test_patterns_seen_on_a_real_spec():
 def test_audit_sizes_a_nested_bits_table_to_its_field():
     from specforge.ingest.ir import Table
 
-    def gaps(t):
+    def gaps(*tables):
         spec = parse_docling(Doc(1).d, "x", "1")
-        spec.tables = [t]
-        return [i for i in audit_spec(spec)[0] if i["kind"] == "bit_range_gap"]
-    byte = dict(caption="", header=["Bits", "Description"], rows=[["7:1", "a"], ["0", "b"]], page_from=1, page_to=1)
-    assert gaps(Table(label="1.n1", parent_table="1", **byte)) == []          # bits 7:0 of one byte: complete
-    assert len(gaps(Table(label="1", **byte))) == 1                          # a Command Dword must describe 31:0
-    assert len(gaps(Table(label="1.n1", parent_table="1", **{**byte, "rows": [["15:8", "a"], ["6:0", "b"]]}))) == 1
+        spec.tables = list(tables)
+        return sorted(b for i in audit_spec(spec)[0] if i["kind"] == "bit_range_gap"
+                      for b in __import__("ast").literal_eval(i["message"].split("bits ")[1].split(" are")[0]))
+
+    def bits(label, rows, parent=None, cell=None):
+        return Table(label=label, caption="", header=["Bits", "Description"], rows=rows, page_from=1, page_to=1,
+                     parent_table=parent, parent_cell=cell)
+    parent = Table(label="1", caption="", header=["Bytes", "Description"], page_from=1, page_to=1,
+                   rows=[["0", "Status"], ["1", "Flags"], ["3:2", "Length"]])
+    assert gaps(bits("1", [["31:8", "a"], ["7:0", "b"]])) == []
+    assert gaps(bits("1", [["31:16", "a"]])) == list(range(16))                     # a Command Dword must describe 31:0
+    assert gaps(parent, bits("1.n1", [["7:1", "a"], ["0", "b"]], "1", (0, 1))) == []  # byte 0: bits 7:0
+    assert gaps(parent, bits("1.n1", [["7:3", "a"]], "1", (1, 1))) == [0, 1, 2]       # byte 1 misses bits 2:0
+    assert gaps(parent, bits("1.n1", [["15:4", "a"], ["3:0", "b"]], "1", (2, 1))) == []   # bytes 3:2 are 16 bits
+    assert gaps(parent, bits("1.n1", [["15:8", "a"]], "1", (1, 1))) == []              # numbered from the structure start: bits 15:8 of byte 1
+    assert gaps(bits("1.n1", [["2:1", "a"], ["0", "b"]], "9")) == []                  # field unknown: a 3-bit field is complete
+    assert gaps(bits("1.n1", [["15:8", "a"], ["6:0", "b"]], "9")) == [7]
+
+
+def test_review_fixes_for_stitching_and_nesting():
+    # (1) after a repeated caption continues an earlier figure, an uncaptioned top-of-page part continues that figure
+    d = (Doc(4).header("1 Introduction", 1)
+         .table(1, [["Bytes", "Description"], ["0", "Status"]], caption="Figure 5: Data")
+         .table(2, [["Value", "Definition"], ["0h", "Off"]])
+         .table(3, [["Bytes", "Description"], ["1", "Flags"]], caption="Figure 5: Data")
+         .table(4, [["Bytes", "Description"], ["2", "Length"]], header_rows=1))
+    by = {t.label: t for t in parse_docling(d.d, "x", "1", toc=[[1, "1 Introduction", 1]]).tables}
+    assert set(by) == {"5", "5.n1"} and [r[0] for r in by["5"].rows] == ["0", "1", "2"]
+
+    # (2) a Value sub-table continued on the next page with higher values is one table; (6) 'Byte' and 'Bytes' are one header
+    d = (Doc(3).header("1 Introduction", 1)
+         .table(1, [["Byte", "Description"], ["0", "Mode"]], caption="Figure 5: Data")
+         .table(2, [["Value", "Definition"], ["0h", "Off"], ["1h", "On"]])
+         .table(3, [["Value", "Definition"], ["2h", "Auto"], ["3h", "Reserved"]])
+         .table(3, [["Bytes", "Description"], ["1", "Flags"]], caption="Figure 5: Data"))
+    spec = parse_docling(d.d, "x", "1", toc=[[1, "1 Introduction", 1]])
+    by = {t.label: t for t in spec.tables}
+    assert set(by) == {"5", "5.n1"} and [r[0] for r in by["5.n1"].rows] == ["0h", "1h", "2h", "3h"]
+    assert [r[0] for r in by["5"].rows] == ["0", "1"]
+
+    # (3) a continued sub-table part that itself holds a nested block keeps every row
+    d = (Doc(2).header("1 Introduction", 1)
+         .table(1, [["Bytes", "Description"], ["0", "Mode"]], caption="Figure 5: Data")
+         .table(2, [["Bits", "Description", ""], ["7:4", "Mode", ""], ["7:4", "Value", "Definition"], ["7:4", "0h", "Off"], ["3:0", "Reserved", ""]],
+                caption="Figure 5: Data", spans=[(1, 0, 3, 1), (1, 1, 1, 2), (4, 1, 1, 2)]))
+    spec = parse_docling(d.d, "x", "1", toc=[[1, "1 Introduction", 1]])
+    nested = next(t for t in spec.tables if t.parent_table == "5")
+    assert "Off" in [c for r in nested.rows for c in r] and nested.rows[-1][0] == "3:0"
+
+    # (4) an uncaptioned table after another figure (a diagram) is not adopted by the figure whose caption repeats
+    d = (Doc(3).header("1 Introduction", 1)
+         .table(1, [["Bytes", "Description"], ["0", "Status"]], caption="Figure 5: Data")
+         .picture(2, "Figure 6: Diagram")
+         .table(2, [["Name", "Size"], ["Header", "4 bits"]])
+         .table(3, [["Bytes", "Description"], ["1", "Flags"]], caption="Figure 5: Data"))
+    labels = [t.label for t in parse_docling(d.d, "x", "1", toc=[[1, "1 Introduction", 1]]).tables]
+    assert "p2t1" in labels and not any(lb.startswith("5.n") for lb in labels)
+
+
+def test_review_fixes_for_trailing_rows_captions_and_accounting():
+    # (7) only the very next key, followed by a capitalised field name, is a lost row
+    d = (Doc(1).header("1 Introduction", 1)
+         .table(1, [["Bytes", "Description"], ["07:00", "Header"], ["15:08", "Data"]], caption="Figure 1: Layout")
+         .text("16 bytes of padding follow the header.", 1)
+         .table(1, [["Bits", "Description"], ["31:24", "Type"]], caption="Figure 2: Dword")
+         .text("12 Reserved", 1).text("23:00 Reserved", 1))
+    spec = parse_docling(d.d, "x", "1", toc=[[1, "1 Introduction", 1]])
+    by = {t.label: t for t in spec.tables}
+    assert [r[0] for r in by["1"].rows] == ["07:00", "15:08"] and [r[0] for r in by["2"].rows] == ["31:24"]
+    assert spec.sections[1].paragraphs == ["16 bytes of padding follow the header.", "12 Reserved", "23:00 Reserved"]
+
+    # (8) a row under a table whose sub-table sits in the middle belongs to the table itself
+    d = (Doc(1).header("1 Introduction", 1)
+         .table(1, [["Bytes", "Description", ""], ["0", "Mode", ""], ["0", "Value", "Definition"], ["0", "0h", "Off"], ["1", "Flags", ""]],
+                caption="Figure 1: Layout", spans=[(1, 0, 3, 1), (1, 1, 1, 2), (4, 1, 1, 2)])
+         .text("2 Length (LEN): the length.", 1))
+    by = {t.label: t for t in parse_docling(d.d, "x", "1", toc=[[1, "1 Introduction", 1]]).tables}
+    assert by["1"].rows[-1][:2] == ["2", "Length (LEN): the length."] and by["1.n1"].rows == [["0h", "Off"]]
+
+    # (9) a note inside a table that names a figure is not its caption; (10) and is not counted as caption text
+    d = (Doc(1).header("1 Introduction", 1)
+         .table(1, [["Name", "Size"], ["Header", "4"]], children=[("footnote", "Figure 12: see the layout")]))
+    spec = parse_docling(d.d, "x", "1", toc=[[1, "1 Introduction", 1]])
+    assert [t.label for t in spec.tables] == ["p1t1"] and spec.stats["char_accounting"]["caption"] == 0
 
 
 def test_text_accounting_against_the_pdf_text_layer():
