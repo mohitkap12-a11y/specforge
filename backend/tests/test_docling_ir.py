@@ -150,6 +150,48 @@ def test_uncaptioned_table_at_the_top_of_the_next_page_continues_the_previous_on
     assert any(n["kind"] == "uncaptioned_table" for n in spec.notes)
 
 
+def test_patterns_seen_on_a_real_spec():
+    """NVMe-MI 2.2 cases: a figure's parts separated by a page Docling read as text, with an uncaptioned sub-table in
+    between; a part that is the rest of a Bits table nested in a Bytes row; a repeated header with extra cells; the
+    last row left under the table as text; a diagram caption kept as a heading inside the picture."""
+    d = (Doc(5).header("1 Introduction", 1)
+         .table(1, [["Bytes", "Description"], ["0", "Status"]], caption="Figure 5: Health Data")
+         .text("SMART Warnings (SW): this field indicates the value.", 2)
+         .table(2, [["Value", "Definition"], ["00h to 7Eh", "Temperature"]])
+         .table(3, [["Bits", "Reset", "Description"], ["15:14", "0", "Reserved"], ["13", "HwInit", "Telemetry"]])
+         .table(4, [["Bytes", "Description", "junk"], ["5:4", "Flags", ""]], caption="Figure 5: Health Data")
+         .table(4, [["Bits", "Description"], ["31:24", "Shutdown Type"]], caption="Figure 6: Shutdown")
+         .text("23:00 Reserved", 4)
+         .text("12 is not a row: this is a sentence that starts with a number.", 4))
+    pic = d._text("section_header", "Figure 7: Example", 5, parent=f"#/pictures/{len(d.d['pictures'])}")
+    d.d["pictures"].append({"self_ref": f"#/pictures/{len(d.d['pictures'])}", "parent": {"$ref": "#/body"}, "children": [{"$ref": pic}],
+                            "content_layer": "body", "label": "picture", "prov": [{"page_no": 5, "bbox": {}, "charspan": [0, 0]}], "captions": []})
+    d.d["body"]["children"].append({"$ref": d.d["pictures"][-1]["self_ref"]})
+    spec = parse_docling(d.d, "nvme-mi", "2.2", toc=[[1, "1 Introduction", 1]])
+    by = {t.label: t for t in spec.tables}
+    assert set(by) == {"5", "5.n1", "5.n2", "6", "7"}
+    assert by["5"].rows == [["0", "Status"], ["", "", "junk"], ["5:4", "Flags", ""]] and (by["5"].page_from, by["5"].page_to) == (1, 4)
+    assert by["5.n1"].header == ["Value", "Definition"] and by["5.n1"].parent_table == "5"
+    assert by["5.n2"].header == ["Bits", "Reset", "Description"] and by["5.n2"].parent_table == "5"
+    assert by["6"].rows == [["31:24", "Shutdown Type"], ["23:00", "Reserved"]]
+    assert "12 is not a row: this is a sentence that starts with a number." in spec.sections[1].paragraphs
+    assert by["7"].extractor == "none"
+    assert not any(n["kind"] in ("uncaptioned_table", "duplicate_figure_label") for n in spec.notes)
+
+
+def test_audit_sizes_a_nested_bits_table_to_its_field():
+    from specforge.ingest.ir import Table
+
+    def gaps(t):
+        spec = parse_docling(Doc(1).d, "x", "1")
+        spec.tables = [t]
+        return [i for i in audit_spec(spec)[0] if i["kind"] == "bit_range_gap"]
+    byte = dict(caption="", header=["Bits", "Description"], rows=[["7:1", "a"], ["0", "b"]], page_from=1, page_to=1)
+    assert gaps(Table(label="1.n1", parent_table="1", **byte)) == []          # bits 7:0 of one byte: complete
+    assert len(gaps(Table(label="1", **byte))) == 1                          # a Command Dword must describe 31:0
+    assert len(gaps(Table(label="1.n1", parent_table="1", **{**byte, "rows": [["15:8", "a"], ["6:0", "b"]]}))) == 1
+
+
 def test_text_accounting_against_the_pdf_text_layer():
     spec = parse_docling(spec_doc().d, "nvme", "2.4", toc=TOC, raw_chars=10_000)
     issues, _ = audit_spec(spec)

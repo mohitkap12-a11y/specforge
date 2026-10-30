@@ -21,14 +21,16 @@ from collections import Counter
 from typing import Any, Callable, Iterator
 
 from .ir import Excluded, ParsedSpec, Section, Table
-from .normalize import clean, norm_title, nospace_len, parse_caption
+from .normalize import clean, norm_title, nospace_len, parse_bit_range, parse_byte_range, parse_caption
 from .semantics import build_semantics
 
 DOCLING_EXTRACTOR = "docling"
 LOW_QUALITY = 0.5
+MAX_CONTINUATION_GAP = 3   # pages between two parts of one table that repeat its caption
 _NUM_HEADING = re.compile(r"^((?:\d+(?:\.\d+)*)|(?:Annex\s+[A-Z](?:\.\d+)*)|(?:[A-Z](?:\.\d+)+))\s+(\S.*)$")
 _TOC_LEADER = re.compile(r"(\.{4,}|…{2,}|(?:\.\s){4,})\s*\d*\s*$")
 _NESTED_HEAD = {"bits", "bit", "bytes", "byte", "value", "values", "field", "fields", "code"}
+_KEYED_ROW = re.compile(r"^(\d{1,4}(?:\s*:\s*\d{1,4})?)\s+(\S.*)$")
 _FURNITURE = {"page_header", "page_footer"}
 _TEXT_LABELS = {"text", "paragraph", "list_item", "footnote", "code", "formula", "reference", "checkbox_selected",
                 "checkbox_unselected", "title", "section_header", "caption", "key_value_region", "form"}
@@ -248,6 +250,8 @@ def parse_docling(doc: dict, family: str, version: str, title: str = "", fmt: st
     anon: Counter = Counter()
     cur = sections[0]
     last_top: Table | None = None       # last top-level table, the one a table on the next page may continue
+    last_captioned: Table | None = None  # last captioned top-level table, the one a repeated caption continues
+    row_tail: Table | None = None       # the table just closed: a text line right after it may be its last row
     text_since_table = True
     pending_caption: tuple[tuple, int] | None = None   # a caption printed as text, waiting for its table
 
@@ -278,17 +282,58 @@ def parse_docling(doc: dict, family: str, version: str, title: str = "", fmt: st
             pending_caption = None
 
     def caption_of(item: dict) -> tuple | None:
-        for ref in item.get("captions") or []:
+        """The item's Figure/Table caption; Docling sometimes keeps it as a plain child (even labelled a heading)."""
+        for ref in list(item.get("captions") or []) + list(item.get("children") or []):
             c = _ref(doc, ref)
-            if c is not None and (cap := parse_caption(c.get("text", ""))):
+            if c is not None and _kind(c) == "texts" and (cap := parse_caption(c.get("text", ""))):
                 return cap
         return None
 
     def caption_chars(item: dict) -> int:
-        return sum(nospace_len((_ref(doc, r) or {}).get("text", "")) for r in item.get("captions") or [])
+        refs = {(r.get("$ref") if isinstance(r, dict) else r) for r in list(item.get("captions") or []) + list(item.get("children") or [])}
+        return sum(nospace_len((_ref(doc, r) or {}).get("text", "")) for r in refs if r)
+
+    def adopt_between(owner: Table) -> None:
+        """Uncaptioned tables found between two parts of one figure are pieces of it Docling cut out (a Value /
+        Definition table inside a row): they become its nested tables instead of standing alone."""
+        i = tables.index(owner)
+        for t in tables[i + 1:]:
+            if t.parent_table is None and not t.captioned:
+                old = t.label
+                t.label = f"{owner.label}.n{sum(1 for x in tables if x.parent_table == owner.label) + 1}"
+                t.parent_table, t.caption, t.parent_cell = owner.label, owner.caption, (len(owner.rows) - 1, 1) if owner.rows else None
+                for n_ in notes:
+                    if n_.get("node_key") == f"fig:{old}" and n_["kind"] == "uncaptioned_table":
+                        n_.update(severity="info", kind="nested_table", node_key=f"fig:{t.label}",
+                                  message=f"Nested inside Figure {owner.label} (a part of it between two of its pages)")
+                for x in tables:
+                    if x.parent_table == old:
+                        x.parent_table = t.label
+
+    def nested_part(prev: Table, header: list[str], rows: list[list[str]], page: int, page_to: int) -> None:
+        """A part on the next page that starts with its own Bits / Value header continues a sub-table printed inside one of
+        prev's rows: it extends the last such sub-table if its keys carry on downwards, else it starts the next one."""
+        kids = [t for t in tables if t.parent_table == prev.label]
+        cols = [k for k in range(len(header)) if header[k] or any(k < len(r) and r[k] for r in rows)]
+        head, body = [header[k] for k in cols], [[r[k] if k < len(r) else "" for k in cols] for r in rows if any(r)]
+        last = kids[-1] if kids else None
+        if last is not None and [norm_title(c) for c in last.header] == [norm_title(c) for c in head]:
+            a = parse_bit_range(last.rows[-1][0]) if last.rows and last.rows[-1] else None
+            b = parse_bit_range(body[0][0]) if body and body[0] else None
+            if a is None or b is None or b[0] < a[1]:
+                last.rows.extend(body)
+                last.page_to = max(last.page_to, page_to)
+                last.continued_pages += 1
+                return
+        lbl = f"{prev.label}.n{len(kids) + 1}"
+        tables.append(Table(label=lbl, caption=prev.caption, header=head, rows=body, page_from=page, page_to=page_to,
+                            section=prev.section, captioned=False, parent_table=prev.label,
+                            parent_cell=(len(prev.rows) - 1, 1) if prev.rows else None, extractor=DOCLING_EXTRACTOR, quality=1.0))
+        notes.append({"severity": "info", "kind": "nested_table", "node_key": f"fig:{lbl}", "page": page,
+                      "message": f"Nested inside Figure {prev.label} (continued on page {page})"})
 
     def add_table(item: dict) -> None:
-        nonlocal last_top, text_since_table, pending_caption
+        nonlocal last_top, last_captioned, text_since_table, pending_caption, row_tail
         page, page_to = _page(item), _last_page(item)
         grid = _grid(item)
         acct["table_cells"] += _table_text(item)
@@ -313,14 +358,37 @@ def parse_docling(doc: dict, family: str, version: str, title: str = "", fmt: st
 
         # continuation of the previous table on the next page: the same caption again (or "continued"), or no caption
         # at all right at the top of the page with the same columns
+        # (a page in between may hold only a diagram or a part Docling did not see as a table: the repeated caption decides)
         prev = last_top
-        cont = prev is not None and prev.page_to >= page - 1 and (
-            (cap is not None and cap[1] == prev.label.split("#")[0]) or
+        if cap is not None and last_captioned is not None and cap[1] == last_captioned.label.split("#")[0] \
+                and page - last_captioned.page_to <= MAX_CONTINUATION_GAP:
+            prev = last_captioned
+            adopt_between(prev)
+        cont = prev is not None and (
+            (cap is not None and cap[1] == prev.label.split("#")[0] and page - prev.page_to <= MAX_CONTINUATION_GAP) or
             (cap is None and not text_since_table and prev.page_to == page - 1 and len(prev.header) == ncol))
+        hn = [norm_title(c) for c in header if c]
+        pn = [norm_title(c) for c in prev.header if c] if prev is not None else []
+        if cont and prev is not None and hn and hn[0] in _NESTED_HEAD and pn and hn[0] != pn[0]:
+            nested_part(prev, header, rows, page, page_to)
+            prev.page_to = max(prev.page_to, page_to)
+            prev.continued_pages += 1
+            text_since_table, last_top = False, prev
+            row_tail = next(t for t in reversed(tables) if t.parent_table == prev.label)
+            return
         if cont and prev is not None:
-            # the header repeated on every page is dropped; anything else Docling took for a header is the part's first row
-            if not ({norm_title(c) for c in header if c} <= {norm_title(c) for c in prev.header if c}):
-                rows.insert(0, header)       # what Docling took for a header is the next part's first row
+            # the header repeated on every page is dropped (Docling may add cells of the first row to it: those stay);
+            # anything else Docling took for a header is the part's first row
+            if pn and hn[:len(pn)] == pn:
+                extra, seen = list(header), 0
+                for k, c in enumerate(header):
+                    if c and seen < len(pn):
+                        extra[k], seen = "", seen + 1
+                if any(extra):
+                    rows.insert(0, extra)
+                    body_rows.insert(0, -1)
+            elif not set(hn) <= set(pn):
+                rows.insert(0, header)
                 body_rows.insert(0, -1)
             offset = len(prev.rows)
             prev.rows.extend(r + [""] * (len(prev.header) - len(r)) if len(r) < len(prev.header) else r for r in rows)
@@ -342,6 +410,8 @@ def parse_docling(doc: dict, family: str, version: str, title: str = "", fmt: st
                 notes.append({"severity": "warning", "kind": "low_table_quality", "node_key": f"fig:{lbl}", "page": page,
                               "message": f"Table quality {parent.quality:.2f} is low; check it against the PDF"})
             last_top, offset, parent_rows = parent, 0, body_rows
+            if captioned:
+                last_captioned = parent
         for n, (prow, s, e) in enumerate(blocks, 1):
             sub_head = [_text_at(grid, s, k) for k in range(1, ncol)]
             sub_rows = [[_text_at(grid, r, k) for k in range(1, ncol)] for r in range(s + 1, e)]
@@ -355,15 +425,29 @@ def parse_docling(doc: dict, family: str, version: str, title: str = "", fmt: st
             notes.append({"severity": "info", "kind": "nested_table", "node_key": f"fig:{lbl}", "page": page,
                           "message": f"Nested inside Figure {parent.label}"})
         text_since_table = False
+        row_tail = parent if not blocks else tables[-1]
+
+    def trailing_row(text: str) -> bool:
+        """'23:00 Reserved' printed right under a Bits / Bytes table is its last row, which Docling left out of the grid."""
+        t = row_tail
+        if t is None or len(t.header) < 2 or not t.rows or norm_title(t.header[0]).split(" ")[0] not in ("bits", "bit", "bytes", "byte"):
+            return False
+        m = _KEYED_ROW.match(text)
+        if not m:
+            return False
+        bits = norm_title(t.header[0]).startswith("bit")
+        parse = parse_bit_range if bits else parse_byte_range
+        new, last = parse(m.group(1)), parse(t.rows[-1][0]) if t.rows[-1] else None
+        if new is None or last is None or (new[0] >= last[1] if bits else new[1] <= last[0]):
+            return False            # the keys must carry on: down for bits, up for bytes
+        t.rows.append([m.group(1), m.group(2)] + [""] * (len(t.header) - 2))
+        return True
 
     def add_picture(item: dict) -> None:
-        nonlocal pending_caption
+        nonlocal pending_caption, row_tail
+        row_tail = None
         page = _page(item)
-        acct["caption"] += caption_chars(item)
-        for ch in item.get("children") or []:      # labels drawn inside a diagram
-            c = _ref(doc, ch)
-            if c is not None and _kind(c) == "texts" and not any((r.get("$ref") if isinstance(r, dict) else r) == c.get("self_ref") for r in item.get("captions") or []):
-                acct["figure_text"] += nospace_len(c.get("text", ""))
+        acct["figure_text"] += caption_chars(item)      # its caption and the labels drawn inside the diagram
         cap = caption_of(item)
         if cap is None and pending_caption is not None:
             cap, pending_caption = pending_caption[0], None
@@ -418,6 +502,7 @@ def parse_docling(doc: dict, family: str, version: str, title: str = "", fmt: st
         if matched is not None:
             matched.consumed = True
             flush_pending()
+            row_tail = None
             cur = entry_section[id(matched)]
             acct["heading"] += nospace_len(text)
             text_since_table = True
@@ -426,8 +511,13 @@ def parse_docling(doc: dict, family: str, version: str, title: str = "", fmt: st
         if cap is not None:
             flush_pending()
             pending_caption = (cap, page)
+            row_tail = None
             acct["caption"] += nospace_len(text)
             continue
+        if label in ("text", "paragraph") and trailing_row(text):
+            acct["table_cells"] += nospace_len(text)
+            continue
+        row_tail = None
         cur.paragraphs.append(text)
         acct["body"] += nospace_len(text)
         text_since_table = True

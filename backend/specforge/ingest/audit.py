@@ -29,6 +29,16 @@ def _opcode_col(rows: list[list[str]]) -> int:
     return hits.index(max(hits)) if max(hits) else 0
 
 
+def _bit_width(t, covered: Counter) -> int:
+    """Bits a Bits table must describe: a Command Dword (top-level table) 32, a sub-table printed inside one field of
+    its parent the field's width (the power of two covering its highest bit: 8 for bits 7:0, 16 for 15:0)."""
+    top = max(covered, default=0) + 1
+    width = 8
+    while width < top:
+        width *= 2
+    return width if t.parent_table else max(32, width)
+
+
 def audit_spec(spec: ParsedSpec) -> tuple[list[dict], dict]:
     issues: list[dict] = list(spec.notes)
     checks: dict[str, dict] = {}
@@ -77,7 +87,7 @@ def audit_spec(spec: ParsedSpec) -> tuple[list[dict], dict]:
                 bad_tables += 1
                 issues.append({"severity": "error", "kind": "bit_range_overlap", "node_key": key, "page": t.page_from,
                                "message": f"Figure {t.label}: bits {over} are described more than once"})
-            gaps = [b for b in range(32) if b not in covered]
+            gaps = [b for b in range(_bit_width(t, covered)) if b not in covered]
             if gaps and not over:
                 issues.append({"severity": "warning", "kind": "bit_range_gap", "node_key": key, "page": t.page_from,
                                "message": f"Figure {t.label}: bits {gaps} are not described (expected reserved rows)"})
