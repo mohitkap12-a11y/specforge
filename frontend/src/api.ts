@@ -1,4 +1,4 @@
-import type { McpInfo, McpSettings, McpStatus } from "./types";
+import type { McpCallRow, McpFilters, McpInfo, McpIssue, McpIssueDetail, McpIssueStatus, McpMetrics, McpSettings, McpStatus } from "./types";
 import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, ParserEngine, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, ResetPreview, ResetScope, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
@@ -154,6 +154,12 @@ export const api = {
   mcpSettings: (b: Partial<McpSettings>) => req<McpSettings>("PUT", "/api/mcp/settings", b),
   mcpReindex: () => req<{ job: number; reused?: boolean }>("POST", "/api/mcp/reindex"),
   mcpResetStats: () => req<{ ok: boolean }>("POST", "/api/mcp/reset-stats"),
+  mcpMetrics: (f: McpFilters) => req<McpMetrics>("GET", `/api/mcp/metrics${mcpQuery(f, { tz: tzOffset() })}`),
+  mcpIssues: (f: McpFilters, status: McpIssueStatus | "all") => req<{ items: McpIssue[] }>("GET", `/api/mcp/issues${mcpQuery(f, { status })}`),
+  mcpIssue: (fp: string, range: McpFilters["range"]) => req<McpIssueDetail>("GET", `/api/mcp/issues/${encodeURIComponent(fp)}${qs({ range, tz: tzOffset() })}`),
+  mcpTriage: (fp: string, b: { status?: McpIssueStatus; note?: string }) => req<{ status: McpIssueStatus; note: string | null }>("PUT", `/api/mcp/issues/${encodeURIComponent(fp)}`, b),
+  mcpCalls: (f: McpFilters, before_id?: number) => req<{ total: number; items: McpCallRow[]; next_before: number | null }>("GET", `/api/mcp/calls${mcpQuery(f, { before_id, limit: 100 })}`),
+  mcpClearHistory: () => req<{ deleted: number }>("DELETE", "/api/mcp/calls"),
   /** What an agent sees: the endpoint's tool list, asked the way an agent asks it (JSON-RPC over Streamable HTTP). */
   mcpProbe: async () => {
     const r = await fetch("/mcp", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
@@ -163,6 +169,13 @@ export const api = {
     return (body.result.tools as { name: string }[]).length;
   },
 };
+/** The viewer's offset from UTC in minutes (day buckets and the hour-of-week heatmap are drawn in local time). */
+export const tzOffset = () => -new Date().getTimezoneOffset();
+/** Query string of the MCP history endpoints: the filter (empty values left out) plus extra parameters. */
+export const mcpQuery = (f: McpFilters, extra: Record<string, string | number | undefined> = {}) =>
+  qs({ range: f.range, tool: f.tool, agent: f.agent, ip: f.ip, outcome: f.outcome, transport: f.transport, spec: f.spec, reason: f.reason,
+    fingerprint: f.fingerprint, q: f.q, slow: f.slow ? 1 : undefined, ...extra });
+export const mcpCsvUrl = (f: McpFilters) => `/api/mcp/calls.csv${mcpQuery(f)}`;
 export const fileUrl = (docId: number) => `/api/documents/${docId}/file`;
 
 export const logStreamUrl = (f: { after_id?: number; level?: string; source?: string; job_id?: number }) => `/api/logs/stream${qs(f)}`;

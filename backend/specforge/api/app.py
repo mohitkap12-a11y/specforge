@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__, auth, catalog, cmddb, compare, compare_ai, convert, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
-from .. import mcp_server, specquery
+from .. import mcp_metrics, mcp_server, specquery
 from ..crossgen import generate_cross_scenarios
 from ..convert import ENGINES, ConversionError, SUPPORTED, convert_file, output_name
 from ..core import config
@@ -61,6 +61,8 @@ ADMIN_ONLY = {("PUT", "/api/settings"), ("GET", "/api/reset"), ("POST", "/api/re
               ("GET", "/api/fs/browse"),     # lists the server's folders: other users type or drop a path instead
               ("GET", "/api/mcp/status"), ("PUT", "/api/mcp/settings"), ("POST", "/api/mcp/reindex"), ("POST", "/api/mcp/reset-stats")}
 ADMIN_PREFIX = "/api/users"
+# Every /api/mcp/ route but the guide's (metrics, misses & errors, call log, settings) is for admins
+MCP_PREFIX, MCP_PUBLIC = "/api/mcp/", {"/api/mcp/info"}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # With login turned off (`serve --no-auth`, localhost only) the single local user is the admin.
 LOCAL_USER = {"id": 0, "username": "local", "display_name": None, "role": "admin", "status": "active"}
@@ -91,7 +93,8 @@ def client_ip(req: Request) -> str:
 
 
 def admin_only(method: str, path: str) -> bool:
-    return (method, path) in ADMIN_ONLY or path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/")
+    return ((method, path) in ADMIN_ONLY or path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/")
+            or (path.startswith(MCP_PREFIX) and path not in MCP_PUBLIC))
 
 
 class McpDispatch:
@@ -159,7 +162,8 @@ def create_app() -> FastAPI:
     AUTH = config.auth_enabled()
     app.add_middleware(AuthGate, enabled=AUTH)
     speclib = specquery.SpecLibrary(DB)
-    mcp = mcp_server.McpEndpoint(speclib, lambda: config.load_settings(get_conn()), client_ip, local_only=not AUTH)
+    mcp_calls = mcp_metrics.CallLog(DB, keep_days=lambda: (mcp.cfg().get("history_days") or 90))
+    mcp = mcp_server.McpEndpoint(speclib, lambda: config.load_settings(get_conn()), client_ip, local_only=not AUTH, calls=mcp_calls)
     app.add_middleware(McpDispatch, endpoint=mcp)
     _inner_lifespan = app.router.lifespan_context
 
@@ -431,7 +435,7 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ MCP endpoint (/mcp): guide for everyone, status for admins
     MCP_SETTINGS = {"enabled": bool, "log_calls": bool, "rate_limit_per_min": (0, 100_000), "compare_wait_s": (1, 600), "public_url": str,
-                    "library_search": bool}
+                    "library_search": bool, "history_days": (1, 3650)}
 
     def _mcp_warm_index():
         """Index every served parse run for search in the background, so the first agent query does not wait for it."""
@@ -518,6 +522,106 @@ def create_app() -> FastAPI:
         audit("MCP usage figures reset")
         return {"ok": True}
 
+    # Call history (mcp_metrics.py): metrics, misses and errors grouped for triage, and every call with its full details
+    MCP_RANGES = {"1h": 3600, "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400, "90d": 90 * 86400}
+
+    def _mcp_window(range_: str | None, since: float | None, until: float | None) -> tuple[float, float]:
+        now = time.time()
+        if since is not None:
+            until = until if until is not None else now
+            if not 0 <= since < until:
+                raise HTTPException(422, "since must be before until")
+            return since, until
+        if range_ is not None and range_ not in MCP_RANGES:
+            raise HTTPException(422, f"range is one of {', '.join(MCP_RANGES)} (or give since / until)")
+        return now - MCP_RANGES[range_ or "7d"], now
+
+    def _mcp_filters(request: Request) -> dict:
+        q = request.query_params
+        f: dict[str, Any] = {k: [v for x in q.getlist(k) for v in x.split(",") if v] for k in
+                             ("tool", "agent", "ip", "transport", "fingerprint", "reason", "spec", "outcome")}
+        bad = [o for o in f["outcome"] if o not in mcp_metrics.OUTCOMES + mcp_metrics.REFUSALS]
+        if bad:
+            raise HTTPException(422, f"outcome is one or more of {', '.join(mcp_metrics.OUTCOMES + mcp_metrics.REFUSALS)}")
+        f["q"] = (q.get("q") or "").strip()[:200] or None
+        f["slow"] = q.get("slow") in ("1", "true")
+        return f
+
+    def _drained() -> None:
+        mcp_calls.drain(1.0)          # the calls just made are in the figures (tests, and an admin who refreshes at once)
+
+    @app.get("/api/mcp/metrics")
+    def mcp_metrics_view(request: Request, range: str | None = Query(None), since: float | None = None, until: float | None = None,
+                         tz: int = Query(0, ge=-14 * 60, le=14 * 60)):
+        """Figures for one time range (range=1h|24h|7d|30d|90d, or since / until in epoch seconds) and filter (tool, agent, ip,
+        transport, spec, outcome; comma lists). tz: the viewer's offset from UTC in minutes, for the day buckets and the heatmap."""
+        lo, hi = _mcp_window(range, since, until)
+        _drained()
+        return mcp_metrics.metrics(conn(), lo, hi, _mcp_filters(request), tz)
+
+    @app.get("/api/mcp/issues")
+    def mcp_issues(request: Request, range: str | None = Query(None), since: float | None = None, until: float | None = None,
+                   status: str = Query("all")):
+        """Misses and errors grouped by fingerprint (the same failure), with their triage state."""
+        if status not in (*mcp_metrics.ISSUE_STATES, "all"):
+            raise HTTPException(422, f"status is one of {', '.join(mcp_metrics.ISSUE_STATES)} or all")
+        lo, hi = _mcp_window(range, since, until)
+        _drained()
+        return {"items": mcp_metrics.issues(conn(), lo, hi, _mcp_filters(request), status), "since": lo, "until": hi}
+
+    @app.get("/api/mcp/issues/{fp}")
+    def mcp_issue(fp: str, range: str | None = Query(None), since: float | None = None, until: float | None = None,
+                  tz: int = Query(0, ge=-14 * 60, le=14 * 60)):
+        lo, hi = _mcp_window(range, since, until)
+        _drained()
+        d = mcp_metrics.issue_detail(conn(), fp, lo, hi, tz)
+        if d is None:
+            raise HTTPException(404, "no miss or error has this fingerprint")
+        return d
+
+    @app.put("/api/mcp/issues/{fp}")
+    def mcp_issue_triage(fp: str, body: Any = Body(...)):
+        """Triage one group: {"status": "open" | "investigating" | "fixed" | "ignored", "note": "..."} (either or both)."""
+        if not isinstance(body, dict) or not ({"status", "note"} & body.keys()) or body.keys() - {"status", "note"}:
+            raise HTTPException(422, 'send {"status": ..., "note": ...} (either or both)')
+        st, note = body.get("status"), body.get("note")
+        if st is not None and st not in mcp_metrics.ISSUE_STATES:
+            raise HTTPException(422, f"status is one of {', '.join(mcp_metrics.ISSUE_STATES)}")
+        if note is not None and (not isinstance(note, str) or len(note) > 4000):
+            raise HTTPException(422, "note is text of at most 4000 characters")
+        if not row(conn(), "SELECT 1 FROM mcp_call WHERE fingerprint = ? LIMIT 1", (fp,)):
+            raise HTTPException(404, "no miss or error has this fingerprint")
+        saved = mcp_metrics.set_issue(conn(), fp, st, note, me()["username"])
+        audit(f"MCP issue {fp} marked {saved['status']}", fingerprint=fp, status=saved["status"])
+        return saved
+
+    @app.get("/api/mcp/calls")
+    def mcp_call_log(request: Request, range: str | None = Query(None), since: float | None = None, until: float | None = None,
+                     before_id: int | None = None, limit: int = Query(100, ge=1, le=500)):
+        """Every recorded call, newest first, with its full arguments and error text; same filters as the metrics, plus q (text in
+        the arguments or error) and slow=1."""
+        lo, hi = _mcp_window(range, since, until)
+        _drained()
+        return mcp_metrics.calls(conn(), _mcp_filters(request), lo, hi, before_id, limit)
+
+    @app.get("/api/mcp/calls.csv")
+    def mcp_call_csv(request: Request, range: str | None = Query(None), since: float | None = None, until: float | None = None):
+        lo, hi = _mcp_window(range, since, until)
+        f = _mcp_filters(request)
+        _drained()
+        name = f"mcp-calls-{time.strftime('%Y%m%d-%H%M', time.gmtime(hi))}.csv"
+        return StreamingResponse(mcp_metrics.csv_lines(get_conn(), f, lo, hi), media_type="text/csv",
+                                 headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    @app.delete("/api/mcp/calls")
+    def mcp_clear_history():
+        """Forget the call history (the triage notes are kept: the same failure coming back finds its note)."""
+        _drained()
+        n = conn().execute("DELETE FROM mcp_call").rowcount
+        conn().commit()
+        audit(f"MCP call history cleared ({n} calls)", "warn")
+        return {"deleted": n}
+
     # What each reset deletes. Parse runs, comparisons, catalogs, scenarios and coverage depend on the specs (ON DELETE
     # CASCADE), so resetting the specs takes them along; coverage is what came from the test executions (imported command
     # DBs and what was derived from them) and leaves the specs, sets, catalogs and drafted scenarios alone.
@@ -532,9 +636,10 @@ def create_app() -> FastAPI:
                                  "mcp-index"},
                   "message": "specs, parse runs, sets, catalogs, scenarios, comparisons and coverage runs removed "
                              "(To Markdown library and imported command DBs kept)"},
-        "all": {"delete": ("spec_document", "spec_set", "cmd_source", "correction", "llm_cache", "enrichment", "job", "event_log"),
+        "all": {"delete": ("spec_document", "spec_set", "cmd_source", "correction", "llm_cache", "enrichment", "job", "event_log", "mcp_call",
+                           "mcp_issue"),
                 "files": ("specs", "uploads", "cmddb-uploads", "conversions"), "blocked_by": None,
-                "message": "all specs, sets, scenarios, command databases, coverage runs, the To Markdown library and logs removed (settings kept)"},
+                "message": "all specs, sets, scenarios, command databases, coverage runs, the To Markdown library, logs and MCP call history removed (settings kept)"},
     }
 
     def _reset_counts(scope: str) -> dict:
@@ -553,7 +658,8 @@ def create_app() -> FastAPI:
             out |= {"command_dbs": n("SELECT COUNT(*) FROM cmd_source"),
                     "converted_files": n("SELECT COUNT(*) FROM job WHERE type='convert-markdown' AND state='done' "
                                          "AND json_extract(payload_json, '$.hidden') IS NULL"),
-                    "jobs": n("SELECT COUNT(*) FROM job"), "log_events": n("SELECT COUNT(*) FROM event_log")}
+                    "jobs": n("SELECT COUNT(*) FROM job"), "log_events": n("SELECT COUNT(*) FROM event_log"),
+                    "mcp_calls": n("SELECT COUNT(*) FROM mcp_call")}
         return out
 
     def _reset_scope(scope: Any) -> tuple[str, dict]:
@@ -587,6 +693,7 @@ def create_app() -> FastAPI:
                                      + "). Cancel them or wait for them to finish, then reset.")
         if scope == "all":
             eventlog.drain(1.0)
+            mcp_calls.drain(1.0)
         c = conn()
         counts = _reset_counts(scope)
         for table in spec["delete"]:

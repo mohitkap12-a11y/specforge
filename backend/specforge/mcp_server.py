@@ -20,12 +20,15 @@ from collections import deque
 from typing import Any, Callable
 
 from . import __version__, eventlog
+from .mcp_metrics import CallLog, agent_from_user_agent, make_row
 from .specquery import Answer, NotFound, QueryError, SpecLibrary, summarize_args
 
 SLOW_MS = 2000
 RECENT = 200
 TOOL_THREADS = 8            # MCP tools run on their own threads: a burst of agent calls cannot take the web UI's threads
 MAX_CLIENTS = 5000          # client addresses remembered; idle ones (a day) are forgotten first
+MAX_AGENTS = 10_000         # (address, User-Agent) -> agent name and version learnt from initialize
+PEEK_MAX = 1 << 20          # request bodies up to this size are read for the agent's clientInfo
 LOOPBACK_NAMES = {"127.0.0.1", "localhost", "::1"}
 
 INSTRUCTIONS = """SpecForge serves the NVM Express specifications parsed on this server (Base, NVM / ZNS / KV command sets, NVMe-MI,
@@ -47,13 +50,18 @@ A specification is named by id (nvme-base), short name (base, mi, nvm, zns) or t
 version is used and the answer says which. Long answers are paged: pass page=2, 3 ... as the answer instructs."""
 
 client_ip: contextvars.ContextVar[str | None] = contextvars.ContextVar("mcp_client_ip", default=None)
+# the request a tool call came in on: {"ua": User-Agent, "transport": "http" | "sse" | "stdio"}
+client_meta: contextvars.ContextVar[dict | None] = contextvars.ContextVar("mcp_client_meta", default=None)
 
 
 class Usage:
-    """Usage figures since the server started (in memory), for the admin MCP page."""
+    """Usage figures since the server started (in memory), for the admin MCP page; with a CallLog, every call is also kept in the
+    database (mcp_call) for the Metrics, Misses & errors and Call log tabs."""
 
-    def __init__(self) -> None:
+    def __init__(self, calls: CallLog | None = None) -> None:
         self.lock = threading.Lock()
+        self.calls = calls
+        self.agents: dict[tuple[str, str], tuple[str, str | None]] = {}     # kept across resets: agents introduce themselves once
         self._clear()
 
     def _clear(self) -> None:
@@ -82,14 +90,41 @@ class Usage:
             c["requests"] += 1
             c["last_seen"] = now
 
+    def learn_agent(self, ip: str, ua: str, name: str, version: str | None) -> None:
+        """An initialize (or a request envelope) named the agent: calls from this address and User-Agent are attributed to it."""
+        with self.lock:
+            if len(self.agents) >= MAX_AGENTS and (ip, ua) not in self.agents:
+                self.agents.pop(next(iter(self.agents)))
+            self.agents[(ip, ua)] = (name[:80], (version or None) and str(version)[:40])
+
+    def agent_of(self, ip: str, ua: str | None) -> tuple[str | None, str | None]:
+        with self.lock:
+            known = self.agents.get((ip, ua or ""))
+        return known if known else agent_from_user_agent(ua)
+
+    def _keep(self, tool: str, outcome: str, ms: float, args: dict | None, error: str | None, ip: str, answer: Any = None) -> None:
+        if self.calls is None:
+            return
+        meta = client_meta.get() or {}
+        agent, version = self.agent_of(ip, meta.get("ua"))
+        self.calls.add(make_row(tool, outcome, ms, args, error, ip=ip, agent=agent, agent_version=version, user_agent=meta.get("ua"),
+                                transport=meta.get("transport"), answer=answer))
+
     def limited(self, ip: str) -> None:
         with self.lock:
             self.rate_limited += 1
             if ip in self.clients:
                 self.clients[ip]["limited"] += 1
+        self._keep("", "rate_limited", 0.0, None, None, ip)
 
-    def record(self, tool: str, args: dict, ms: float, outcome: str, error: str | None = None) -> dict:
+    def refused(self, ip: str) -> None:
+        with self.lock:
+            self.refused_disabled += 1
+        self._keep("", "refused", 0.0, None, None, ip)
+
+    def record(self, tool: str, args: dict, ms: float, outcome: str, error: str | None = None, answer: Any = None) -> dict:
         ip = client_ip.get() or "local"
+        self._keep(tool, outcome, ms, args, error, ip, answer)
         ev = {"ts": time.time(), "tool": tool, "args": summarize_args(args), "ms": round(ms, 1), "outcome": outcome, "ip": ip,
               **({"error": error[:300]} if error else {})}
         with self.lock:
@@ -195,12 +230,13 @@ def build_server(lib: SpecLibrary, usage: Usage | None = None, log_calls: Callab
         @functools.wraps(fn)
         async def wrapped(**kwargs: Any) -> str:
             t0 = time.monotonic()
-            outcome, err = "ok", None
+            outcome, err, answer = "ok", None, None
             try:
                 res = await fn(**kwargs) if is_async else await run(functools.partial(fn, **kwargs))
                 if isinstance(res, tuple):          # (markdown, hit count) from search
                     res, n = res
                     outcome = "ok" if n else "miss"
+                answer = res
                 if isinstance(res, Answer):          # Markdown for the agent, and the same rows as structured content
                     return CallToolResult(content=[TextContent(type="text", text=str(res))], structured_content=res.data)
                 return res
@@ -216,7 +252,7 @@ def build_server(lib: SpecLibrary, usage: Usage | None = None, log_calls: Callab
                 raise ToolError(f"internal error in {fn.__name__}: {e}") from None
             finally:
                 ms = (time.monotonic() - t0) * 1000
-                ev = usage.record(fn.__name__, kwargs, ms, outcome, err)
+                ev = usage.record(fn.__name__, kwargs, ms, outcome, err, answer)
                 if log_calls() or outcome == "error":
                     eventlog.emit("warn" if outcome == "error" else "info", "mcp",
                                   f"MCP {fn.__name__} {ev['args']} → {outcome} in {ms:.0f} ms", **{k: v for k, v in ev.items() if k != "ts"})
@@ -335,13 +371,13 @@ class McpEndpoint:
     transport (/mcp) and the HTTP+SSE transport (/mcp/sse, /mcp/messages/)."""
 
     def __init__(self, lib: SpecLibrary, settings: Callable[[], dict], ip_of: Callable[[Any], str], usage: Usage | None = None,
-                 local_only: bool = False):
+                 local_only: bool = False, calls: CallLog | None = None):
         from mcp.server.transport_security import TransportSecuritySettings
         from starlette.routing import Mount, Router
 
         self.lib, self.settings, self.ip_of = lib, settings, ip_of
         self.local_only = local_only        # sign-in off: the server listens on localhost only, so must every request's Host / Origin
-        self.usage = usage or Usage()
+        self.usage = usage or Usage(calls)
         self.limiter = RateLimiter()
         self._cfg: tuple[float, dict] = (0.0, {})
         self.server = build_server(lib, self.usage, log_calls=lambda: bool(self.cfg().get("log_calls", True)))
@@ -403,15 +439,65 @@ class McpEndpoint:
             # a web page whose host name was rebound to 127.0.0.1 must not reach a local, sign-in-free server
             return await self._reply(send, 403, "Refused: without sign-in this endpoint only answers requests addressed to localhost.")
         ip = self.ip_of(req)
+        ua = req.headers.get("user-agent") or ""
+        meta_tok = client_meta.set({"ua": ua, "transport": "http" if path in ("/mcp", "/mcp/") else "sse"})
+        try:
+            return await self._serve(scope, receive, send, path, ip, ua)
+        finally:
+            client_meta.reset(meta_tok)
+
+    async def _peek(self, receive) -> tuple[bytes | None, Callable]:
+        """Read a POST body (up to PEEK_MAX) and return it with a receive that replays it to the transport."""
+        msgs: list[dict] = []
+        size, more = 0, True
+        while more:
+            m = await receive()
+            msgs.append(m)
+            if m.get("type") != "http.request":
+                return None, self._replay(msgs, receive)
+            size += len(m.get("body", b""))
+            more = bool(m.get("more_body"))
+            if size > PEEK_MAX:
+                return None, self._replay(msgs, receive)
+        return b"".join(m.get("body", b"") for m in msgs), self._replay(msgs, receive)
+
+    @staticmethod
+    def _replay(msgs: list[dict], receive) -> Callable:
+        async def replay():
+            return msgs.pop(0) if msgs else await receive()
+        return replay
+
+    def _learn(self, body: bytes, ip: str, ua: str) -> None:
+        """Remember the agent named by an initialize request's clientInfo (or a request envelope's _meta)."""
+        try:
+            msg = json.loads(body)
+        except ValueError:
+            return
+        for m in msg if isinstance(msg, list) else [msg]:
+            p = m.get("params") if isinstance(m, dict) else None
+            if not isinstance(p, dict):
+                continue
+            info = p.get("clientInfo") if m.get("method") == "initialize" else None
+            meta = p.get("_meta")
+            if info is None and isinstance(meta, dict):
+                info = next((v for k, v in meta.items() if k.lower().endswith("clientinfo")), None)
+            if isinstance(info, dict) and isinstance(info.get("name"), str) and info["name"].strip():
+                self.usage.learn_agent(ip, ua, info["name"].strip(), info.get("version") if isinstance(info.get("version"), str) else None)
+
+    async def _serve(self, scope, receive, send, path: str, ip: str, ua: str):
         cfg = self.cfg()
         if not cfg.get("enabled", True):
-            self.usage.refused_disabled += 1
+            self.usage.refused(ip)
             return await self._reply(send, 503, "The SpecForge MCP endpoint is turned off by an administrator.")
         if scope["method"] == "POST" and not self.limiter.allow(ip, int(cfg.get("rate_limit_per_min", 120) or 0)):
             self.usage.limited(ip)
             return await self._reply(send, 429, f"Rate limit: at most {cfg.get('rate_limit_per_min')} MCP requests per minute per "
                                                 "address. Wait a moment and retry.")
         self.usage.seen(ip)
+        if scope["method"] == "POST":
+            body, receive = await self._peek(receive)
+            if body:
+                self._learn(body, ip, ua)
         tok = client_ip.set(ip)
         try:
             if path in ("/mcp", "/mcp/"):
@@ -426,4 +512,5 @@ class McpEndpoint:
 def run_stdio(db_file: str | None = None) -> None:
     """`specforge mcp`: the same tools over stdio, against a local workspace."""
     eventlog.configure({"logging": {"min_level": "warn"}})
-    build_server(SpecLibrary(db_file), log_calls=lambda: False).run("stdio")
+    client_meta.set({"ua": "", "transport": "stdio"})
+    build_server(SpecLibrary(db_file), Usage(CallLog(db_file)), log_calls=lambda: False).run("stdio")

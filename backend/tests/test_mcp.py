@@ -557,7 +557,136 @@ def test_endpoint_needs_no_sign_in_but_status_is_admin_only(ws, monkeypatch):
         assert c.get("/api/mcp/status").status_code == 403
         assert c.put("/api/mcp/settings", json={"enabled": False}).status_code == 403
         assert c.post("/api/mcp/reindex").status_code == 403
+        assert c.get("/api/mcp/metrics").status_code == 403 and c.get("/api/mcp/calls").status_code == 403
+        assert c.put("/api/mcp/issues/abc", json={"status": "fixed"}).status_code == 403
         c.post("/api/auth/login", json={"username": "root", "password": "rootpass1"})
         assert c.get("/api/mcp/status").status_code == 200
         r = c.post("/api/mcp/reindex")
         assert r.status_code == 200 and r.json()["job"]
+
+
+# ----------------------------------------------------------------------------- call history, metrics, misses & errors
+
+def test_reasons_fingerprints_and_agent_names():
+    from specforge import mcp_metrics as mm
+
+    assert mm.reason_of("get_section", "miss", "nvme-base 2.4 has no section 99.9") == "section not found"
+    assert mm.reason_of("search_spec", "miss", None) == "no search hits"
+    assert mm.reason_of("get_command", "miss", "no command named 'Frob' in nvme-base 2.4. Try search") == "command not found"
+    assert mm.reason_of("get_table", "error", "OperationalError: database is locked") == "internal: OperationalError"
+    assert mm.reason_of("get_section", "error", "there are only 3 page(s) in this answer") == "page out of range"
+    assert mm.reason_of("search_spec", "error", "something odd") == "invalid request"
+    # the same thing asked twice (other case, spacing, page) is one group; a different section is another
+    fp = lambda args: mm.fingerprint("get_section", "miss", "section not found", args, "x")      # noqa: E731
+    assert fp({"section": "99.9", "spec": "Base"}) == fp({"section": " 99.9", "spec": "base", "page": 2})
+    assert fp({"section": "99.9", "spec": "base"}) != fp({"section": "99.8", "spec": "base"})
+    # errors group by message with numbers and quoted values masked
+    e = lambda msg: mm.fingerprint("get_table", "error", "internal: KeyError", {"figure": "1"}, msg)  # noqa: E731
+    assert e("KeyError: 'row 12'") == e("KeyError: 'row 40'") and e("KeyError: 'x'") != e("ValueError: 'x'")
+    assert mm.fingerprint("get_table", "ok", None, {}, None) is None
+    assert mm.agent_from_user_agent("claude-code/2.1.3 (cli)") == ("claude-code", "2.1.3")
+    assert mm.agent_from_user_agent("node") == ("unknown (node)", None) and mm.agent_from_user_agent("") == (None, None)
+    assert mm.answer_meta("x" * 10 + "\n_Page 1 of 3. Call again with page=2 for the rest._") == (62, 1)
+    assert mm.answer_meta(None) == (None, 0)
+
+
+def _put_calls(conn, rows):
+    from specforge import mcp_metrics as mm
+
+    for r in rows:
+        row = mm.make_row(r["tool"], r["outcome"], r.get("ms", 10.0), r.get("args"), r.get("error"), ip=r.get("ip", "10.0.0.1"),
+                          agent=r.get("agent", "claude-code"), agent_version="2.1", transport="http", answer=r.get("answer"), ts=r["ts"])
+        conn.execute(f"INSERT INTO mcp_call({','.join(mm.COLUMNS)}) VALUES({','.join('?' * len(mm.COLUMNS))})", [row[c] for c in mm.COLUMNS])
+    conn.commit()
+
+
+def test_metrics_sessions_chains_and_issue_triage(conn):
+    from specforge import mcp_metrics as mm
+
+    t0 = 1_700_000_000.0
+    miss = {"tool": "get_section", "outcome": "miss", "args": {"section": "99.9", "spec": "base"}, "error": "nvme-base 2.4 has no section 99.9"}
+    _put_calls(conn, [
+        {**miss, "ts": t0},
+        {"tool": "search_spec", "outcome": "ok", "args": {"query": "99.9"}, "ts": t0 + 5, "ms": 3000.0, "answer": "a" * 500},
+        {"tool": "get_section", "outcome": "ok", "args": {"section": "9.9"}, "ts": t0 + 9},
+        {**miss, "ts": t0 + 4000, "ip": "10.0.0.2", "agent": "opencode"},          # another client, a new session
+        {"tool": "get_table", "outcome": "error", "args": {"figure": "7"}, "error": "OperationalError: database is locked", "ts": t0 + 4001,
+         "ip": "10.0.0.2", "agent": "opencode"},
+        {"tool": "", "outcome": "rate_limited", "ts": t0 + 4002, "ip": "10.0.0.2"},
+    ])
+    m = mm.metrics(conn, t0 - 60, t0 + 7200, {}, 0)
+    k = m["kpis"]
+    assert (k["calls"], k["ok"], k["misses"], k["errors"], k["rate_limited"]) == (5, 2, 2, 1, 1)
+    assert k["miss_pct"] == 40.0 and k["slow"] == 1 and k["clients"] == 2 and k["agents"] == 2 and k["sessions"] == 2
+    assert k["recovered_pct"] == 33.3          # 1 of the 3 failures was followed by an answer in its session
+    assert m["bucket_s"] == 3600 and sum(b["ok"] + b["miss"] + b["error"] for b in m["series"]) == 5
+    assert {t["tool"]: t["misses"] for t in m["tools"]}["get_section"] == 2
+    assert {a["agent"] for a in m["agents"]} == {"claude-code", "opencode"}
+    assert {"chain": ["get_section", "search_spec"], "count": 1} not in m["chains"]      # seen once: not a pattern
+    assert {r["reason"] for r in m["reasons"]} == {"section not found", "internal: OperationalError"}
+    assert mm.metrics(conn, t0 - 60, t0 + 7200, {"outcome": ["error"]}, 0)["kpis"]["calls"] == 1
+    assert mm.metrics(conn, t0 - 60, t0 + 7200, {"agent": ["opencode"]}, 0)["kpis"]["calls"] == 2
+
+    groups = mm.issues(conn, t0 - 60, t0 + 7200, {})
+    assert [(g["tool"], g["count"], g["clients"]) for g in groups] == [("get_section", 2, 2), ("get_table", 1, 1)]
+    assert groups[0]["args"] == {"section": "99.9", "spec": "base"} and groups[0]["status"] == "open"
+    fp = groups[0]["fingerprint"]
+    mm.set_issue(conn, fp, "investigating", "section 99.9 is not in Base 2.4: agents mean 9.9", "root")
+    assert mm.issues(conn, t0 - 60, t0 + 7200, {}, "investigating")[0]["note"].startswith("section 99.9")
+    assert mm.issues(conn, t0 - 60, t0 + 7200, {}, "open")[0]["tool"] == "get_table"
+    d = mm.issue_detail(conn, fp, t0 - 60, t0 + 7200)
+    assert d["count"] == 2 and d["status"] == "investigating" and d["recovered"] == 1
+    first = next(x for x in d["next"] if x["call"]["ip"] == "10.0.0.1")
+    assert [c["tool"] for c in first["next"]] == ["search_spec", "get_section"]       # what the agent tried next
+    page = mm.calls(conn, {"outcome": ["miss", "error"]}, limit=2)
+    assert page["total"] == 3 and len(page["items"]) == 2 and page["next_before"]
+    assert mm.calls(conn, {"q": "locked"})["items"][0]["tool"] == "get_table"
+    lines = "".join(mm.csv_lines(conn, {}, None, None)).splitlines()
+    assert lines[0].startswith("id,time_utc,tool,outcome,reason") and len(lines) == 7
+
+
+def test_call_history_over_http(lib):
+    from specforge.api.app import create_app
+
+    with TestClient(create_app(), base_url=LOCAL) as c:
+        rpc(c, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "roo-code", "version": "3.28"}})
+        rpc(c, "tools/call", {"name": "get_command_field", "arguments": {"command": "Identify", "dword": "10"}}, 2)
+        for i, sec in enumerate(("99.9", "99.9 ", "99.9")):
+            rpc(c, "tools/call", {"name": "get_section", "arguments": {"section": sec, "spec": "base"}}, 3 + i)
+        m = c.get("/api/mcp/metrics", params={"range": "1h"}).json()
+        assert m["kpis"]["calls"] == 4 and m["kpis"]["misses"] == 3 and m["agents"][0]["agent"] == "roo-code"
+        assert m["agents"][0]["version"] == "3.28" and m["transports"] == [{"transport": "http", "calls": 4}]
+        assert m["tools"][0]["tool"] == "get_section" and m["kpis"]["avg_chars"] > 0
+        issues = c.get("/api/mcp/issues", params={"range": "24h"}).json()["items"]
+        assert len(issues) == 1 and issues[0]["count"] == 3 and issues[0]["reason"] == "section not found"
+        fp = issues[0]["fingerprint"]
+        r = c.put(f"/api/mcp/issues/{fp}", json={"status": "fixed", "note": "renumbered in 2.4"})
+        assert r.status_code == 200 and r.json()["updated_by"] == "local"
+        assert c.put(f"/api/mcp/issues/{fp}", json={"status": "done"}).status_code == 422
+        assert c.put("/api/mcp/issues/0000", json={"status": "fixed"}).status_code == 404
+        d = c.get(f"/api/mcp/issues/{fp}").json()
+        assert d["status"] == "fixed" and d["variants"][0]["count"] >= 2 and d["agents"][0]["agent"] == "roo-code 3.28"
+        log = c.get("/api/mcp/calls", params={"outcome": "miss", "tool": "get_section"}).json()
+        assert log["total"] == 3 and "no section 99.9" in log["items"][0]["error"] and log["items"][0]["args"]["spec"] == "base"
+        assert c.get("/api/mcp/calls", params={"outcome": "nope"}).status_code == 422
+        assert c.get("/api/mcp/metrics", params={"range": "2y"}).status_code == 422
+        csv_ = c.get("/api/mcp/calls.csv", params={"range": "1h"})
+        assert csv_.headers["content-type"].startswith("text/csv") and csv_.text.count("\n") == 5
+        assert c.put("/api/mcp/settings", json={"history_days": 0}).status_code == 422
+        assert c.put("/api/mcp/settings", json={"history_days": 30}).json()["history_days"] == 30
+        assert c.delete("/api/mcp/calls").json()["deleted"] == 4
+        assert c.get("/api/mcp/metrics").json()["kpis"]["calls"] == 0
+
+
+def test_rate_limited_and_refused_requests_are_kept(ws):
+    from specforge.api.app import create_app
+
+    with TestClient(create_app(), base_url=LOCAL) as c:
+        c.put("/api/mcp/settings", json={"rate_limit_per_min": 1})
+        __import__("time").sleep(2.1)
+        [rpc(c, "tools/list", {}, i) for i in range(3)]
+        c.put("/api/mcp/settings", json={"enabled": False})
+        __import__("time").sleep(2.1)
+        rpc(c, "tools/list", {})
+        k = c.get("/api/mcp/metrics", params={"range": "1h"}).json()["kpis"]
+        assert (k["rate_limited"], k["refused"], k["calls"]) == (2, 1, 0)

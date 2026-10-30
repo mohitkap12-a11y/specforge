@@ -208,6 +208,15 @@ CREATE TABLE IF NOT EXISTS mcp_index(run_id INTEGER PRIMARY KEY, run_created TEX
 -- the same, for converted documents of the To Markdown library that are not parsed (their mcp_fts run_id is 'lib:<folder>')
 CREATE TABLE IF NOT EXISTS mcp_lib_index(dir TEXT PRIMARY KEY, filename TEXT, version TEXT, entries INTEGER, seconds REAL,
   built TEXT DEFAULT CURRENT_TIMESTAMP);
+-- Every MCP tool call (and rate-limited / refused request), for the admin Metrics, Misses & errors and Call log tabs (mcp_metrics.py)
+CREATE TABLE IF NOT EXISTS mcp_call(id INTEGER PRIMARY KEY, ts REAL NOT NULL, tool TEXT NOT NULL, outcome TEXT NOT NULL, ms REAL NOT NULL,
+  args_json TEXT, error TEXT, reason TEXT, fingerprint TEXT, ip TEXT, agent TEXT, agent_version TEXT, user_agent TEXT, transport TEXT,
+  spec TEXT, version TEXT, answer_chars INTEGER, page INTEGER, paged INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS ix_mcp_call_ts ON mcp_call(ts);
+CREATE INDEX IF NOT EXISTS ix_mcp_call_fp ON mcp_call(fingerprint, ts);
+CREATE INDEX IF NOT EXISTS ix_mcp_call_client ON mcp_call(ip, ts);
+-- An admin's triage of one group of misses or errors (mcp_call.fingerprint): open / investigating / fixed / ignored, and a note
+CREATE TABLE IF NOT EXISTS mcp_issue(fingerprint TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'open', note TEXT, updated TEXT, updated_by TEXT);
 -- Other users following a job they asked for while it was already queued or running (same file, same spec)
 CREATE TABLE IF NOT EXISTS job_watcher(
   job_id INTEGER NOT NULL REFERENCES job(id) ON DELETE CASCADE, user TEXT NOT NULL, PRIMARY KEY(job_id, user)
@@ -231,7 +240,11 @@ _local = threading.local()
 def _migrate(conn: sqlite3.Connection) -> None:
     for table, col, decl in MIGRATIONS:
         if col not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+            except sqlite3.OperationalError as e:      # another connection (a writer thread) migrated it first
+                if "duplicate column" not in str(e):
+                    raise
     conn.execute("CREATE INDEX IF NOT EXISTS ix_scenario_source ON scenario(set_id, source_id)")
     conn.commit()
 

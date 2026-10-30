@@ -7,6 +7,7 @@ import type { McpCall, McpSettings, McpStatus } from "../types";
 import { useAuth } from "../components/auth";
 import { useToast } from "../components/Toasts";
 import { Field, Loading, PageHeader, Segmented, Switch } from "../components/ui";
+import { CallLogTab, IssuesTab, MetricsTab } from "./McpAdmin";
 
 type Client = "opencode" | "roo" | "claude" | "other";
 
@@ -136,6 +137,11 @@ function SettingsCard({ s }: { s: McpSettings }) {
   const [rate, setRate] = useState(String(s.rate_limit_per_min));
   const [wait, setWait] = useState(String(s.compare_wait_s));
   const [url, setUrl] = useState(s.public_url ?? "");
+  const [days, setDays] = useState(String(s.history_days ?? 90));
+  const clear = useMutation({
+    mutationFn: api.mcpClearHistory,
+    onSuccess: (r) => { qc.invalidateQueries({ predicate: (q) => String(q.queryKey[0]).startsWith("mcp-") }); toast.push({ title: `Call history cleared (${r.deleted} calls)`, tone: "ok" }); },
+  });
   const save = useMutation({
     mutationFn: api.mcpSettings,
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["mcp-status"] }); qc.invalidateQueries({ queryKey: ["mcp-info"] }); toast.push({ title: "MCP settings saved", tone: "ok" }); },
@@ -169,9 +175,15 @@ function SettingsCard({ s }: { s: McpSettings }) {
         <Field label="Requests per minute per machine" hint="0 = no limit"><input type="number" min={0} value={rate} onChange={(e) => setRate(e.target.value)} /></Field>
         <Field label="Wait for a new comparison (s)" hint="then the agent is told to retry"><input type="number" min={1} max={600} value={wait} onChange={(e) => setWait(e.target.value)} /></Field>
         <Field label="Public URL" hint="what the guide shows, e.g. http://specforge.lab:8000 (empty: the address you opened)"><input value={url} placeholder="http://host:port" onChange={(e) => setUrl(e.target.value)} /></Field>
+        <Field label="Keep call history (days)" hint="for Metrics, Misses & errors and Call log"><input type="number" min={1} max={3650} value={days} onChange={(e) => setDays(e.target.value)} /></Field>
       </div>
-      <button className="primary" disabled={save.isPending}
-        onClick={() => save.mutate({ rate_limit_per_min: Number(rate), compare_wait_s: Number(wait), public_url: url })}>Save</button>
+      <div className="row">
+        <button className="primary" disabled={save.isPending}
+          onClick={() => save.mutate({ rate_limit_per_min: Number(rate), compare_wait_s: Number(wait), public_url: url, history_days: Number(days) })}>Save</button>
+        <span className="grow" />
+        <button className="danger" disabled={clear.isPending}
+          onClick={() => window.confirm("Delete every recorded MCP call? Triage notes are kept.") && clear.mutate()}>Clear call history</button>
+      </div>
     </div>
   );
 }
@@ -243,12 +255,23 @@ function Status() {
   );
 }
 
-/** The MCP endpoint: setup guide for everyone, usage and settings for admins. */
+type Tab = "guide" | "metrics" | "issues" | "calls" | "status";
+const ADMIN_TABS: { key: Tab; label: string }[] = [
+  { key: "metrics", label: "Metrics" }, { key: "issues", label: "Misses & errors" }, { key: "calls", label: "Call log" }, { key: "status", label: "Status & settings" },
+];
+
+/** The MCP endpoint: setup guide for everyone; metrics, misses & errors, call log, status and settings for admins. */
 export default function AgentsPage() {
   const { isAdmin } = useAuth();
   const [params, setParams] = useSearchParams();
-  const tab = isAdmin && params.get("tab") === "status" ? "status" : "guide";
-  const setTab = (t: "guide" | "status") => { const n = new URLSearchParams(params); t === "status" ? n.set("tab", "status") : n.delete("tab"); setParams(n); };
+  const asked = params.get("tab") as Tab | null;
+  const tab: Tab = isAdmin && asked && ADMIN_TABS.some((t) => t.key === asked) ? asked : "guide";
+  const setTab = (t: Tab) => {
+    const n = new URLSearchParams(params);
+    if (t === "guide") n.delete("tab"); else n.set("tab", t);
+    n.delete("issue");
+    setParams(n);
+  };
   return (
     <>
       <PageHeader title="MCP for agents"
@@ -256,10 +279,10 @@ export default function AgentsPage() {
       {isAdmin && (
         <div className="tabs" role="tablist">
           <button role="tab" aria-selected={tab === "guide"} className={tab === "guide" ? "active" : ""} onClick={() => setTab("guide")}>Setup guide</button>
-          <button role="tab" aria-selected={tab === "status"} className={tab === "status" ? "active" : ""} onClick={() => setTab("status")}>Status (admin)</button>
+          {ADMIN_TABS.map((t) => <button key={t.key} role="tab" aria-selected={tab === t.key} className={tab === t.key ? "active" : ""} onClick={() => setTab(t.key)}>{t.label}</button>)}
         </div>
       )}
-      {tab === "guide" ? <Guide /> : <Status />}
+      {tab === "guide" ? <Guide /> : tab === "metrics" ? <MetricsTab /> : tab === "issues" ? <IssuesTab /> : tab === "calls" ? <CallLogTab /> : <Status />}
     </>
   );
 }
