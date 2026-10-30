@@ -12,15 +12,50 @@ import { setIn } from "../util";
 type S = Record<string, any>;
 const TASKS = [["classify", "Classify", "Labels items (reserved for future use)"], ["generate", "Draft scenarios", "Reads each normative statement and proposes test scenarios"], ["embed", "Embeddings", "Semantic search (reserved for future use)"]] as const;
 const SECTIONS = [["ai", "AI providers"], ["models", "Models"], ["parser", "Parser"], ["logging", "Logging"], ["mi", "NVMe-MI layout"], ["appearance", "Appearance"], ["reset", "Reset"], ["about", "About"]] as const;
+/** What a non-admin sees: the rest are server-wide and only an admin can change them. */
+const PERSONAL_SECTIONS = SECTIONS.filter(([id]) => id === "appearance" || id === "about");
 
-/** `locked`: shown read-only (server-wide settings for a non-admin). */
-function Section({ id, title, description, children, locked }: { id: string; title: string; description?: ReactNode; children: ReactNode; locked?: boolean }) {
+function Section({ id, title, description, children }: { id: string; title: string; description?: ReactNode; children: ReactNode }) {
   return (
     <section id={id} className="card">
       <h2>{title}</h2>
       {description && <p className="muted">{description}</p>}
-      <fieldset disabled={locked} className="plain">{children}</fieldset>
+      <fieldset className="plain">{children}</fieldset>
     </section>
+  );
+}
+
+function SectionNav({ sections, hash }: { sections: readonly (readonly [string, string])[]; hash: string }) {
+  return (
+    <nav aria-label="Settings sections">
+      {sections.map(([id, label]) => <Link key={id} to={{ hash: `#${id}` }} className={hash === id ? "on" : ""}>{label}</Link>)}
+    </nav>
+  );
+}
+
+function Appearance() {
+  const [theme, setTheme] = useTheme();
+  return (
+    <Section id="appearance" title="Appearance">
+      <Segmented<ThemePref> label="Theme" value={theme} onChange={setTheme} options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]} />
+      <p className="muted small" style={{ marginTop: 8 }}>Stored in this browser only. Tip: press <span className="kbd">⌘ K</span> / <span className="kbd">Ctrl K</span> anywhere to jump to a page.</p>
+    </Section>
+  );
+}
+
+function About() {
+  const health = useQuery({ queryKey: ["health"], queryFn: api.health });
+  return (
+    <Section id="about" title="About">
+      {health.data && (
+        <dl className="logdetail kv" style={{ margin: 0, border: 0, padding: 0, background: "none" }}>
+          <dt>Version</dt><dd>{health.data.version}</dd>
+          <dt>Parser version</dt><dd>{health.data.parser_version}</dd>
+          <dt>Workspace</dt><dd className="mono">{health.data.workspace}</dd>
+          <dt>Reparse available</dt><dd>{health.data.reparse_available.length ? `${health.data.reparse_available.length} document(s)` : "none"}</dd>
+        </dl>
+      )}
+    </Section>
   );
 }
 
@@ -45,10 +80,8 @@ export default function SettingsPage() {
   const qc = useQueryClient();
   const toast = useToast();
   const loc = useLocation();
-  const [theme, setTheme] = useTheme();
   const { isAdmin } = useAuth();
-  const q = useQuery({ queryKey: ["settings"], queryFn: api.settings });
-  const health = useQuery({ queryKey: ["health"], queryFn: api.health });
+  const q = useQuery({ queryKey: ["settings"], queryFn: api.settings, enabled: isAdmin });
   const [s, setS] = useState<S | null>(null);
   const [layout, setLayout] = useState("{}");
   useEffect(() => { if (q.data) { setS(q.data); setLayout(JSON.stringify(q.data.mi_layout ?? {}, null, 2)); } }, [q.data]);
@@ -60,6 +93,18 @@ export default function SettingsPage() {
     mutationFn: (b: S) => api.saveSettings(b),
     onSuccess: () => { qc.invalidateQueries(); toast.push({ title: "Settings saved", tone: "ok" }); },
   });
+  if (!isAdmin) {
+    const hash = loc.hash.replace("#", "") || "appearance";
+    return (
+      <>
+        <PageHeader title="Settings" description="Set how the app looks. Everything stays on this machine." />
+        <div className="settings">
+          <SectionNav sections={PERSONAL_SECTIONS} hash={hash} />
+          <div><Appearance /><About /></div>
+        </div>
+      </>
+    );
+  }
   if (q.isLoading || q.error || !s) return <><PageHeader title="Settings" /><Loading q={q} /></>;
 
   const set = (path: string[], v: unknown) => setS((cur) => setIn(cur ?? {}, path, v));
@@ -76,13 +121,10 @@ export default function SettingsPage() {
   return (
     <>
       <PageHeader title="Settings" description="Connect your local AI, tune the parser, choose what gets logged, and set how the app looks. Everything stays on this machine." />
-      {!isAdmin && <div className="toast info" role="note">These settings apply to everyone on this server, so only an admin can change them. Appearance is yours to change.</div>}
       <div className="settings">
-        <nav aria-label="Settings sections">
-          {SECTIONS.filter(([id]) => isAdmin || id !== "reset").map(([id, label]) => <Link key={id} to={{ hash: `#${id}` }} className={hash === id ? "on" : ""}>{label}</Link>)}
-        </nav>
+        <SectionNav sections={SECTIONS} hash={hash} />
         <div>
-          <Section locked={!isAdmin} id="ai" title="AI providers" description="Used only to draft scenarios. Providers run locally; nothing is sent to the cloud by SpecForge.">
+          <Section id="ai" title="AI providers" description="Used only to draft scenarios. Providers run locally; nothing is sent to the cloud by SpecForge.">
             <h3 style={{ marginTop: 0 }}>Ollama</h3>
             <div className="fields">
               <Field label="Base URL"><input value={s.ollama?.base_url ?? ""} onChange={(e) => set(["ollama", "base_url"], e.target.value)} /></Field>
@@ -99,7 +141,7 @@ export default function SettingsPage() {
             <Models provider="opencode" />
           </Section>
 
-          <Section locked={!isAdmin} id="models" title="Models" description="Which provider and model handles each task.">
+          <Section id="models" title="Models" description="Which provider and model handles each task.">
             <div className="scroll"><table className="t">
               <thead><tr><th>Task</th><th>Provider</th><th>Model</th><th>Temperature</th></tr></thead>
               <tbody>{TASKS.map(([k, label, hint]) => (
@@ -118,14 +160,14 @@ export default function SettingsPage() {
             </div>
           </Section>
 
-          <Section locked={!isAdmin} id="parser" title="Parser" description="Changing parser options affects the next parse. Existing runs are kept.">
+          <Section id="parser" title="Parser" description="Changing parser options affects the next parse. Existing runs are kept.">
             <div className="fields">
               <Field label="Worker processes" hint="0 = CPU count − 1"><input type="number" value={s.parser?.workers ?? ""} onChange={(e) => num(["parser", "workers"])(e.target.value)} /></Field>
               <Field label="Table strategy"><input value={s.parser?.table_strategy ?? ""} onChange={(e) => set(["parser", "table_strategy"], e.target.value)} /></Field>
             </div>
           </Section>
 
-          <Section locked={!isAdmin} id="logging" title="Logging" description={<>What the <Link to="/activity">Activity</Link> view records. Applies immediately after saving.</>}>
+          <Section id="logging" title="Logging" description={<>What the <Link to="/activity">Activity</Link> view records. Applies immediately after saving.</>}>
             <div className="fields">
               <Field label="Minimum level" hint="Debug adds cache hits and progress heartbeats">
                 <select value={s.logging?.min_level ?? "info"} onChange={(e) => set(["logging", "min_level"], e.target.value)}>
@@ -140,35 +182,23 @@ export default function SettingsPage() {
             </div>
           </Section>
 
-          <Section locked={!isAdmin} id="mi" title="NVMe-MI message layout" description={<>Overrides merged over the built-in default used to decode NVMe-MI messages in command databases. <strong>Verify against the MI revision under test</strong>, then re-import the command DB. Only the keys you list are overridden, e.g. <code>{`{"mi": {"opcode_byte": 4}}`}</code>.</>}>
+          <Section id="mi" title="NVMe-MI message layout" description={<>Overrides merged over the built-in default used to decode NVMe-MI messages in command databases. <strong>Verify against the MI revision under test</strong>, then re-import the command DB. Only the keys you list are overridden, e.g. <code>{`{"mi": {"opcode_byte": 4}}`}</code>.</>}>
             <textarea rows={10} spellCheck={false} value={layout} onChange={(e) => setLayout(e.target.value)} aria-label="MI layout overrides" />
             {layoutErr && <div className="toast bad">Invalid: {layoutErr}</div>}
           </Section>
 
-          <Section id="appearance" title="Appearance">
-            <Segmented<ThemePref> label="Theme" value={theme} onChange={setTheme} options={[{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }]} />
-            <p className="muted small" style={{ marginTop: 8 }}>Stored in this browser only. Tip: press <span className="kbd">⌘ K</span> / <span className="kbd">Ctrl K</span> anywhere to jump to a page.</p>
-          </Section>
+          <Appearance />
 
-          {isAdmin && <Section id="reset" title="Reset" description="Start over in one area. Each reset permanently deletes what it lists; your settings and the user accounts are always kept. Only admins see this.">
+          <Section id="reset" title="Reset" description="Start over in one area. Each reset permanently deletes what it lists; your settings and the user accounts are always kept. Only admins see this.">
             <ResetPanel />
-          </Section>}
-
-          <Section id="about" title="About">
-            {health.data && (
-              <dl className="logdetail kv" style={{ margin: 0, border: 0, padding: 0, background: "none" }}>
-                <dt>Version</dt><dd>{health.data.version}</dd>
-                <dt>Parser version</dt><dd>{health.data.parser_version}</dd>
-                <dt>Workspace</dt><dd className="mono">{health.data.workspace}</dd>
-                <dt>Reparse available</dt><dd>{health.data.reparse_available.length ? `${health.data.reparse_available.length} document(s)` : "none"}</dd>
-              </dl>
-            )}
           </Section>
+
+          <About />
         </div>
       </div>
 
       <ErrorNote error={save.error} />
-      {dirty && isAdmin && (
+      {dirty && (
         <div className="savebar" role="region" aria-label="Unsaved changes">
           <span>{layoutErr ? "Fix the MI layout JSON to save." : invalidNum ? "Check the numbers: timeouts positive; context and concurrency ≥ 1; retries, workers ≥ 0; preview ≥ 200." : "You have unsaved changes."}</span>
           <button className="ghost" onClick={discard}>Discard</button>

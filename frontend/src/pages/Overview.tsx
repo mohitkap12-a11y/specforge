@@ -4,6 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { ArrowRight, Bot, Check, FileUp, Layers, PlayCircle, ShieldCheck, Sparkles } from "lucide-react";
 import { api } from "../api";
 import { Badge, ErrorNote, Legend, Loading, PageHeader, Pct, StateBar } from "../components/ui";
+import { useAuth } from "../components/auth";
 import { rememberSet } from "../hooks";
 import type { CovRun, LogEvent, SpecSet } from "../types";
 
@@ -80,6 +81,7 @@ function RecentActivity() {
 }
 
 function AiCheck() {
+  const { isAdmin } = useAuth();
   const [go, setGo] = useState(false);
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.settings });
   const provider: string = settings.data?.tasks?.generate?.provider ?? "ollama";
@@ -95,7 +97,7 @@ function AiCheck() {
       </div>
       <div className="row">
         <button onClick={() => (go ? q.refetch() : setGo(true))} disabled={q.isFetching}>{q.isFetching ? <span className="spinner" /> : null}Check connection</button>
-        <Link to="/settings#ai" className="small">Configure →</Link>
+        {isAdmin && <Link to="/settings#ai" className="small">Configure →</Link>}
       </div>
       {q.data?.ok && <div className="toast ok">Connected · {q.data.models.length} model(s) available.</div>}
       {q.data && !q.data.ok && <div className="toast bad">{q.data.error}</div>}
@@ -106,6 +108,7 @@ function AiCheck() {
 
 export default function OverviewPage() {
   const nav = useNavigate();
+  const { isAdmin } = useAuth();
   const specs = useQuery({ queryKey: ["specs"], queryFn: api.specs });
   const sets = useQuery({ queryKey: ["sets"], queryFn: api.sets });
   const sources = useQuery({ queryKey: ["sources"], queryFn: api.sources });
@@ -142,7 +145,7 @@ export default function OverviewPage() {
           <p>SpecForge reads the NVMe specifications, builds the list of everything that can be tested, and matches it against the commands your test runs actually sent. Evidence for every verdict, and AI only drafts, never decides.</p>
           <div className="row">
             <button className="primary" style={{ height: 40, padding: "0 18px" }} onClick={() => nav("/specs")}>Upload your first spec <ArrowRight size={16} /></button>
-            <Link to="/settings#ai" className="small">Set up AI first (optional)</Link>
+            {isAdmin && <Link to="/settings#ai" className="small">Set up AI first (optional)</Link>}
           </div>
         </section>
         <h2 style={{ margin: "0 0 12px" }}>How it works</h2>
