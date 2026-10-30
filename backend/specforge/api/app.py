@@ -348,8 +348,11 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ spec -> markdown
     # Conversions run one at a time on the converter's own thread. The UI uses the job endpoint (a large spec takes
-    # minutes to hours with Docling, longer than a proxy keeps a request open); its result is kept for a day.
+    # minutes to hours with Docling, longer than a proxy keeps a request open). Finished conversions form a library
+    # shared by every user and are kept until someone removes them; a failed or cancelled one stays on its owner's list
+    # for a day.
     CONVERT_KEEP_SECONDS = 24 * 3600
+    ORPHAN_GRACE_SECONDS = 3600     # a folder with no job yet may be an upload whose job is still being created
 
     def _convert_params(file: UploadFile, engine: str | None) -> tuple[str, str]:
         if engine is not None and engine not in ENGINES:
@@ -393,13 +396,28 @@ def create_app() -> FastAPI:
         return d if d.parent == root and d.is_dir() else None
 
     def _prune_conversions() -> None:
-        """Delete results older than a day (a folder's mtime is when its Markdown was written); never a queued or running upload."""
-        busy = {jloads(j["payload_json"], {}).get("dir") for j in
-                rows(conn(), "SELECT payload_json FROM job WHERE type='convert-markdown' AND state IN ('queued','running')")}
-        cutoff = time.time() - CONVERT_KEEP_SECONDS
+        """Delete folders no live conversion owns (left behind by a crash); a finished conversion is kept until it is removed."""
+        live = {jloads(j["payload_json"], {}).get("dir") for j in
+                rows(conn(), "SELECT payload_json FROM job WHERE type='convert-markdown' AND state IN ('queued','running','done') "
+                             "AND json_extract(payload_json, '$.hidden') IS NULL")}
+        cutoff = time.time() - ORPHAN_GRACE_SECONDS
         for d in _conversions_dir().iterdir():
-            if d.is_dir() and d.name not in busy and d.stat().st_mtime < cutoff:
+            if d.is_dir() and d.name not in live and d.stat().st_mtime < cutoff:
                 shutil.rmtree(d, ignore_errors=True)
+
+    def _sha256_of(path: str) -> str:
+        from ..core.hashing import sha256_file
+        return sha256_file(path)
+
+    def _converted_already(sha: str, front_matter: bool, engine: str) -> int | None:
+        """A finished conversion of the same file with the same options whose Markdown is still on disk, so it is not converted twice."""
+        for j in rows(conn(), "SELECT id, result_json FROM job WHERE type='convert-markdown' AND state='done' "
+                              "AND json_extract(payload_json, '$.hidden') IS NULL AND json_extract(payload_json, '$.sha256') = ? "
+                              "AND json_extract(payload_json, '$.front_matter') = ? ORDER BY id DESC", (sha, int(front_matter))):
+            res = jloads(j["result_json"], None) or {}
+            if res.get("engine") == engine and safe_join(_conversions_dir(), f"{res.get('dir', '')}/out.md") is not None:
+                return j["id"]
+        return None
 
     @app.post("/api/convert/markdown")
     async def convert_markdown(file: UploadFile = File(...), front_matter: bool = Query(True), download: bool = Query(False),
@@ -422,15 +440,21 @@ def create_app() -> FastAPI:
 
     @app.post("/api/convert/markdown/jobs")
     def convert_markdown_job(file: UploadFile = File(...), front_matter: bool = Query(True), engine: str | None = Query(None)):
-        """Background conversion: returns {job}; fetch the result from /api/convert/markdown/jobs/{job} once it is done."""
+        """Background conversion: returns {job}; fetch the result from /api/convert/markdown/jobs/{job} once it is done.
+        A file that is already in the library with the same options is not converted again: {job, reused: true} names that conversion."""
         name, suffix = _convert_params(file, engine)
         _prune_conversions()
         folder = Path(tempfile.mkdtemp(dir=_conversions_dir()))
         try:
             path = _save_upload(file, suffix, folder)
+            sha = _sha256_of(path)
         except BaseException:
             shutil.rmtree(folder, ignore_errors=True)
             raise
+        if (same := _converted_already(sha, front_matter, engine or convert.default_engine())) is not None:
+            shutil.rmtree(folder, ignore_errors=True)
+            audit(f"{name} is already converted to Markdown; the existing conversion is reused", job_id=same)
+            return {"job": same, "reused": True}
         user = me()["username"]
 
         def work(c, prog):
@@ -439,20 +463,34 @@ def create_app() -> FastAPI:
                 res = convert_file(path, filename=name, front_matter=front_matter, engine=engine)
                 prog(f"Converted {name}")       # a Docling run cannot be interrupted: a cancel asked meanwhile stops here
                 (folder / "out.md").write_text(res.markdown, encoding="utf-8")
+                if res.docling is not None:     # the Specs tab parses from this instead of running Docling again
+                    (folder / "docling.json").write_text(json.dumps(res.docling), encoding="utf-8")
+                os.replace(path, folder / f"source{suffix}")   # the original stays downloadable next to its Markdown
             except BaseException:      # failed or cancelled: nothing to keep
                 shutil.rmtree(folder, ignore_errors=True)
                 raise
-            finally:
-                Path(path).unlink(missing_ok=True)
             eventlog.emit("info", "api", f"Converted {name} to Markdown", user=user, format=res.source_format, engine=res.engine, **res.stats)
             return {**_conversion_json(name, res), "dir": folder.name}
-        job = jobs.submit(conn(), "convert-markdown", work, {"filename": name, "user": user, "engine": engine, "dir": folder.name}, DB,
+        job = jobs.submit(conn(), "convert-markdown", work, {"filename": name, "user": user, "engine": engine, "dir": folder.name,
+                                                             "sha256": sha, "front_matter": front_matter}, DB,
                           pool=convert.serial_pool())
         audit(f"Conversion of {name} to Markdown queued", job_id=job, engine=engine or convert.default_engine())
         return {"job": job}
 
+    def _owns(payload: dict) -> bool:
+        return payload.get("user") == me()["username"] or me()["role"] == "admin"
+
+    def _may_remove(j: dict, payload: dict) -> bool:
+        """A finished file in the shared library only an admin deletes; its owner may still cancel or dismiss one that is not finished."""
+        return me()["role"] == "admin" or (j["state"] != "done" and payload.get("user") == me()["username"])
+
+    def _source_file(res: dict) -> Path | None:
+        """The uploaded original kept beside the Markdown (conversions made before it was kept have none)."""
+        d = _conversion_dir(res.get("dir"))
+        return next((f for f in d.glob("source.*") if f.is_file()), None) if d else None
+
     def _conversion_entry(j: dict) -> dict | None:
-        """A conversion job as the To Markdown page lists it; None once its file has expired."""
+        """A conversion job as the To Markdown page lists it; None if its file is gone."""
         j = jobs.with_progress(j, conn())
         payload = jloads(j["payload_json"], {})
         res = jloads(j["result_json"], None) or {}
@@ -460,31 +498,36 @@ def create_app() -> FastAPI:
             return None
         active = j["state"] in ("queued", "running")
         return {"job": j["id"], "source": payload.get("filename"), "state": j["state"], "message": j["message"], "created": j["created"],
+                "updated": j["updated"], "user": payload.get("user"), "mine": payload.get("user") == me()["username"],
+                "can_remove": _may_remove(j, payload), "has_source": j["state"] == "done" and _source_file(res) is not None,
                 "cancelling": active and jobs.cancel_requested(j["id"], DB), "error": j["error"],
                 "result": {k: v for k, v in res.items() if k != "dir"} if j["state"] == "done" else None}
 
-    def _own_conversion(job_id: int) -> dict:
+    def _visible_conversion(job_id: int) -> dict:
+        """A finished conversion is in the shared library; one still running, failed or cancelled only its owner (or an admin) sees."""
         j = jobs.get(conn(), job_id)
         payload = jloads(j["payload_json"], {}) if j else {}
-        if not j or j["type"] != "convert-markdown" or payload.get("hidden") or \
-                (payload.get("user") != me()["username"] and me()["role"] != "admin"):
+        if not j or j["type"] != "convert-markdown" or payload.get("hidden") or (j["state"] != "done" and not _owns(payload)):
             raise HTTPException(404, "conversion not found")
         return j
 
     @app.get("/api/convert/markdown/jobs")
     def convert_markdown_list():
-        """The signed-in user's conversions, newest first: every queued or running one, and those that ended in the last 24 hours."""
-        found = rows(conn(), "SELECT * FROM job WHERE type='convert-markdown' AND json_extract(payload_json, '$.user') = ? "
-                             "AND json_extract(payload_json, '$.hidden') IS NULL "
-                             "AND (state IN ('queued','running') OR updated >= datetime('now', ?)) ORDER BY id DESC",
+        """Newest first: every finished conversion in the shared library (whoever converted it), plus the signed-in user's own
+        queued or running ones and those that failed or were cancelled in the last 24 hours."""
+        found = rows(conn(), "SELECT * FROM job WHERE type='convert-markdown' AND json_extract(payload_json, '$.hidden') IS NULL "
+                             "AND (state = 'done' OR (json_extract(payload_json, '$.user') = ? "
+                             "AND (state IN ('queued','running') OR updated >= datetime('now', ?)))) ORDER BY id DESC",
                      (me()["username"], f"-{CONVERT_KEEP_SECONDS} seconds"))
         return [e for j in found if (e := _conversion_entry(j)) is not None]
 
     @app.delete("/api/convert/markdown/jobs/{job_id}")
     def convert_markdown_remove(job_id: int):
-        """Remove a conversion from the list: cancel it if it is still queued or running, delete its files and forget the file name."""
-        j = _own_conversion(job_id)
+        """Remove a conversion (its owner or an admin): cancel it if it is still queued or running, delete its files and forget the file name."""
+        j = _visible_conversion(job_id)
         payload = jloads(j["payload_json"], {})
+        if not _may_remove(j, payload):
+            raise HTTPException(403, "only an admin can delete a converted file")
         if j["state"] in ("queued", "running"):
             jobs.cancel(job_id, DB)
         j = jobs.get(conn(), job_id)
@@ -500,18 +543,30 @@ def create_app() -> FastAPI:
 
     @app.get("/api/convert/markdown/jobs/{job_id}")
     def convert_markdown_result(job_id: int, download: bool = Query(False)):
-        j = _own_conversion(job_id)
+        j = _visible_conversion(job_id)
         if j["state"] != "done":
             raise HTTPException(409, f"the conversion is {j['state']}")
         res = jloads(j["result_json"], {})
         md_file = safe_join(_conversions_dir(), f"{res.get('dir', '')}/out.md")
         if md_file is None:
-            raise HTTPException(410, "the converted file has expired; convert it again")
+            raise HTTPException(410, "the converted file is no longer on the server; convert it again")
         markdown = md_file.read_text(encoding="utf-8")
         if download:
             return Response(markdown, media_type="text/markdown; charset=utf-8",
                             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(res['filename'])}"})
         return {**{k: v for k, v in res.items() if k != "dir"}, "markdown": markdown}
+
+    @app.get("/api/convert/markdown/jobs/{job_id}/source")
+    def convert_markdown_source(job_id: int):
+        """Download the original PDF / DOC / DOCX a finished conversion was made from."""
+        j = _visible_conversion(job_id)
+        if j["state"] != "done":
+            raise HTTPException(409, f"the conversion is {j['state']}")
+        src = _source_file(jloads(j["result_json"], {}))
+        if src is None:
+            raise HTTPException(404, "the original file of this conversion was not kept; it was converted before originals were stored")
+        name = jloads(j["payload_json"], {}).get("filename") or src.name
+        return FileResponse(src, filename=name)
 
     # ------------------------------------------------------------------ compare two spec versions
     _summary_lock = threading.Lock()
@@ -527,10 +582,11 @@ def create_app() -> FastAPI:
         """Every spec in the data store, with the parse run that would be compared (the active one, else the newest successful one)."""
         out = []
         for d in rows(conn(), "SELECT * FROM spec_document ORDER BY family, id"):
-            runs = rows(conn(), "SELECT id,active,status,parser_version FROM parse_run WHERE document_id=? AND status='done' ORDER BY active DESC, id DESC", (d["id"],))
+            runs = rows(conn(), "SELECT id,active,status,parser_version,stats_json FROM parse_run WHERE document_id=? AND status='done' ORDER BY active DESC, id DESC", (d["id"],))
             r = runs[0] if runs else None
             out.append({"doc_id": d["id"], "family": d["family"], "version": d["version"], "filename": d["filename"], "pages": d["pages"],
                         "run_id": r["id"] if r else None, "parsed": r is not None,
+                        "engine": (jloads(r["stats_json"], {}) or {}).get("engine", "builtin") if r else None,
                         "outdated": bool(r and r["parser_version"] != config.PARSER_VERSION)})
         out.sort(key=lambda o: (o["family"], [(0, int(t), "") if t.isdigit() else (1, 0, t.lower()) for t in re.split(r"(\d+)", o["version"]) if t], o["doc_id"]))
         return out
@@ -624,6 +680,7 @@ def create_app() -> FastAPI:
                 r["stats"], r["audit"] = jloads(r.pop("stats_json"), {}), jloads(r.pop("audit_json"), {})
                 r["outdated"] = r["parser_version"] != config.PARSER_VERSION
             d["runs"] = runs
+            d["docling"] = store.find_docling(conn(), d, copy=False) is not None   # a Docling conversion is ready to parse from
         return docs
 
     @app.patch("/api/specs/{doc_id}")
@@ -643,17 +700,63 @@ def create_app() -> FastAPI:
         audit(f"Deleted spec #{doc_id} and its parse runs", "warn", document_id=doc_id)
         return {"ok": True}
 
-    @app.post("/api/specs/{doc_id}/parse")
-    def parse(doc_id: int, activate: bool = Query(False)):
-        if not row(conn(), "SELECT 1 AS x FROM spec_document WHERE id=?", (doc_id,)):
+    def _library_add(c, src: str, name: str, user: str, res) -> None:
+        """Put a Docling conversion made for the Specs tab into the To Markdown library, so it is converted only once."""
+        folder = Path(tempfile.mkdtemp(dir=_conversions_dir()))
+        (folder / "out.md").write_text(res.markdown, encoding="utf-8")
+        (folder / "docling.json").write_text(json.dumps(res.docling), encoding="utf-8")
+        shutil.copyfile(src, folder / f"source{Path(src).suffix.lower()}")
+        payload = {"filename": name, "user": user, "engine": "docling", "dir": folder.name, "sha256": _sha256_of(src), "front_matter": True}
+        c.execute("INSERT INTO job(type,state,payload_json,result_json,message) VALUES('convert-markdown','done',?,?,?)",
+                  (json.dumps(payload), json.dumps({**_conversion_json(name, res), "dir": folder.name}), f"Converted {name}"))
+        c.commit()
+
+    def _start_parse(doc_id: int, activate: bool | None, engine: str | None) -> int:
+        d = row(conn(), "SELECT * FROM spec_document WHERE id=?", (doc_id,))
+        if not d:
             raise HTTPException(404, "document not found")
-        st = settings()
+        if engine is not None and engine not in store.ENGINES:
+            raise HTTPException(400, f"Unknown parser engine '{engine}'; use one of: {', '.join(store.ENGINES)}.")
+        st, user = settings(), me()["username"]
+        need_docling = engine == "docling" and store.find_docling(conn(), d, copy=False) is None
 
         def work(c, prog):
-            rid = store.run_parse(c, doc_id, st, progress=lambda s, a, b: prog(f"{s} {a}/{b}", a, b), activate=True if activate else None)
+            if need_docling and store.find_docling(c, d) is None:
+                # Docling runs on the converter's thread, one file at a time, like the To Markdown page; the result
+                # joins that page's library so neither tool converts this file again
+                prog(f"Converting {d['filename']} with Docling (large specs take a while)")
+                res = convert.submit(d["path"], filename=d["filename"] or Path(d["path"]).name, engine="docling").result()
+                if res.engine != "docling" or res.docling is None:
+                    raise RuntimeError("Docling is not available on this server: " + "; ".join(res.warnings or ["no document returned"]))
+                _library_add(c, d["path"], d["filename"] or Path(d["path"]).name, user, res)
+            rid = store.run_parse(c, doc_id, st, progress=lambda s, a, b: prog(f"{s} {a}/{b}", a, b), activate=activate, engine=engine)
             return {"run_id": rid}
-        audit(f"Parse requested for spec #{doc_id}", document_id=doc_id, activate=activate)
-        return {"job": jobs.submit(conn(), "parse", work, {"document_id": doc_id}, DB)}
+        audit(f"Parse requested for spec #{doc_id}", document_id=doc_id, activate=activate, engine=engine or "auto")
+        return jobs.submit(conn(), "parse", work, {"document_id": doc_id, "engine": engine or "auto"}, DB)
+
+    @app.post("/api/specs/{doc_id}/parse")
+    def parse(doc_id: int, activate: bool = Query(False), engine: str | None = Query(None)):
+        """engine: auto (Docling when the file has a Docling conversion, else built-in), docling (converts it first if
+        needed) or builtin."""
+        return {"job": _start_parse(doc_id, True if activate else None, engine)}
+
+    @app.post("/api/specs/from-conversion/{job_id}")
+    def spec_from_conversion(job_id: int):
+        """Add the original of a To Markdown conversion to the specs and parse it, from its Docling conversion when it has one."""
+        j = _visible_conversion(job_id)
+        if j["state"] != "done":
+            raise HTTPException(409, f"the conversion is {j['state']}")
+        res = jloads(j["result_json"], {})
+        src = _source_file(res)
+        if src is None:
+            raise HTTPException(409, "the original file of this conversion was not kept (it was converted before originals were stored); "
+                                     "upload it on the Specs page instead")
+        if src.suffix.lower() not in (".pdf", ".docx"):
+            raise HTTPException(409, "legacy .doc files cannot be added to the specs; save it as .docx or PDF and upload that")
+        name = jloads(j["payload_json"], {}).get("filename") or src.name
+        d = store.register_document(conn(), src, filename=name)
+        audit(f"Added {name} from the To Markdown library as {d['family']} {d['version']}", document_id=d["id"], job_id=job_id)
+        return {"document": d, "job": _start_parse(d["id"], None, None)}
 
     @app.post("/api/runs/{run_id}/activate")
     def activate(run_id: int):

@@ -1,4 +1,4 @@
-import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, ParserEngine, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -54,10 +54,11 @@ export const api = {
   specs: () => req<SpecDoc[]>("GET", "/api/specs"),
   upload: (files: File[]) => { const f = new FormData(); files.forEach((x) => f.append("files", x)); return req<SpecDoc[]>("POST", "/api/specs/upload", f); },
   toMarkdown: (file: File, frontMatter = true, engine?: ConvertEngine) => { const f = new FormData(); f.append("file", file); return req<MarkdownConversion>("POST", `/api/convert/markdown${qs({ front_matter: frontMatter ? undefined : "false", engine })}`, f); },
-  toMarkdownJob: (file: File, frontMatter = true, engine?: ConvertEngine) => { const f = new FormData(); f.append("file", file); return req<{ job: number }>("POST", `/api/convert/markdown/jobs${qs({ front_matter: frontMatter ? undefined : "false", engine })}`, f); },
+  toMarkdownJob: (file: File, frontMatter = true, engine?: ConvertEngine) => { const f = new FormData(); f.append("file", file); return req<{ job: number; reused?: boolean }>("POST", `/api/convert/markdown/jobs${qs({ front_matter: frontMatter ? undefined : "false", engine })}`, f); },
   markdownResult: (job: number) => req<MarkdownConversion>("GET", `/api/convert/markdown/jobs/${job}`),
   conversions: () => req<ConversionEntry[]>("GET", "/api/convert/markdown/jobs"),
   removeConversion: (job: number) => req("DELETE", `/api/convert/markdown/jobs/${job}`),
+  conversionSourceUrl: (job: number) => `/api/convert/markdown/jobs/${job}/source`,
   compareOptions: () => req<CompareOption[]>("GET", "/api/compare/options"),
   compare: (from_run: number, to_run: number) => req<Comparison>("POST", "/api/compare", { from_run, to_run }),
   comparisons: () => req<ComparisonRow[]>("GET", "/api/compare"),
@@ -67,7 +68,8 @@ export const api = {
   deleteComparison: (id: number) => req("DELETE", `/api/compare/${id}`),
   patchSpec: (id: number, b: { family?: string; version?: string }) => req("PATCH", `/api/specs/${id}`, b),
   deleteSpec: (id: number) => req("DELETE", `/api/specs/${id}`),
-  parse: (id: number, activate = false) => req<{ job: number }>("POST", `/api/specs/${id}/parse${qs({ activate: activate ? "true" : undefined })}`),
+  parse: (id: number, activate = false, engine?: ParserEngine) => req<{ job: number }>("POST", `/api/specs/${id}/parse${qs({ activate: activate ? "true" : undefined, engine })}`),
+  specFromConversion: (job: number) => req<{ document: SpecDoc; job: number }>("POST", `/api/specs/from-conversion/${job}`),
   activateRun: (id: number) => req("POST", `/api/runs/${id}/activate`),
   tree: (run: number) => req<TreeNode[]>("GET", `/api/runs/${run}/tree`),
   section: (run: number, key: string) => req<SectionData>("GET", `/api/runs/${run}/section${qs({ key })}`),

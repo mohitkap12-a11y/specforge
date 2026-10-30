@@ -9,7 +9,7 @@ import re
 from collections import Counter
 
 from .ir import ParsedSpec
-from .normalize import classify_table, clean, parse_bit_range, parse_byte_range, parse_value_range
+from .normalize import classify_table, clean, norm_title, parse_bit_range, parse_byte_range, parse_value_range
 
 TEXT_ACCOUNTING_MIN = 0.995
 # a Bits/Bytes cell that is meant to be a number range; anything else is a group label ("Header"), an ellipsis, a symbolic
@@ -27,6 +27,25 @@ def _opcode_col(rows: list[list[str]]) -> int:
     width = max((len(r) for r in rows), default=1)
     hits = [sum(1 for r in rows if i < len(r) and _OPCODE.match(clean(r[i]))) for i in range(width)]
     return hits.index(max(hits)) if max(hits) else 0
+
+
+def _expected_bits(t, by_label: dict, covered: Counter) -> range:
+    """Bits a Bits table must describe. A top-level table (a Command Dword) at least 31:0. A sub-table printed inside one
+    field of its parent: that field's bits, from the parent row's Bytes cell (byte 2 -> 8 bits; numbered 7:0, or 23:16
+    when the sub-table counts from the start of the structure). Without a known field only the range up to its highest
+    bit is checked, so a short field (2:0) is not reported for bits it does not have."""
+    top = max(covered, default=0) + 1
+    if not t.parent_table:
+        return range(max(32, top))
+    parent, cell = by_label.get(t.parent_table), t.parent_cell
+    if parent is not None and cell and cell[0] is not None and 0 <= cell[0] < len(parent.rows) and parent.rows[cell[0]] \
+            and norm_title(parent.header[0] if parent.header else "").startswith("byte"):
+        rng = parse_byte_range(parent.rows[cell[0]][0])
+        if rng is not None:
+            width = (rng[0] - rng[1] + 1) * 8
+            base = rng[1] * 8 if min(covered, default=0) >= width else 0
+            return range(base, base + width)
+    return range(min(covered, default=0) if min(covered, default=0) >= 8 else 0, top)
 
 
 def audit_spec(spec: ParsedSpec) -> tuple[list[dict], dict]:
@@ -58,6 +77,7 @@ def audit_spec(spec: ParsedSpec) -> tuple[list[dict], dict]:
 
     # 4. table schema checks
     bad_tables = 0
+    by_label = {t.label: t for t in spec.tables}
     for t in spec.tables:
         kind = classify_table(t.header, t.caption)
         key = f"fig:{t.label}"
@@ -77,7 +97,7 @@ def audit_spec(spec: ParsedSpec) -> tuple[list[dict], dict]:
                 bad_tables += 1
                 issues.append({"severity": "error", "kind": "bit_range_overlap", "node_key": key, "page": t.page_from,
                                "message": f"Figure {t.label}: bits {over} are described more than once"})
-            gaps = [b for b in range(32) if b not in covered]
+            gaps = [b for b in _expected_bits(t, by_label, covered) if b not in covered]
             if gaps and not over:
                 issues.append({"severity": "warning", "kind": "bit_range_gap", "node_key": key, "page": t.page_from,
                                "message": f"Figure {t.label}: bits {gaps} are not described (expected reserved rows)"})

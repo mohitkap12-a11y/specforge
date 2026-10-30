@@ -100,7 +100,8 @@ def _title(doc) -> str:
 
 
 def convert(path: str) -> tuple[str, dict]:
-    """Markdown text and metadata (title, pages, counts) for a PDF or DOCX file."""
+    """Markdown text and metadata (title, pages, counts) for a PDF or DOCX file; meta["document"] is the whole
+    DoclingDocument as a dict, which the spec parser builds its IR from (ingest/docling_ir.py)."""
     with _lock:
         try:
             result = converter().convert(path, raises_on_error=False)
@@ -112,5 +113,6 @@ def convert(path: str) -> tuple[str, dict]:
             raise DoclingError("Docling could not convert the file" + (f": {errs}" if errs else "."))
         doc = result.document
         markdown = doc.export_to_markdown()
-    meta = {"title": _title(doc), "pages": doc.num_pages(), "partial": status == "partial_success", **_stats(doc)}
+        exported = doc.export_to_dict() if hasattr(doc, "export_to_dict") else None
+    meta = {"title": _title(doc), "pages": doc.num_pages(), "partial": status == "partial_success", **_stats(doc), "document": exported}
     return markdown, meta

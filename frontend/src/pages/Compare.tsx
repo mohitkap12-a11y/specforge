@@ -18,7 +18,7 @@ const IMPACTS: { key: Impact; label: string; hint: string }[] = [
 const PAGE = 25;
 
 const ImpactBadge = ({ impact }: { impact: Impact }) => <span className={`badge ${impact}`}>{impact}</span>;
-const label = (o: CompareOption) => `${o.version}${o.filename ? ` · ${o.filename}` : ""}${o.parsed ? "" : "  (not parsed yet)"}`;
+const label = (o: CompareOption) => `${o.version}${o.filename ? ` · ${o.filename}` : ""}${o.parsed ? (o.engine === "docling" ? " · Docling" : " · built-in parser") : "  (not parsed yet)"}`;
 
 function Marked({ text, chunks }: { text: string; chunks: string[] }) {
   return <>{splitMarks(text, chunks).map((p, i) => (p.m ? <mark key={i}>{p.t}</mark> : <span key={i}>{p.t}</span>))}</>;
@@ -296,6 +296,8 @@ export default function ComparePage() {
   const del = useMutation({ mutationFn: (id: number) => api.deleteComparison(id), onSuccess: (_r, id) => { if (open === id) setSp({}); qc.invalidateQueries({ queryKey: ["comparisons"] }); } });
   const parsedCount = versions.filter((v) => v.parsed).length;
   const same = from !== "" && from === to;
+  const engineOf = (id: number | "") => versions.find((v) => v.doc_id === id)?.engine;
+  const mixed = from !== "" && to !== "" && !same && !!engineOf(from) && !!engineOf(to) && engineOf(from) !== engineOf(to);
   return (
     <>
       <PageHeader title="Compare spec versions" description="Choose two versions of a specification from your library, for example NVMe Base 2.3 and 2.4. SpecForge lists what is new, removed and modified, flags changes that can break implementations, and can write an AI summary of what the new version brings." />
@@ -318,6 +320,7 @@ export default function ComparePage() {
               {go.isPending ? <span className="spinner" /> : <GitCompareArrows size={15} />} Compare</button>
           </div>
           {same && <div className="muted small" style={{ marginTop: 8 }}>Choose two different versions.</div>}
+          {mixed && <div className="toast warn" style={{ marginTop: 8 }}>These versions were parsed by different engines (Docling and built-in). Tables are read differently, so some changes may only be parsing differences: parse both with the same engine on the Specs page for a clean comparison.</div>}
           <ErrorNote error={go.error} />
         </div>
       )}

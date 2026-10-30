@@ -7,7 +7,10 @@ export interface ParseRun {
 export interface SpecDoc {
   id: number; family: string; version: string; title: string | null; filename: string | null;
   format: string; pages: number | null; runs: ParseRun[];
+  docling: boolean;   // a Docling conversion of this file exists (its own, or in the To Markdown library): parsing reuses it
 }
+/** auto: Docling when the file has a Docling conversion, else built-in. */
+export type ParserEngine = "auto" | "docling" | "builtin";
 export interface Job {
   id: number; type: string; state: "queued" | "running" | "done" | "failed" | "cancelled";
   progress: number; total: number; message: string | null; error: string | null; result: Record<string, any> | null; created?: string;
@@ -114,9 +117,13 @@ export interface CrossUnit {
 export interface SpecInSet { family: string; version: string; sections: number }
 
 export type ConvertEngine = "docling" | "builtin";
-/** One of the signed-in user's background conversions (GET /api/convert/markdown/jobs); the Markdown itself is fetched on demand. */
+/** A conversion on the To Markdown list (GET /api/convert/markdown/jobs): every finished one in the shared library, plus the
+ *  signed-in user's own queued, running, failed and cancelled ones. The Markdown itself is fetched on demand. */
 export interface ConversionEntry {
-  job: number; source: string | null; state: Job["state"]; message: string | null; created: string; error: string | null;
+  job: number; source: string | null; state: Job["state"]; message: string | null; created: string; updated: string; error: string | null;
+  user: string | null; mine: boolean;   // who converted it
+  can_remove: boolean;   // a finished file only an admin deletes; its owner may cancel or dismiss one that is not finished
+  has_source: boolean;   // the uploaded original can be downloaded (GET /api/convert/markdown/jobs/{job}/source)
   cancelling: boolean;   // cancel asked; a running Docling conversion stops only when the current file is done
   result: Omit<MarkdownConversion, "markdown"> | null;
 }
@@ -126,7 +133,7 @@ export interface MarkdownConversion {
   warnings: string[];
 }
 
-export interface CompareOption { doc_id: number; family: string; version: string; filename: string | null; pages: number | null; run_id: number | null; parsed: boolean; outdated: boolean }
+export interface CompareOption { doc_id: number; family: string; version: string; filename: string | null; pages: number | null; run_id: number | null; parsed: boolean; outdated: boolean; engine: "docling" | "builtin" | null }
 export type Impact = "breaking" | "new" | "changed" | "clarification" | "editorial";
 export interface CompareChapter { chapter: string; title: string; total: number; score: number; breaking: number; new: number; changed: number; clarification: number; editorial: number }
 export interface CompareSide { run_id: number; family: string; version: string; sections: number; tables: number; requirements: number }
