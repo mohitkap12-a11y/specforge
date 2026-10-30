@@ -205,6 +205,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS mcp_fts USING fts5(number, title, body, run_i
   page UNINDEXED, tokenize='unicode61 remove_diacritics 2');
 CREATE TABLE IF NOT EXISTS mcp_index(run_id INTEGER PRIMARY KEY, run_created TEXT, version TEXT, entries INTEGER, seconds REAL,
   built TEXT DEFAULT CURRENT_TIMESTAMP);
+-- the same, for converted documents of the To Markdown library that are not parsed (their mcp_fts run_id is 'lib:<folder>')
+CREATE TABLE IF NOT EXISTS mcp_lib_index(dir TEXT PRIMARY KEY, filename TEXT, version TEXT, entries INTEGER, seconds REAL,
+  built TEXT DEFAULT CURRENT_TIMESTAMP);
 -- Other users following a job they asked for while it was already queued or running (same file, same spec)
 CREATE TABLE IF NOT EXISTS job_watcher(
   job_id INTEGER NOT NULL REFERENCES job(id) ON DELETE CASCADE, user TEXT NOT NULL, PRIMARY KEY(job_id, user)

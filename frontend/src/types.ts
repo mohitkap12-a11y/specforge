@@ -206,6 +206,7 @@ export interface McpClient { ip: string; first_seen: number; last_seen?: number;
 export interface McpStatus {
   settings: McpSettings; url: string; running: boolean; index_job: number | null; comparisons_by_mcp: number;
   documents: { family: string; version: string; run_id: number; index: "current" | "outdated" | "missing"; entries: number; built: string | null; seconds: number | null }[];
+  library: { filename: string; dir: string; index: "current" | "outdated" | "missing"; entries: number; built: string | null; seconds: number | null }[];
   usage: { since: number; client_count: number; active_clients: number; calls: number; errors: number; misses: number; rate_limited: number; refused_disabled: number; tools: McpToolStats[];
     clients: McpClient[]; recent: McpCall[]; recent_misses: McpCall[]; recent_slow: McpCall[]; recent_errors: McpCall[] };
 }

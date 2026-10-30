@@ -470,8 +470,12 @@ def create_app() -> FastAPI:
             state = "missing" if not i else ("current" if i["run_created"] == d["run_created"] and i["version"] == specquery.INDEX_VERSION else "outdated")
             docs.append({"family": d["family"], "version": d["version"], "run_id": d["run_id"], "index": state,
                          "entries": i["entries"] if i else 0, "built": i["built"] if i else None, "seconds": i["seconds"] if i else None})
+        lidx = speclib.lib_index_state()
+        library = [{"filename": r["filename"], "dir": r["dir"], "index": "current" if (i := lidx.get(r["dir"])) and i["version"] == specquery.LIB_INDEX_VERSION
+                    else ("outdated" if i else "missing"), "entries": i["entries"] if i else 0, "built": i["built"] if i else None,
+                    "seconds": i["seconds"] if i else None} for r in speclib.raw_only()]
         busy = row(conn(), "SELECT id FROM job WHERE type='mcp-index' AND state IN ('queued','running') ORDER BY id DESC LIMIT 1")
-        return {"settings": {k: cfg.get(k) for k in MCP_SETTINGS}, "url": _mcp_url(request), "running": mcp.running,
+        return {"library": library, "settings": {k: cfg.get(k) for k in MCP_SETTINGS}, "url": _mcp_url(request), "running": mcp.running,
                 "usage": mcp.usage.snapshot(), "documents": docs, "index_job": busy["id"] if busy else None,
                 "comparisons_by_mcp": conn().execute("SELECT COUNT(*) FROM job WHERE type='compare' AND user='mcp'").fetchone()[0]}
 
@@ -502,12 +506,8 @@ def create_app() -> FastAPI:
             return {"job": busy["id"], "reused": True}
 
         def work(c, prog):
-            lib = specquery.SpecLibrary(DB)
-            docs = lib.documents()
-            for i, d in enumerate(docs):
-                prog(f"indexing {d['family']} {d['version']}", i, len(docs))
-                lib.ensure_index(d, force=True)
-            return {"documents": len(docs), "pruned": lib.prune_index()}
+            r = specquery.SpecLibrary(DB).index_all(prog, force=True)
+            return {"documents": r["documents"], "pruned": r["pruned"]}
         audit("MCP search index rebuild requested")
         return {"job": submit_job("mcp-index", work, {}, label="Rebuild the MCP search index")}
 

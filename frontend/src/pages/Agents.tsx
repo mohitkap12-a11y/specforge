@@ -208,11 +208,19 @@ function Status() {
           <h2 className="grow">Search index</h2>
           <button onClick={() => reindex.mutate()} disabled={reindex.isPending || d.index_job !== null}><RefreshCw size={14} /> {d.index_job !== null ? "Rebuilding…" : "Rebuild"}</button>
         </div>
-        <p className="muted small" style={{ padding: "0 16px" }}>One entry per section, figure and table row of the version each spec serves. Built at startup and on first use; rebuild only if search results look stale. {d.comparisons_by_mcp} comparison(s) computed for agents so far.</p>
+        <p className="muted small" style={{ padding: "0 16px" }}>One entry per section, figure and table row of the version each spec serves, and of each converted document that is not parsed (section text in pieces, tables and table rows from its Markdown). Built at startup and on first use; rebuild only if search results look stale. {d.comparisons_by_mcp} comparison(s) computed for agents so far.</p>
         {d.documents.length === 0 ? <p className="muted small" style={{ padding: "0 16px 12px" }}>No parsed specifications.</p> : (
           <div className="scroll"><table className="t">
             <thead><tr><th>Specification</th><th>Version</th><th>Parse run</th><th>Index</th><th>Entries</th><th>Built</th></tr></thead>
             <tbody>{d.documents.map((x) => <tr key={x.run_id}><td className="mono">{x.family}</td><td>{x.version}</td><td>#{x.run_id}</td>
+              <td><span className={`badge ${x.index === "current" ? "ok" : "warn"}`}>{x.index === "current" ? "ready" : x.index === "missing" ? "built on first use" : "outdated"}</span></td>
+              <td>{x.entries}</td><td className="small muted">{x.built ?? "—"}{x.seconds != null ? ` (${x.seconds} s)` : ""}</td></tr>)}</tbody>
+          </table></div>
+        )}
+        {(d.library ?? []).length > 0 && (
+          <div className="scroll"><table className="t">
+            <thead><tr><th>Converted document (not parsed)</th><th>Index</th><th>Entries</th><th>Built</th></tr></thead>
+            <tbody>{d.library.map((x) => <tr key={x.dir}><td className="mono">{x.filename}</td>
               <td><span className={`badge ${x.index === "current" ? "ok" : "warn"}`}>{x.index === "current" ? "ready" : x.index === "missing" ? "built on first use" : "outdated"}</span></td>
               <td>{x.entries}</td><td className="small muted">{x.built ?? "—"}{x.seconds != null ? ` (${x.seconds} s)` : ""}</td></tr>)}</tbody>
           </table></div>

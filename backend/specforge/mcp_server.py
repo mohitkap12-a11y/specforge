@@ -41,7 +41,8 @@ Pick the most specific tool:
 - diff / list_changes: what changed between two versions (default: latest vs the version before it).
 - search_spec: anything else; then get_section / get_table on the hits. resolve_reference follows "Figure 312" or
   "section 5.2.1 of the NVM Command Set Specification".
-- read_raw: the converted Markdown of a document, for text the structured tools miss.
+- read_raw: the converted Markdown of a document, for text the structured tools miss. Documents that were converted but not
+  parsed (the To Markdown library) are searched by search_spec too; open their hits with the read_raw call each hit shows.
 A specification is named by id (nvme-base), short name (base, mi, nvm, zns) or title; without a version the latest parsed
 version is used and the answer says which. Long answers are paged: pass page=2, 3 ... as the answer instructs."""
 
@@ -229,7 +230,9 @@ def build_server(lib: SpecLibrary, usage: Usage | None = None, log_calls: Callab
     def search_spec(query: str, spec: str | None = None, version: str | None = None, kinds: str | None = None, limit: int = 25):
         """Keyword search over sections, figures (tables) and table rows. NVMe abbreviations are expanded (CDW10, CNS, NSID,
         LBAF ...). Without `spec`, searches the latest version of every specification; version="all" searches every version.
-        kinds: comma list of section, table, row. Returns hits with section / figure numbers to open with get_section or get_table."""
+        Documents converted but not parsed are searched as well (all of them without `spec`; one by its file name as `spec`).
+        kinds: comma list of section, table, row, doc. Returns hits with section / figure numbers to open with get_section or
+        get_table, or for a converted document the read_raw call that opens the hit."""
         return lib.search(query, spec, version, kinds, limit)
 
     @tool
@@ -296,11 +299,13 @@ def build_server(lib: SpecLibrary, usage: Usage | None = None, log_calls: Callab
         return await run(lib.diff, spec, item, from_version, to_version, page)
 
     @tool
-    def read_raw(spec: str, version: str | None = None, around: str | None = None, context: int = 40, page: int = 1) -> str:
-        """The converted (Docling) Markdown of a document, for text the structured tools do not cover. With `around`, only the lines
-        around each occurrence of that phrase (`context` lines either side); otherwise the whole document, paged.
-        `spec` may also be the file name of a document that was converted but not parsed."""
-        return lib.raw(spec, version, around, context, page)
+    def read_raw(spec: str, version: str | None = None, section: str | None = None, lines: str | None = None, around: str | None = None,
+                 context: int = 40, page: int = 1) -> str:
+        """The converted (Docling) Markdown of a document, for text the structured tools do not cover. `section`: one section by
+        number ("5.2.14") or heading, with its sub-sections; `lines`: a line range ("14604-15616", as search hits give it);
+        `around`: the lines around each occurrence of a phrase (`context` lines either side); none of these: the whole document,
+        paged. `spec` may also be the file name of a document that was converted but not parsed."""
+        return lib.raw(spec, version, around, context, page, section=section, lines=lines)
 
     @server.resource("specforge://specs", name="specs", title="Parsed specifications", mime_type="text/markdown",
                      description="Every parsed specification and version on this server")

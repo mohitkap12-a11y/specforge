@@ -13,7 +13,9 @@ nearby. The Docling Markdown stays reachable through read_raw for anything the p
   structure            a data structure, log page or descriptor, optionally narrowed to a byte offset or a field
   reference            "Figure 312", "section 5.2.1 of the NVM Command Set Specification" -> the node it names
   diff / changes       what changed between two versions (computed on demand through the job queue, then kept)
-  raw                  the Docling Markdown of a document, paged or around a phrase
+  raw                  the Docling Markdown of a document, paged, around a phrase, one section or a line range
+  library_entries      a converted-only document (To Markdown library, not parsed) cut into search entries: its title, section
+                       text in pieces, tables and table rows, each with its line numbers to open with read_raw
 
 Answers are capped at PAGE_CHARS characters; longer ones end with the page to ask for next. A version that was not asked for is
 the latest parsed one, and the answer says so.
@@ -75,6 +77,8 @@ _DWORD = re.compile(r"\b(?:command\s+)?dword\s*(\d+)\b|\bcdw\s*(\d+)\b|\bdw\s*(\
 # "Command Dword 10", "Command Dwords 10 and 11", NVMe-MI "NMD0" / "NVMe Management Dword 0" (checked first: it also says "Dword 0")
 _CAP_DWORDS = re.compile(r"\b(?:NMD\s*|management\s+dword\s*)([01])\b|\b(?:(?:command|request)\s+)?dwords?\s+(\d+)(?:\s*(?:to|-|–|—|and)\s*(\d+))?", re.I)
 FAILED_FOR = 600        # seconds a failed comparison is reported instead of being started again
+LIB_INDEX_VERSION = "1"   # bump when library_entries changes: every converted document is indexed again
+LIB_PIECE = 1500        # characters of section text per search entry of a converted document
 REF_ROWS = 80           # a referenced table up to this size is printed with the answer; a bigger one is named, to open with get_table
 
 
@@ -236,6 +240,161 @@ def logical_tables(raw: dict[str, dict]) -> tuple[dict[str, dict], dict[str, str
 
 
 # ----------------------------------------------------------------------------- the library
+
+_MD_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_NUMBERED = re.compile(r"^((?:\d+|[A-Z](?=\.\d))(?:\.\d+)*)\.?\s+(\S.*)$")
+_BOLD_LINE = re.compile(r"^\*\*(.+?)\*\*$")
+_CAPTION = re.compile(r"^(?:\*\*)?\s*(?:Figure|Table)\s+(\d+[A-Za-z]?)\s*[:.\u2013\u2014-]\s*(.*?)\s*(?:\*\*)?$", re.I)
+_TABLE_SEP = re.compile(r"^\|[\s:|-]+\|?$")
+_TOC_TITLE = re.compile(r"^(table of (contents|figures|tables)|contents|list of (figures|tables))$", re.I)
+
+
+def md_front_matter(lines: list[str]) -> tuple[dict[str, str], int]:
+    """(the YAML header's key: value pairs, the first line after it) of a converted file."""
+    if not lines or lines[0].strip() != "---":
+        return {}, 0
+    meta = {}
+    for i in range(1, min(len(lines), 60)):
+        if lines[i].strip() == "---":
+            return meta, i + 1
+        k, _, v = lines[i].partition(":")
+        meta[k.strip()] = v.strip().strip('"')
+    return {}, 0
+
+
+def md_outline(lines: list[str]) -> list[dict]:
+    """The headings of a converted file: {line, end, level, number, title, skip}. Besides Markdown headings, a bold line holding only a
+    section number with a bold title on the next line ("**5.2.14.2.1**" / "**Identify Controller Data Structure (CNS 01h)**", as the
+    PDF converters leave headings they did not recognise) counts. A numbered section ends at the next numbered heading at its depth or
+    above (stray unnumbered headings inside it do not end it); an unnumbered one at the next heading at its level or above."""
+    heads, i = [], md_front_matter(lines)[1]
+    while i < len(lines):
+        ln = lines[i].strip()
+        h = None
+        if m := _MD_HEADING.match(ln):
+            title = clean(m.group(2).strip("*"))
+            n = _NUMBERED.match(title)
+            h = {"line": i, "level": len(m.group(1)), "number": n.group(1) if n else "", "title": n.group(2) if n else title, "skip": i}
+        elif (m := _BOLD_LINE.match(ln)) and not _CAPTION.match(inner := m.group(1).strip()):
+            if re.fullmatch(r"\d+(?:\.\d+)+", inner):
+                j = i + 1
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+                if j < len(lines) and (t := _BOLD_LINE.match(lines[j].strip())) and not _CAPTION.match(t.group(1)):
+                    h = {"line": i, "level": 0, "number": inner, "title": clean(t.group(1)), "skip": j}
+            elif (n := _NUMBERED.match(inner)) and "." in n.group(1) and n.group(2)[0].isalpha():
+                h = {"line": i, "level": 0, "number": n.group(1), "title": clean(n.group(2)), "skip": i}
+        if h:
+            heads.append(h)
+            i = h["skip"]
+        i += 1
+    for k, h in enumerate(heads):
+        h["end"] = len(lines)
+        depth = h["number"].count(".") + 1 if h["number"] else None
+        for nxt in heads[k + 1:]:
+            if (depth and nxt["number"] and nxt["number"].count(".") + 1 <= depth) or \
+               (not depth and (nxt["number"] or (nxt["level"] and nxt["level"] <= h["level"]))):
+                h["end"] = nxt["line"]
+                break
+    return heads
+
+
+def _row_cells(line: str) -> list[str]:
+    return [clean(c) for c in line.strip().strip("|").split("|")]
+
+
+def library_entries(text: str, rid: str, filename: str) -> list[tuple]:
+    """Search entries (number, title, body, run_id, key, kind, line) of one converted document. Keys:
+    rid|doc, rid|<section>|S<from>-<to> (a piece of section text), rid|<section>|T<from>-<to> (a table, with its continuations under
+    the same caption), that key + #<line> (a row). Line numbers count from 1. Left out: the table of contents, image markers,
+    separator rows, spacer rows (only footnote numbers) and a header row repeated where the table continues."""
+    lines = text.splitlines()
+    meta, start = md_front_matter(lines)
+    title = meta.get("title") or filename
+    out = [("", title, f"{filename}\n{meta.get('source', '')}", rid, f"{rid}|doc", "doc", 1)]
+    heads = {h["line"]: h for h in md_outline(lines)}
+    skip_to, cur = -1, None
+    prose: list[tuple[int, str]] = []              # (line, text) of the current section; "" marks a paragraph break
+    tables: dict[str, dict] = {}                   # caption (or section) -> {from, to, number, title, header, rows, sec}
+    caption, tab, prev_table = None, None, False
+
+    def flush() -> None:
+        sec = cur["number"] if cur else ""
+        name = (cur["title"] if cur else title)
+        piece, a = [], None
+        paras: list[tuple[int, int, str]] = []
+        buf, b0, b1 = [], None, None
+        for ln, t in prose + [(0, "")]:
+            if t:
+                buf.append(t)
+                b0, b1 = (ln if b0 is None else b0), ln
+            elif buf:
+                paras.append((b0, b1, " ".join(buf)))
+                buf, b0 = [], None
+        size, b = 0, None
+        for p0, p1, t in paras:
+            if piece and size + len(t) > LIB_PIECE:
+                out.append((sec, name, "\n".join(piece), rid, f"{rid}|{sec}|S{a}-{b}", "section", a))
+                piece, size = [], 0
+            while len(t) > LIB_PIECE * 2:             # one huge paragraph (a converter that lost the line breaks)
+                cut = t.rfind(" ", 0, LIB_PIECE) or LIB_PIECE
+                out.append((sec, name, t[:cut], rid, f"{rid}|{sec}|S{p0}-{p1}", "section", p0))
+                t = t[cut:].strip()
+            if not piece:
+                a = p0
+            piece.append(t)
+            size, b = size + len(t), p1
+        if piece:
+            out.append((sec, name, "\n".join(piece), rid, f"{rid}|{sec}|S{a}-{b}", "section", a))
+        prose.clear()
+
+    for i in range(start, len(lines)):
+        if i <= skip_to:
+            continue
+        ln = lines[i].strip()
+        if i in heads:
+            flush()
+            cur, skip_to, caption, prev_table = heads[i], heads[i]["skip"], None, False
+            continue
+        if cur and not cur["number"] and _TOC_TITLE.match(cur["title"]):
+            continue
+        if ln.startswith("|"):
+            if _TABLE_SEP.match(ln):
+                continue
+            cells = [c for c in _row_cells(ln) if c]
+            first = not prev_table
+            prev_table = True
+            sec = cur["number"] if cur else ""
+            k = (caption[0] if caption else "", sec)
+            if first and k not in tables:
+                tables[k] = {"from": i + 1, "to": i + 1, "number": caption[1] if caption else sec,
+                             "title": caption[2] if caption else (cur["title"] if cur else title), "header": cells, "rows": [], "sec": sec}
+                continue
+            tab = tables[k]
+            tab["to"] = i + 1
+            if not cells or cells == tab["header"] or all(re.fullmatch(r"\d{1,2}", c) for c in cells):
+                continue
+            tab["rows"].append((i + 1, cells))
+            continue
+        prev_table = False
+        if not ln:
+            prose.append((i + 1, ""))
+            continue
+        if m := _CAPTION.match(ln):
+            caption = (f"Figure {m.group(1)}: {clean(m.group(2))}", m.group(1), clean(m.group(2)))
+            continue
+        if ln.startswith("<!--") or re.search(r"\.{5,}\s*\d+$", ln):
+            continue
+        prose.append((i + 1, clean(ln.strip("*"))))
+    flush()
+    for t in tables.values():
+        tk = f"{rid}|{t['sec']}|T{t['from']}-{t['to']}"
+        body = " | ".join(t["header"]) + "\n" + "\n".join(" | ".join(c) for _, c in t["rows"])
+        out.append((t["number"], t["title"], body[:20_000], rid, tk, "table", t["from"]))
+        for ln, cells in t["rows"]:
+            out.append((t["number"], t["title"], " | ".join(cells), rid, f"{tk}#{ln}", "row", ln))
+    return out
+
 
 class SpecLibrary:
     """Parsed documents of one workspace database, with the loaded models cached (a parse run never changes once it is done)."""
@@ -504,15 +663,55 @@ class SpecLibrary:
         c.commit()
         return len(stale)
 
-    def index_all(self, progress: Callable[[str, int, int], None] | None = None) -> dict:
-        docs = self.documents()
+    def index_all(self, progress: Callable[[str, int, int], None] | None = None, force: bool = False) -> dict:
+        docs, libs = self.documents(), self.raw_only()
         built = 0
         for i, d in enumerate(docs):
             if progress:
-                progress(f"indexing {d['family']} {d['version']}", i, len(docs))
-            built += self.ensure_index(d)
-        pruned = self.prune_index()
-        return {"documents": len(docs), "built": built, "pruned": pruned}
+                progress(f"indexing {d['family']} {d['version']}", i, len(docs) + len(libs))
+            built += self.ensure_index(d, force)
+        for i, r in enumerate(libs):
+            if progress:
+                progress(f"indexing {r['filename']}", len(docs) + i, len(docs) + len(libs))
+            built += self.ensure_lib_index(r, force)
+        pruned = self.prune_index() + self.prune_lib_index(libs)
+        return {"documents": len(docs) + len(libs), "built": built, "pruned": pruned}
+
+    # -- converted documents that are not parsed specs (To Markdown library): indexed from their Markdown, keyed lib:<folder>
+    def lib_index_state(self) -> dict[str, dict]:
+        return {r["dir"]: r for r in rows(self.conn(), "SELECT * FROM mcp_lib_index")}
+
+    def ensure_lib_index(self, r: dict, force: bool = False) -> bool:
+        c, rid = self.conn(), f"lib:{r['dir']}"
+        with self._lock:
+            lock = self._index_locks.setdefault(rid, threading.Lock())
+        with lock:
+            have = row(c, "SELECT version FROM mcp_lib_index WHERE dir=?", (r["dir"],))
+            if have and have["version"] == LIB_INDEX_VERSION and not force:
+                return False
+            f = self._markdown_file(dir_=r["dir"])
+            if f is None:
+                return False
+            t0 = time.monotonic()
+            entries = library_entries(f.read_text(encoding="utf-8", errors="replace"), rid, r["filename"])
+            c.execute("DELETE FROM mcp_fts WHERE run_id=?", (rid,))
+            c.executemany("INSERT INTO mcp_fts(number,title,body,run_id,key,kind,page) VALUES(?,?,?,?,?,?,?)", entries)
+            c.execute("INSERT OR REPLACE INTO mcp_lib_index(dir, filename, version, entries, seconds, built) VALUES(?,?,?,?,?,CURRENT_TIMESTAMP)",
+                      (r["dir"], r["filename"], LIB_INDEX_VERSION, len(entries), round(time.monotonic() - t0, 2)))
+            c.commit()
+            return True
+
+    def prune_lib_index(self, libs: list[dict] | None = None) -> int:
+        """Drop the entries of converted documents that were deleted from the library or have since been parsed as a spec."""
+        c = self.conn()
+        keep = {r["dir"] for r in (self.raw_only() if libs is None else libs)}
+        stale = [d for d in self.lib_index_state() if d not in keep]
+        for d in stale:
+            c.execute("DELETE FROM mcp_fts WHERE run_id=?", (f"lib:{d}",))
+            c.execute("DELETE FROM mcp_lib_index WHERE dir=?", (d,))
+        if stale:
+            c.commit()
+        return len(stale)
 
     @staticmethod
     def fts_query(q: str) -> tuple[list[str], list[str]]:
@@ -535,12 +734,25 @@ class SpecLibrary:
         """(markdown, hit count)."""
         if not (query or "").strip():
             raise QueryError("give a query, e.g. 'Identify CNS values' or 'Get Log Page NUMDL'")
-        docs, note = self.docs_for(spec, version)
+        all_libs = self.raw_only()
+        libs = [r] if spec and (r := self._lib_doc(spec, all_libs)) else []
+        if not spec and _norm_version(version or "latest") in ("latest", "all"):
+            libs = all_libs                         # a converted document has no version: it is in every unversioned search
+        docs, note = [], ""
+        if not (spec and libs):
+            try:
+                docs, note = self.docs_for(spec, version)
+            except NotFound:
+                if spec or not libs:
+                    raise
         for d in docs:
             self.ensure_index(d)
-        by_run = {d["run_id"]: d for d in docs}
+        self.prune_lib_index(all_libs)
+        for r in libs:
+            self.ensure_lib_index(r)
+        by_run: dict[Any, dict] = {d["run_id"]: d for d in docs} | {f"lib:{r['dir']}": r for r in libs}
         groups, words = self.fts_query(query)
-        want_kinds = {k.strip().rstrip("s") for k in (kinds or "").split(",") if k.strip()} or {"section", "table", "row"}
+        want_kinds = {k.strip().rstrip("s") for k in (kinds or "").split(",") if k.strip()} or {"section", "table", "row", "doc"}
         want_kinds = {"row" if k in ("table row", "row") else k for k in want_kinds}
         if "table" in want_kinds:
             want_kinds.add("row")
@@ -587,14 +799,19 @@ class SpecLibrary:
         lines = [f"# Search: {query}", ""]
         if note:
             lines += [note, ""]
-        scope = ", ".join(f"{d['family']} {d['version']}" for d in docs)
-        lines.append(f"Searched: {scope}" + ("" if spec else " (latest version of each specification; pass spec / version to narrow or widen)"))
+        scope = ", ".join([f"{d['family']} {d['version']}" for d in docs] + ([libs[0]["filename"]] if len(libs) == 1 else
+                                                                              [f"{len(libs)} converted documents"] if libs else []))
+        lines.append(f"Searched: {scope}" + ("" if spec else " (latest version of each specification and every converted document; "
+                                                            "pass spec / version to narrow or widen)"))
         lines.append("")
         if not out:
             lines.append("No matches. Try other words, a figure or section number, or read_raw with a phrase.")
             return "\n".join(lines), 0
         for h in out:
             d = by_run[h["run_id"]]
+            if "dir" in d:
+                lines.append(self._lib_hit(h, d))
+                continue
             where = f"{d['family']}@{d['version']}"
             if h["kind"] == "section":
                 head = f"§{h['number']} {h['title']}"
@@ -608,8 +825,30 @@ class SpecLibrary:
             p = f", p. {h['page']}" if h.get("page") else ""
             snip = clean(h.get("snip") or "")
             lines.append(f"- **{head}** — {where}{p} · `{uri(d, node)}`" + (f"\n  {snip}" if snip else ""))
-        lines += ["", "Open a hit with get_section (section number) or get_table (figure number)."]
+        lines += ["", "Open a hit with get_section (section number) or get_table (figure number); a hit in a converted document "
+                      "(not parsed: no command or structure lookups) with the read_raw call shown."]
         return "\n".join(lines), len(out)
+
+    @staticmethod
+    def _lib_hit(h: dict, r: dict) -> str:
+        """A search hit in a converted document: where it is (section, lines) and the read_raw call that opens it."""
+        sec, part = h["key"].split("|")[1:3] if h["kind"] != "doc" else ("", "")
+        m = re.fullmatch(r"[ST](\d+)-(\d+)(?:#\d+)?", part)
+        lo, hi = m.groups() if m else (None, None)
+        name = r["filename"].replace('"', "'")
+        if h["kind"] == "doc":
+            head, call = h["title"], f'read_raw(spec="{name}")'
+        elif h["kind"] == "section":
+            head = f"§{sec} {h['title']}" if sec else h["title"]
+            call = f'read_raw(spec="{name}", section="{sec}")' if sec else f'read_raw(spec="{name}", lines="{lo}-{hi}")'
+        else:
+            what = f"Figure {h['number']}: {h['title']}" if h["number"] and h["number"] != sec else f"Table in {h['title']}"
+            head = what + (" (row)" if h["kind"] == "row" else "")
+            call = f'read_raw(spec="{name}", lines="{h["page"] if h["kind"] == "row" else f"{lo}-{hi}"}")'
+        where = f"{r['filename']} (converted, not parsed)" + (f", §{sec}" if sec and h["kind"] != "section" else "")
+        at = f", line {h['page']}" if h["kind"] == "row" else (f", lines {lo}–{hi}" if lo else "")
+        snip = clean(h.get("snip") or "")
+        return f"- **{head}** — {where}{at} · `{call}`" + (f"\n  {snip}" if snip else "")
 
     def _direct_hits(self, query: str, docs: list[dict]) -> list[dict]:
         """A query that is a section or figure number ('5.2.1', 'Figure 101') finds that node first."""
@@ -1303,11 +1542,19 @@ class SpecLibrary:
                 return f
         return None
 
-    def raw(self, spec: str | None, version: str | None = None, around: str | None = None, context: int = 40, page: int = 1) -> str:
-        f, title, note = None, "", ""
+    @staticmethod
+    def _lib_doc(spec: str | None, libs: list[dict]) -> dict | None:
+        """The converted document a name means: its whole file name, else a part of it (taken before the fuzzy spec-name matching,
+        which would take "nvme-mi-ecn-123.pdf" for NVMe-MI)."""
         want = clean(spec or "").lower()
-        # a converted file named by its file name first: the fuzzy spec-name matching would take "nvme-mi-ecn-123.pdf" for NVMe-MI
-        lib_hit = next((r for r in self.raw_only() if len(want) >= 3 and (want == r["filename"].lower() or want in r["filename"].lower())), None)
+        if len(want) < 3:
+            return None
+        return next((r for r in libs if want == r["filename"].lower()), None) or next((r for r in libs if want in r["filename"].lower()), None)
+
+    def raw(self, spec: str | None, version: str | None = None, around: str | None = None, context: int = 40, page: int = 1,
+            section: str | None = None, lines: str | None = None) -> str:
+        f, title, note = None, "", ""
+        lib_hit = self._lib_doc(spec, self.raw_only())
         if lib_hit:
             f, title = self._markdown_file(dir_=lib_hit["dir"]), lib_hit["filename"]
         else:
@@ -1319,6 +1566,8 @@ class SpecLibrary:
         if f is None:
             raise NotFound(f"{title} has no Docling Markdown on this server (it was parsed without a To Markdown conversion)")
         text = f.read_text(encoding="utf-8", errors="replace")
+        if section or lines:
+            return paginate(self._raw_part(text, title, note, section, lines), page)
         head = f"# {title} (Docling Markdown{', around “' + around + '”' if around else ''})\n\n" + (note + "\n\n" if note else "")
         if not around:
             return paginate(head + text, page)
@@ -1339,6 +1588,33 @@ class SpecLibrary:
             last = b - 1
         extra = f"\n\n_{len(hits)} occurrences; the first 20 are shown._" if len(hits) > 20 else ""
         return paginate(head + "\n\n---\n\n".join(blocks) + extra, page)
+
+    @staticmethod
+    def _raw_part(text: str, title: str, note: str, section: str | None, span: str | None) -> str:
+        """One section of the Markdown (by number or heading, with its sub-sections) or a line range ("120-180")."""
+        lines = text.splitlines()
+        if span:
+            m = re.fullmatch(r"\s*(\d+)\s*(?:[-–:]\s*(\d+))?\s*", span)
+            if not m:
+                raise QueryError("lines is a line number or a range like 120-180 (as search hits give them)")
+            a = max(1, int(m.group(1)))
+            b = min(len(lines), int(m.group(2) or a))
+            if a > b:
+                raise NotFound(f"{title} has {len(lines)} lines")
+            label = f"lines {a}–{b}"
+        else:
+            heads = md_outline(lines)
+            want = clean(section or "").lstrip("§").strip()
+            want = re.sub(r"^sec(?:tion)?\.?\s*", "", want, flags=re.I)
+            h = next((h for h in heads if h["number"] and h["number"] == want.rstrip(".")), None)
+            if h is None and not re.fullmatch(r"[\d.]+", want):
+                best = max(heads, key=lambda h: _similar(want, h["title"]), default=None)
+                h = best if best and _similar(want, best["title"]) >= 0.5 else None
+            if h is None:
+                raise NotFound(f"{title} has no section '{section}' (search_spec with spec=\"{title}\" finds where a topic is)")
+            a, b = h["line"] + 1, h["end"]
+            label = f"§{h['number']} {h['title']}".replace("§ ", "") + f", lines {a}–{b}"
+        return f"# {title} — {label}\n\n" + (note + "\n\n" if note else "") + "\n".join(lines[a - 1:b]).strip("\n")
 
     # ------------------------------------------------------------------------- resources
     def resource(self, spec_at_version: str, node: str) -> str:

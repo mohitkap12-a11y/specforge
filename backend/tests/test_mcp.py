@@ -194,6 +194,90 @@ def test_read_raw_serves_converted_files_by_name(lib, conn, ws):
         lib.raw("frobnicator manual")
 
 
+LIB_MD = """---
+title: "ECN 123: New Feature"
+source: "nvme-ecn-123.pdf"
+engine: builtin
+---
+
+###### Table of Contents
+
+5.2.14 Identify command ........ 12
+
+### 5.2.14 Identify command
+
+The Identify command returns a data buffer.
+
+**5.2.14.2.1**
+
+**Identify Controller Data Structure (CNS 01h)**
+
+The Identify Controller data structure is returned to the host.
+
+**Figure 338: Identify – Identify Controller Data Structure**
+
+| Bytes |  | Description |
+| --- | --- | --- |
+|  |  | 1 |
+| 77 |  | Maximum Data Transfer Size (MDTS): the largest transfer in units of CAP.MPSMIN. |
+
+**Figure 338: Identify – Identify Controller Data Structure**
+
+| Bytes |  | Description |
+| --- | --- | --- |
+| 79:78 |  | Controller ID (CNTLID): the NVM subsystem unique controller identifier. |
+
+### 5.2.15 Keep Alive command
+
+The Keep Alive command restarts the Keep Alive Timer when the keep alive timeout expires.
+"""
+
+
+def test_converted_documents_are_searched_and_opened_by_section_or_lines(lib, conn, ws):
+    """A converted-only document is indexed from its Markdown: section text, tables (continuations stitched) and rows, each hit
+    naming the read_raw call that opens it; deleting the conversion drops its entries."""
+    import json
+
+    from specforge.specquery import library_entries
+
+    folder = ws / "conversions" / "c9"
+    folder.mkdir(parents=True)
+    (folder / "out.md").write_text(LIB_MD, encoding="utf-8")
+    conn.execute("INSERT INTO job(type,state,payload_json,result_json) VALUES('convert-markdown','done',?,?)",
+                 (json.dumps({"filename": "nvme-ecn-123.pdf", "sha256": "e123"}), json.dumps({"dir": "c9"})))
+    conn.commit()
+
+    e = library_entries(LIB_MD, "lib:c9", "nvme-ecn-123.pdf")
+    tables = [x for x in e if x[5] == "table"]
+    assert len(tables) == 1 and tables[0][0] == "338" and tables[0][4].startswith("lib:c9|5.2.14.2.1|T")
+    rows_ = [x[2] for x in e if x[5] == "row"]
+    assert rows_ == ["77 | Maximum Data Transfer Size (MDTS): the largest transfer in units of CAP.MPSMIN.",
+                     "79:78 | Controller ID (CNTLID): the NVM subsystem unique controller identifier."]   # no spacer, no repeated header
+    assert not any("........" in x[2] for x in e)                                                        # no table of contents
+
+    md, n = lib.search("maximum data transfer size")
+    assert n >= 1 and "nvme-ecn-123.pdf (converted, not parsed), §5.2.14.2.1" in md and "Figure 338" in md
+    line = LIB_MD.splitlines().index("| 77 |  | Maximum Data Transfer Size (MDTS): the largest transfer in units of CAP.MPSMIN. |") + 1
+    assert f"line {line}" in md and f'lines="{line}"' in md
+    md, _ = lib.search("keep alive timeout expires", spec="ecn-123")
+    assert md.splitlines()[2].startswith("Searched: nvme-ecn-123.pdf")
+    assert '§5.2.15 Keep Alive command' in md and 'read_raw(spec="nvme-ecn-123.pdf", section="5.2.15")' in md
+
+    sec = lib.raw("nvme-ecn-123.pdf", section="5.2.14.2.1")
+    assert sec.startswith("# nvme-ecn-123.pdf — §5.2.14.2.1 Identify Controller Data Structure (CNS 01h), lines")
+    assert "CNTLID" in sec and "Keep Alive" not in sec
+    assert "CNTLID" in lib.raw("ecn-123", section="Identify command") and "Keep Alive" not in lib.raw("ecn-123", section="5.2.14")
+    assert "Keep Alive Timer" in lib.raw("ecn-123", section="keep alive command")
+    assert lib.raw("ecn-123", lines=f"{line}-{line}").endswith("CAP.MPSMIN. |")
+    with pytest.raises(NotFound, match="no section"):
+        lib.raw("ecn-123", section="9.9")
+
+    conn.execute("DELETE FROM job WHERE type='convert-markdown'")
+    conn.commit()
+    assert lib.prune_lib_index() == 1
+    assert conn.execute("SELECT COUNT(*) FROM mcp_fts WHERE run_id='lib:c9'").fetchone()[0] == 0
+
+
 def test_usage_figures_reset_and_forget_idle_clients(monkeypatch):
     from specforge import mcp_server
 
