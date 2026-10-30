@@ -354,6 +354,7 @@ class McpEndpoint:
             try:
                 c = self.settings().get("mcp") or {}
                 self.lib.compare_wait_s = float(c.get("compare_wait_s", 60) or 60)
+                self.lib.library_search = bool(c.get("library_search", True))
             except Exception:  # noqa: BLE001  a busy database must not take the endpoint down
                 pass
             self._cfg = (time.monotonic(), c)

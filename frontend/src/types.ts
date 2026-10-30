@@ -199,7 +199,7 @@ export interface ResetPreview { scope: ResetScope; counts: Record<string, number
 export interface McpTool { name: string; description: string; params: string[]; required: string[] }
 export interface McpInfo { url: string; sse_url: string; enabled: boolean; rate_limit_per_min: number; running: boolean; tools: McpTool[];
   specs: { family: string; version: string; title: string | null }[]; version: string }
-export interface McpSettings { enabled: boolean; log_calls: boolean; rate_limit_per_min: number; compare_wait_s: number; public_url: string }
+export interface McpSettings { enabled: boolean; log_calls: boolean; rate_limit_per_min: number; compare_wait_s: number; public_url: string; library_search: boolean }
 export interface McpCall { ts: number; tool: string; args: string; ms: number; outcome: "ok" | "miss" | "error"; ip: string; error?: string }
 export interface McpToolStats { tool: string; calls: number; errors: number; misses: number; slow: number; avg_ms: number; max_ms: number; last?: number }
 export interface McpClient { ip: string; first_seen: number; last_seen?: number; requests: number; calls: number; limited: number; active: boolean }

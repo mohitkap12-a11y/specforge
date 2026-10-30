@@ -152,6 +152,19 @@ function SettingsCard({ s }: { s: McpSettings }) {
         <Switch checked={s.log_calls} label="Log every call" onChange={(v) => save.mutate({ log_calls: v })} />
         <span>One Activity-log line per call (errors are always logged)</span>
       </div>
+      <div className="row" style={{ marginBottom: 4 }}>
+        <Switch checked={s.library_search ?? true} label="Search converted documents with the index" onChange={(v) => save.mutate({ library_search: v })} />
+        <span>{(s.library_search ?? true) ? "Converted documents searched with the index" : "Converted documents not searched: agents read them with read_raw only"}</span>
+      </div>
+      <details className="small" style={{ margin: "0 0 12px 46px" }}>
+        <summary>What this switch does</summary>
+        <div className="muted" style={{ marginTop: 6 }}>
+          <p><b>Which documents it affects.</b> Only documents converted on the To Markdown page that are <i>not</i> parsed specifications. Parsed specifications are always searched through their own structured index; this switch does not touch them, nor get_command, get_structure and the other lookups.</p>
+          <p><b>On (default).</b> search_spec also searches every converted document: its section text, tables and individual table rows. Each hit names the section number or line range and the exact read_raw call that opens just that part (for example one row of Identify Controller, about 400 tokens, instead of the whole section, about 45k tokens). With spec set to a file name, search_spec searches that one file.</p>
+          <p><b>Off.</b> search_spec answers from parsed specifications only and says that converted documents are not searched; naming a converted file in search_spec returns a hint to use read_raw. Agents can still read converted documents with read_raw: the whole file page by page, around a phrase, one section, or a line range. This is how the server behaved before the index existed, so you can ask an agent the same question both ways and compare the answers, tokens used and number of calls.</p>
+          <p><b>Indexing continues either way.</b> New conversions are indexed, deleted ones are removed and Rebuild works whether the switch is on or off, so turning it back on takes effect within 2 seconds, with nothing to rebuild.</p>
+        </div>
+      </details>
       <div className="grid">
         <Field label="Requests per minute per machine" hint="0 = no limit"><input type="number" min={0} value={rate} onChange={(e) => setRate(e.target.value)} /></Field>
         <Field label="Wait for a new comparison (s)" hint="then the agent is told to retry"><input type="number" min={1} max={600} value={wait} onChange={(e) => setWait(e.target.value)} /></Field>

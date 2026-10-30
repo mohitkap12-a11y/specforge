@@ -272,6 +272,15 @@ def test_converted_documents_are_searched_and_opened_by_section_or_lines(lib, co
     with pytest.raises(NotFound, match="no section"):
         lib.raw("ecn-123", section="9.9")
 
+    lib.library_search = False                       # the admin switch: not searched, still indexed and readable
+    md, _ = lib.search("maximum data transfer size")
+    assert "nvme-ecn-123.pdf" not in md and "converted documents are not searched" in md
+    with pytest.raises(QueryError, match="turned off"):
+        lib.search("keep alive", spec="ecn-123")
+    assert "Keep Alive Timer" in lib.raw("ecn-123", section="5.2.15")
+    assert lib.lib_index_state()["c9"]["entries"] == len(e)
+    lib.library_search = True
+
     conn.execute("DELETE FROM job WHERE type='convert-markdown'")
     conn.commit()
     assert lib.prune_lib_index() == 1
@@ -379,6 +388,9 @@ def test_admin_switch_rate_limit_and_public_url(ws):
         assert c.put("/api/mcp/settings", json={"nope": 1}).status_code == 422
         c.put("/api/mcp/settings", json={"public_url": "http://specforge.lab:8000/"})
         assert c.get("/api/mcp/info").json()["url"] == "http://specforge.lab:8000/mcp"
+        assert c.get("/api/mcp/status").json()["settings"]["library_search"] is True     # on by default
+        assert c.put("/api/mcp/settings", json={"library_search": "no"}).status_code == 422
+        assert c.put("/api/mcp/settings", json={"library_search": False}).json()["library_search"] is False
 
 
 def test_without_sign_in_only_localhost_requests_are_answered(ws):

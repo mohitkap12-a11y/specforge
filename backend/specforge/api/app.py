@@ -430,7 +430,8 @@ def create_app() -> FastAPI:
         return saved
 
     # ------------------------------------------------------------------ MCP endpoint (/mcp): guide for everyone, status for admins
-    MCP_SETTINGS = {"enabled": bool, "log_calls": bool, "rate_limit_per_min": (0, 100_000), "compare_wait_s": (1, 600), "public_url": str}
+    MCP_SETTINGS = {"enabled": bool, "log_calls": bool, "rate_limit_per_min": (0, 100_000), "compare_wait_s": (1, 600), "public_url": str,
+                    "library_search": bool}
 
     def _mcp_warm_index():
         """Index every served parse run for search in the background, so the first agent query does not wait for it."""

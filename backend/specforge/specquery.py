@@ -409,6 +409,7 @@ class SpecLibrary:
         self._index_locks: dict[int, threading.Lock] = {}
         self._compare_lock = threading.Lock()
         self.compare_wait_s = 60.0
+        self.library_search = True   # admin switch: search_spec also searches converted-only documents (they are indexed either way)
 
     # -- connections (per thread: tools run on a thread pool)
     def conn(self) -> sqlite3.Connection:
@@ -736,7 +737,10 @@ class SpecLibrary:
             raise QueryError("give a query, e.g. 'Identify CNS values' or 'Get Log Page NUMDL'")
         all_libs = self.raw_only()
         libs = [r] if spec and (r := self._lib_doc(spec, all_libs)) else []
-        if not spec and _norm_version(version or "latest") in ("latest", "all"):
+        if libs and not self.library_search:
+            raise QueryError(f"searching converted documents is turned off on this server: read {libs[0]['filename']} with "
+                             f"read_raw(spec=\"{libs[0]['filename']}\", around=\"<phrase>\") or section=\"<number>\"")
+        if not spec and _norm_version(version or "latest") in ("latest", "all") and self.library_search:
             libs = all_libs                         # a converted document has no version: it is in every unversioned search
         docs, note = [], ""
         if not (spec and libs):
@@ -748,7 +752,7 @@ class SpecLibrary:
         for d in docs:
             self.ensure_index(d)
         self.prune_lib_index(all_libs)
-        for r in libs:
+        for r in libs if self.library_search else all_libs:   # kept indexed while the switch is off, ready when it goes on
             self.ensure_lib_index(r)
         by_run: dict[Any, dict] = {d["run_id"]: d for d in docs} | {f"lib:{r['dir']}": r for r in libs}
         groups, words = self.fts_query(query)
@@ -801,8 +805,9 @@ class SpecLibrary:
             lines += [note, ""]
         scope = ", ".join([f"{d['family']} {d['version']}" for d in docs] + ([libs[0]["filename"]] if len(libs) == 1 else
                                                                               [f"{len(libs)} converted documents"] if libs else []))
-        lines.append(f"Searched: {scope}" + ("" if spec else " (latest version of each specification and every converted document; "
-                                                            "pass spec / version to narrow or widen)"))
+        lines.append(f"Searched: {scope}" + ("" if spec else " (latest version of each specification" + (" and every converted document"
+                     if self.library_search else "; converted documents are not searched on this server: use read_raw") +
+                     "; pass spec / version to narrow or widen)"))
         lines.append("")
         if not out:
             lines.append("No matches. Try other words, a figure or section number, or read_raw with a phrase.")
