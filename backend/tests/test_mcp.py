@@ -105,6 +105,16 @@ def test_structures_by_offset_and_field(lib):
     assert "NCAP" in lib.structure("Identify Namespace", offset="0Fh")
     with pytest.raises(NotFound):
         lib.structure("Identify Namespace", offset="64")
+    narrowed = lib.structure("Identify Namespace", field="NSZE")
+    f = narrowed.data["fields"]                                   # the same rows as data, for filling in code
+    assert narrowed.data["narrowed"] and [x["abbreviation"] for x in f] == ["NSZE"] and f[0]["from"] == 0 and "description" in f[0]
+    whole = lib.structure("Identify Namespace")
+    assert not whole.data["narrowed"] and len(whole.data["fields"]) == 2 and "description" not in whole.data["fields"][0]
+    assert "below threshold" not in whole and "appears more than once" not in whole          # parser internals left out
+    ir = {"_notes": {"sec:5.2": ["Section number 5.2 appears more than once; renamed 5.2#2"],
+                     "fig:9": ["Figure/Table 9 appears more than once without being a continuation", "Table quality 0.5 below threshold (pymupdf)"]}}
+    assert lib.notes_for(ir, "sec:5.2") == ["> Parser note: Section number 5.2 appears more than once; renamed 5.2#2", ""]   # kept: lookups may be ambiguous
+    assert lib.notes_for(ir, "fig:9", {"quality": 0.9}) == []
 
 
 def test_references_follow_other_specifications(lib):
@@ -370,6 +380,62 @@ def test_tables_cut_over_pages_are_read_as_one():
         name_score("Identify Controller", "Identify – Primary Controller Capabilities Data Structure")
 
 
+def test_structure_tables_align_headers_and_nest_bit_rows():
+    """As Identify Controller arrives from the PDF parser: a group heading in the header row, a row shifted one column right,
+    a bit table nested under a field (in its own piece, and in a column with no heading), text continued under a row."""
+    from specforge.specquery import _row_name, _with_subs, is_sub, structure_data
+
+    def t(label, header, rows, captioned=True):
+        return label, {"label": label, "key": f"x/fig:{label}", "caption": "Figure 9: Controller Data" if captioned else "",
+                       "header": header, "rows": rows, "section": "5.1", "captioned": captioned, "page_from": 1, "page_to": 2,
+                       "quality": 0.9}
+    raw = dict([
+        t("9", ["Bytes", "Capabilities", "", "I/O", "", "Description", ""],
+          [["76", "", "O", "", "", "Multi-Path (CMIC): capabilities.", ""],
+           ["77", "", "M", "", "", "Maximum Data Transfer Size (MDTS): the largest transfer.", ""],
+           ["", "", "", "", "", "continued: in units of CAP.MPSMIN.", ""]]),
+        t("p2", ["", "Bits", "", "Description"], [["", "7:1", "", "Reserved"], ["", "0", "", "Ports (MPORTS): more than one port."]], captioned=False),
+        t("9#2", ["Bytes", "", "I/O", "", "Description", "", ""],
+          [["", "99:96", "M", "", "Controller Attributes (CTRATT): attributes.", "", ""],
+           ["", "", "", "", "", "16", "MDTS and Size Limits Exclude Metadata (MEM): MDTS excludes metadata."]])])
+    tables, _ = logical_tables(raw)
+    g = tables["9"]
+    assert g["header"] == ["Bytes", "I/O", "Description"]                                  # no group heading pushing labels right
+    assert all(len(r) == 3 for r in g["rows"])
+    assert [r[0] for r in g["rows"] if not is_sub(r)] == ["76", "77", "99:96"]               # the shifted row is a row
+    subs = [r[2] for r in g["rows"] if is_sub(r)]
+    assert subs == ["↳ continued: in units of CAP.MPSMIN.", "↳ 7:1 · Reserved", "↳ 0 · Ports (MPORTS): more than one port.",
+                    "↳ 16 · MDTS and Size Limits Exclude Metadata (MEM): MDTS excludes metadata."]
+    rs = g["rows"]
+    mem = next(i for i, r in enumerate(rs) if "(MEM)" in r[2])
+    ctx: set[int] = set()
+    assert [rs[i][0] for i in _with_subs(rs, [mem], ctx)] == ["99:96", ""] and ctx == {mem - 1}   # a bit brings its field
+    assert _row_name(rs, mem) == "CTRATT bit 16 (MEM)"
+    data = structure_data({"family": "nvme-base", "version": "2.4"}, {"sections": {}}, g, rs, narrowed=False)
+    cmic = data["fields"][0]
+    assert cmic["abbreviation"] == "CMIC" and cmic["columns"] == {"I/O": "O"} and cmic["size"] == 1
+    assert data["fields"][2]["from"] == 96 and data["fields"][2]["bits"][0] == {"bits": "16", "name": "MDTS and Size Limits Exclude Metadata",
+                                                                               "abbreviation": "MEM"}
+
+
+def test_read_raw_keeps_markdown_until_the_file_changes(lib, conn, ws):
+    import json
+    import os
+
+    folder = ws / "conversions" / "c7"
+    folder.mkdir(parents=True)
+    f = folder / "out.md"
+    f.write_text("### 1.1 Old\n\nold text\n", encoding="utf-8")
+    conn.execute("INSERT INTO job(type,state,payload_json,result_json) VALUES('convert-markdown','done',?,?)",
+                 (json.dumps({"filename": "notes-77.pdf", "sha256": "n77"}), json.dumps({"dir": "c7"})))
+    conn.commit()
+    assert "old text" in lib.raw("notes-77.pdf", section="1.1")
+    assert lib.markdown(f) is lib.markdown(f)                                                # kept, not read again
+    f.write_text("### 1.1 New\n\nnew text, longer\n", encoding="utf-8")
+    os.utime(f, ns=(f.stat().st_atime_ns, f.stat().st_mtime_ns + 10**9))
+    assert "new text" in lib.raw("notes-77.pdf", section="1.1")
+
+
 def test_paging_cuts_long_answers_at_lines():
     text = "\n".join(f"line {i:04d} " + "x" * 50 for i in range(400))
     p1 = paginate(text, 1, limit=5000)
@@ -401,6 +467,9 @@ def test_tools_over_streamable_http(lib):
         assert all(t["annotations"]["readOnlyHint"] for t in tl["result"]["tools"])
         st, r = rpc(c, "tools/call", {"name": "get_command_field", "arguments": {"command": "Identify", "dword": "10"}}, 3)
         assert not r["result"]["isError"] and "Identify – CNS Values" in r["result"]["content"][0]["text"]
+        st, r = rpc(c, "tools/call", {"name": "get_structure", "arguments": {"name": "Identify Namespace", "field": "NSZE"}}, 6)
+        sc = r["result"]["structuredContent"]
+        assert "NSZE" in r["result"]["content"][0]["text"] and sc["fields"][0]["abbreviation"] == "NSZE" and sc["narrowed"]
         st, r = rpc(c, "tools/call", {"name": "get_section", "arguments": {"section": "99.9", "spec": "base"}}, 4)
         assert r["result"]["isError"] and "no section 99.9" in r["result"]["content"][0]["text"]
         st, r = rpc(c, "resources/read", {"uri": "specforge://nvme-base@2.3/fig:103"}, 5)
@@ -408,8 +477,8 @@ def test_tools_over_streamable_http(lib):
 
         s = c.get("/api/mcp/status").json()
         tools = {t["tool"]: t for t in s["usage"]["tools"]}
-        assert tools["get_command_field"]["calls"] == 1 and tools["get_section"]["misses"] == 1
-        assert s["usage"]["clients"][0]["calls"] == 2 and s["usage"]["recent_misses"][0]["tool"] == "get_section"
+        assert tools["get_command_field"]["calls"] == 1 and tools["get_structure"]["calls"] == 1 and tools["get_section"]["misses"] == 1
+        assert s["usage"]["clients"][0]["calls"] == 3 and s["usage"]["recent_misses"][0]["tool"] == "get_section"
         assert {d["family"] for d in s["documents"]} == {"nvme-base", "nvme-mi", "nvme-nvm-cs"}
         info = c.get("/api/mcp/info").json()
         assert info["url"] == "http://127.0.0.1:8000/mcp" and info["sse_url"].endswith("/mcp/sse") and len(info["tools"]) == len(names)

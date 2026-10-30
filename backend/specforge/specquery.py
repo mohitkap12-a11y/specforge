@@ -37,10 +37,10 @@ from .compare_entities import _Version, _ck, _name_of, describe
 from .core.config import workspace_dir
 from .core.db import connect, jloads, row, rows
 from .ingest import store
-from .ingest.normalize import SPEC_ALIASES, _ALIAS_RE, clean, compact_table, extract_references, norm_title, parse_byte_range
+from .ingest.normalize import SPEC_ALIASES, _ALIAS_RE, clean, extract_references, norm_title, parse_byte_range
 
 PAGE_CHARS = 120_000            # about 30k tokens per answer: a whole Identify Controller structure fits in one page
-INDEX_VERSION = "2"             # bump when what the search index holds changes: every run is indexed again
+INDEX_VERSION = "3"             # bump when what the search index holds changes: every run is indexed again
 MAX_HITS = 25
 CELL_CHARS = 1500
 
@@ -79,6 +79,8 @@ _CAP_DWORDS = re.compile(r"\b(?:NMD\s*|management\s+dword\s*)([01])\b|\b(?:(?:co
 FAILED_FOR = 600        # seconds a failed comparison is reported instead of being started again
 LIB_INDEX_VERSION = "2"   # bump when library_entries changes: every converted document is indexed again
 LIB_PIECE = 1500        # characters of section text per search entry of a converted document
+LOW_QUALITY = 0.45      # a table extracted worse than this is flagged in answers
+MD_CACHE = 6            # Markdown files read_raw keeps in memory (text, lines, section outline)
 REF_ROWS = 80           # a referenced table up to this size is printed with the answer; a bigger one is named, to open with get_table
 
 
@@ -201,41 +203,164 @@ def _sentence_like(caption: str) -> bool:
 
 
 def _desc(r: list) -> str:
-    """The description cell of a field row: the last non-empty cell (Bits | Description, Bytes | O/M | Description)."""
-    return next((clean(x) for x in reversed(r) if clean(x)), "")
+    """The description cell of a field row: the last non-empty cell (Bits | Description, Bytes | O/M | Description); of a
+    sub-row (logical_tables), its text after the bits."""
+    d = next((clean(x) for x in reversed(r) if clean(x)), "")
+    return _SUB_HEAD.sub("", d) if d.startswith(SUB.strip()) else d
+
+
+_SUB_HEAD = re.compile(r"^↳\s*(?:[^·]{0,24}·\s*)?")
+
+
+def _sub_bits(r: list) -> str:
+    """The bits a sub-row starts with ("16" of "↳ 16 · MDTS and Size Limits ... (MEM): ..."), or ""."""
+    m = re.match(r"^↳\s*([^·]{1,24}?)\s*·", clean(r[-1]))
+    return m.group(1) if m else ""
+
+
+class Answer(str):
+    """An answer's Markdown with structured data beside it (.data): the MCP tool returns both, the text for the agent to read
+    and the data for one that fills in code from it."""
+    data: dict
+
+
+def answer(text: str, data: dict | None) -> str:
+    if not data:
+        return text
+    a = Answer(text)
+    a.data = data
+    return a
+
+
+SUB = "↳ "      # first characters of a sub-row: a nested bit table's row, or text continued from the row above, in the last column
+
+
+def is_sub(r: list) -> bool:
+    return bool(r) and not clean(r[0]) and clean(r[-1]).startswith(SUB.strip())
+
+
+def _align(hp: list[int], kp: list[int]) -> dict[int, int]:
+    """Header cell positions -> data column positions, in order, each at most once, as close as possible: a header cell over a
+    merged span (or a group heading such as "Controller Capabilities and Features" in the header row) does not push the
+    labels after it onto the wrong columns. Edit-distance alignment; skipping a header cell or a column costs SKIP."""
+    SKIP = 2.5
+    n, m = len(hp), len(kp)
+    cost = [[0.0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        cost[i][0] = i * SKIP
+    for j in range(1, m + 1):
+        cost[0][j] = j * SKIP
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost[i][j] = min(cost[i - 1][j - 1] + abs(hp[i - 1] - kp[j - 1]), cost[i - 1][j] + SKIP, cost[i][j - 1] + SKIP)
+    out, i, j = {}, n, m
+    while i and j:
+        if cost[i][j] == cost[i - 1][j - 1] + abs(hp[i - 1] - kp[j - 1]):
+            out[hp[i - 1]] = kp[j - 1]
+            i, j = i - 1, j - 1
+        elif cost[i][j] == cost[i - 1][j] + SKIP:
+            i -= 1
+        else:
+            j -= 1
+    return out
+
+
+def _layout(header: list[str], rows: list[list[str]]) -> tuple[list[str], list[tuple[list[str], bool]]]:
+    """(labels, [(cells, is a sub-row)]) of one table piece as the PDF parser left it: columns empty in every row are dropped
+    and the header labels put over the columns they belong to. With a heading over the first column, a row whose first
+    column is empty is a sub-row: a bit table nested in the row above, or its description continued."""
+    width = max([len(header), *(len(r) for r in rows)] or [0])
+    pad = lambda r: [*r, *[""] * (width - len(r))]  # noqa: E731
+    rows = [pad(r) for r in rows]
+    header = pad(header)
+    keep = [i for i in range(width) if any(clean(r[i]) for r in rows)]
+    hp = [i for i in range(width) if clean(header[i])]
+    where = _align(hp, keep)
+    labels = [""] * len(keep)
+    for h, k in where.items():
+        labels[keep.index(k)] = clean(header[h])
+    nested = bool(labels and labels[0])
+    out = []
+    for r in rows:
+        cells = [r[i] for i in keep]
+        filled = [k for k, c in enumerate(cells) if clean(c)]
+        if nested and filled and filled[0] > 0 and len(filled) >= max(3, len(cells) - 2):
+            cells = cells[filled[0]:] + [""] * filled[0]       # a whole row the parser shifted right: not a sub-row
+        out.append((cells, nested and not clean(cells[0]) and bool(filled)))
+    return labels, out
+
+
+_NESTED_HEADER = re.compile(r"(?i)(bits?|bytes?|value|offset)(\s*·\s*(description|definition|value|name|field|o/m|attribute))+")
+
+
+def _label_key(h: str) -> str:
+    return re.sub(r"[^a-z/]", "", clean(h).lower())
 
 
 def logical_tables(raw: dict[str, dict]) -> tuple[dict[str, dict], dict[str, str]]:
-    """(tables, alias): tables as a reader sees them. Empty spacer columns are dropped, and a table the PDF parser cut into pieces
-    (continued over pages: its caption again, or an uncaptioned piece, in the same section) becomes one table under the label
-    of its first piece, with repeated rows dropped. alias maps every piece's label to that table."""
+    """(tables, alias): tables as a reader sees them. Empty spacer columns are dropped and header labels aligned to the data
+    (_layout); a table the PDF parser cut into pieces (continued over pages: its caption again, or an uncaptioned piece, in
+    the same section) becomes one table under the label of its first piece, with repeated rows dropped. A piece's rows go
+    under the columns of the same name; rows that fit no column (a nested bit table, continued text) become sub-rows: the
+    cells joined, after SUB, in the last column. alias maps every piece's label to that table."""
     out: dict[str, dict] = {}
     alias: dict[str, str] = {}
     named: dict | None = None           # the last captioned table with rows in the current section: what a piece continues
+
+    def place(g: dict, labels: list[str], laid: list[tuple[list[str], bool]]) -> None:
+        main = g["header"]
+        w = len(main)
+        keys = [_label_key(h) for h in main]
+        same = labels == main or (len(labels) == w and not any(labels))
+        by_name = None
+        if not same and labels and labels[0] and _label_key(labels[0]) == keys[0]:
+            # columns by heading; a column without one (a nested table's) adds its text to the last column
+            idx = [(keys.index(_label_key(h)) if _label_key(h) in keys else None) if h else w - 1 for h in labels]
+            named_idx = [k for k, h in zip(idx, labels) if h]
+            if None not in idx and len(set(named_idx)) == len(named_idx):
+                by_name = idx
+        for cells, sub in laid:
+            if not sub and same:
+                r = list(cells)
+            elif not sub and by_name is not None:
+                r = [""] * w
+                for c, k in zip(cells, by_name):
+                    if clean(c):
+                        r[k] = f"{r[k]} {c}".strip() if r[k] else c
+            else:
+                text = " · ".join(clean(c) for c in cells if clean(c))
+                if not text or _NESTED_HEADER.fullmatch(text):     # empty, or a nested table's own header row
+                    continue
+                r = [""] * (w - 1) + [SUB + text] if w > 1 else [SUB + text]
+            sig = tuple(clean(x) for x in r)
+            if sig not in g["_seen"]:
+                g["_seen"].add(sig)
+                g["rows"].append(r)
+
     for lab, t in raw.items():
-        header, data = compact_table(t.get("header") or [], t.get("rows") or [])
+        labels, laid = _layout(t.get("header") or [], t.get("rows") or [])
         name = norm_title(_name_of(t.get("caption"))) if t.get("captioned", True) and t.get("caption") else ""
         if named is not None and named["section"] != t.get("section"):
             named = None
-        if named is not None and data and ((name and name == named["_name"]) or not t.get("captioned", True)):
-            for r in data:
-                sig = tuple(clean(x) for x in r)
-                if sig not in named["_seen"]:
-                    named["_seen"].add(sig)
-                    named["rows"].append(r)
+        if named is not None and laid and ((name and name == named["_name"]) or not t.get("captioned", True)):
+            place(named, labels, laid)
             named["page_to"] = max(named.get("page_to") or 0, t.get("page_to") or t.get("page_from") or 0) or named.get("page_to")
             named["parts"].append(lab)
-            named["quality"] = min(named.get("quality") or 1.0, t.get("quality") or 1.0)
+            n0, n1 = named["_n"], len(laid)                  # quality weighted by rows: one bad scrap does not flag the table
+            named["quality"] = ((named.get("quality") or 1.0) * n0 + (t.get("quality") or 1.0) * n1) / max(1, n0 + n1)
+            named["_n"] = n0 + n1
             alias[lab] = named["label"]
             continue
-        g = {**t, "header": header, "rows": list(data), "parts": [lab], "_name": name, "_seen": {tuple(clean(x) for x in r) for r in data}}
+        g = {**t, "header": labels, "rows": [], "parts": [lab], "_name": name, "_seen": set(), "_n": len(laid)}
+        place(g, labels, laid)
         out[lab] = g
         alias[lab] = lab
-        if name and data and not _sentence_like(t.get("caption") or ""):
+        if name and laid and not _sentence_like(t.get("caption") or ""):
             named = g
     for g in out.values():
         g.pop("_seen", None)
         g.pop("_name", None)
+        g.pop("_n", None)
     return out, alias
 
 
@@ -428,6 +553,77 @@ def library_entries(text: str, rid: str, filename: str) -> list[tuple]:
     return out
 
 
+def _with_subs(rs: list[list], idx: list[int], context: set[int] | None = None) -> list[int]:
+    """Row indices with the sub-rows of each: a field row brings its bit rows; a sub-row brings the field row it belongs to
+    (added to `context`: shown for where the bit is, not for its own text)."""
+    out: set[int] = set()
+    for i in idx:
+        out.add(i)
+        if is_sub(rs[i]):
+            p = next((k for k in range(i - 1, -1, -1) if not is_sub(rs[k])), None)
+            if p is not None:
+                out.add(p)
+                if context is not None and p not in idx:
+                    context.add(p)
+            continue
+        k = i + 1
+        while k < len(rs) and is_sub(rs[k]):
+            out.add(k)
+            k += 1
+    return sorted(out)
+
+
+def _brief(r: list) -> list:
+    """A field row with its description cut to the first sentence (shown as the parent of a bit row)."""
+    d = clean(r[-1])
+    m = re.match(r"(.{20,300}?[.:])\s", d)
+    return [*r[:-1], (m.group(1) + " …") if m and len(m.group(1)) < len(d) else d]
+
+
+def _row_name(rs: list[list], i: int) -> str:
+    """How a row is named in a list: "77 MDTS", or for a bit row "CTRATT bit 16 (MEM)"."""
+    name, abbr, _ = _split_field(_desc(rs[i]))
+    me = abbr or name or _desc(rs[i])[:40]
+    if is_sub(rs[i]):
+        p = next((k for k in range(i - 1, -1, -1) if not is_sub(rs[k])), None)
+        pn = (_split_field(_desc(rs[p]))[1] or clean(rs[p][0])) if p is not None else ""
+        return f"{pn} bit {_sub_bits(rs[i])} ({me})".strip()
+    return f"{clean(rs[i][0])} {me}".strip()
+
+
+def structure_data(d: dict, ir: dict, t: dict, shown: list[list], narrowed: bool) -> dict:
+    """The rows of a data structure answer as data: one entry per field with its range (from / to / size in the unit of the
+    first column), name, abbreviation and the other columns (O/M ...), its bit rows under it. Descriptions only when the
+    answer was narrowed to a field or an offset: for a whole structure they would double the answer."""
+    cols = t.get("header") or []
+    unit = (cols[0] if cols else "").lower()
+    fields: list[dict] = []
+    cur: dict | None = None
+    for r in shown:
+        name, abbr, _ = _split_field(_desc(r))
+        if is_sub(r):
+            e = {"bits": _sub_bits(r), "name": name or _desc(r)[:120], "abbreviation": abbr}
+            if narrowed:
+                e["description"] = _desc(r)
+            if cur is not None:
+                cur.setdefault("bits", []).append(e)
+            continue
+        cur = {"range": clean(r[0]), "name": name or _desc(r)[:120], "abbreviation": abbr}
+        rg = parse_byte_range(clean(r[0])) if r else None
+        if rg:
+            cur.update({"from": min(rg), "to": max(rg), "size": max(rg) - min(rg) + 1})
+        other = {cols[i]: clean(r[i]) for i in range(1, min(len(r), len(cols)) - 1) if cols[i] and clean(r[i])}
+        if other:
+            cur["columns"] = other
+        if narrowed:
+            cur["description"] = _desc(r)
+        fields.append(cur)
+    sec = ir["sections"].get(t.get("section") or "")
+    return {"spec": d["family"], "version": d["version"], "figure": fig_no(t["label"]), "caption": clean(t.get("caption")),
+            "section": sec["number"] if sec else None, "uri": uri(d, "fig:" + t["label"]), "unit": unit, "columns": cols,
+            "rows_total": len(t.get("rows") or []), "narrowed": narrowed, "fields": fields}
+
+
 class SpecLibrary:
     """Parsed documents of one workspace database, with the loaded models cached (a parse run never changes once it is done)."""
 
@@ -445,6 +641,7 @@ class SpecLibrary:
         self.lib_index_wait = 5.0    # seconds a search waits for converted documents not indexed yet (indexing goes on behind it)
         self._lib_indexer: threading.Thread | None = None
         self._raw_only: tuple[tuple, list[dict]] = ((), [])
+        self._md: OrderedDict[str, dict] = OrderedDict()     # Markdown files read_raw opened lately: text, lines, outline
 
     # -- connections (per thread: tools run on a thread pool)
     def conn(self) -> sqlite3.Connection:
@@ -622,10 +819,14 @@ class SpecLibrary:
             out.setdefault(k, []).append(r["message"])
         return out
 
+    _ROUTINE_NOTE = re.compile(r"below threshold|^Figure/Table \S+ appears more than once", re.I)   # not "Section number ... appears more than once"
+
     def notes_for(self, ir: dict, node: str, table: dict | None = None) -> list[str]:
-        msgs = list(dict.fromkeys(ir["_notes"].get(node, [])))[:3]
-        if table is not None and (table.get("quality") or 1.0) < 0.6 and not msgs:
-            msgs.append(f"low table extraction quality ({table.get('quality'):.2f}): check the columns against the PDF")
+        """Parser notes worth an agent's attention. Left out: table-quality scores and figure numbers seen twice (pieces of one
+        table, which logical_tables joins), found on most tables of a PDF; a table extracted really badly gets one line."""
+        msgs = [m for m in dict.fromkeys(ir["_notes"].get(node, [])) if not self._ROUTINE_NOTE.search(m)][:3]
+        if table is not None and (table.get("quality") or 1.0) < LOW_QUALITY:
+            msgs.append(f"table extraction quality is low ({table.get('quality'):.2f}): check the columns against the PDF")
         return [f"> Parser note: {m}" for m in msgs] + ([""] if msgs else [])
 
     # ------------------------------------------------------------------------- list_specs
@@ -963,9 +1164,11 @@ class SpecLibrary:
             return best[0][1]
         raise NotFound(f"no section of {ir['family']} {ir['version']} is titled like '{ref}' (use search to find it)")
 
-    def render_table(self, d: dict, ir: dict, t: dict, level: int = 2, rows_filter: Callable[[list], bool] | None = None) -> str:
+    def render_table(self, d: dict, ir: dict, t: dict, level: int = 2, rows_filter: Callable[[list], bool] | None = None,
+                     shown: list[list] | None = None, extra: list[str] = ()) -> str:
         data = t.get("rows") or []
-        shown = [r for r in data if rows_filter(r)] if rows_filter else data
+        if shown is None:
+            shown = [r for r in data if rows_filter(r)] if rows_filter else data
         sec = ir["sections"].get(t.get("section") or "")
         cite = [f"Figure {fig_no(t['label'])}", spec_name(d)]
         if sec:
@@ -975,9 +1178,9 @@ class SpecLibrary:
         lines = [f"{'#' * level} {clean(t.get('caption')) or 'Figure ' + fig_no(t['label'])}", "",
                  " · ".join(cite) + f" · `{uri(d, 'fig:' + t['label'])}`", ""]
         lines += self.notes_for(ir, f"fig:{t['label']}", t)
-        if rows_filter:
+        if shown is not data:
             lines.append(f"_{len(shown)} of {len(data)} rows match._")
-        lines += [md_table(t.get("header") or [], shown), ""]
+        lines += [md_table(t.get("header") or [], shown), ""] + list(extra)
         return "\n".join(lines)
 
     def ref_table(self, d: dict, ir: dict, t: dict, level: int) -> str:
@@ -1304,38 +1507,51 @@ class SpecLibrary:
             raise NotFound(f"no data structure, log page or descriptor named like '{name}' (use search to find its figure)")
         cands.sort(key=lambda x: -x[0])
         lines = [note] if note else []
-        rows_filter = None
+        pick = None
+        context: set[int] = set()            # field rows shown only as the parent of a bit row that matched
         if offset not in (None, ""):
             off = int(str(offset).lower().rstrip("h"), 16) if re.search(r"h$|^0x", str(offset).lower()) else int(str(offset))
 
-            def rows_filter(r: list, off=off) -> bool:
-                rg = parse_byte_range(clean(r[0])) if r else None
-                return bool(rg and min(rg) <= off <= max(rg))
+            def pick(rs: list[list], off=off) -> tuple[list[int], list[int]]:
+                hit = [i for i, r in enumerate(rs) if not is_sub(r) and (rg := parse_byte_range(clean(r[0]))) and min(rg) <= off <= max(rg)]
+                return _with_subs(rs, hit), []
         elif field:
             fq = clean(field).lower()
+            word = re.compile(rf"\b{re.escape(fq)}\b", re.I)
 
-            def rows_filter(r: list, fq=fq) -> bool:
-                txt = " ".join(clean(x) for x in r[1:]).lower()
-                desc = next((clean(x) for x in reversed(r) if clean(x)), "")
-                name_, abbr, _ = _split_field(desc)
-                return fq == abbr.lower() or fq == name_.lower() or bool(re.search(rf"\b{re.escape(fq)}\b", txt))
+            def pick(rs: list[list], fq=fq, word=word) -> tuple[list[int], list[int]]:
+                """(rows to show, rows that only mention the field): the rows that define it (its abbreviation or name) with the bit
+                rows under them; only when none does, every row that mentions it."""
+                defining = [i for i, r in enumerate(rs) if fq in {x.lower() for x in _split_field(_desc(r))[:2] if x}]
+                mention = [i for i, r in enumerate(rs) if i not in defining and word.search(" ".join(clean(x) for x in r))]
+                if defining:
+                    show = _with_subs(rs, defining, context)
+                    return show, [i for i in mention if i not in show]
+                return mention, []
         # the best-named table, or with a filter the best-named one that has a matching row
-        _, d, t = next(((sc, cd, ct) for sc, cd, ct in cands if not rows_filter or any(rows_filter(r) for r in ct.get("rows") or [])), cands[0])
+        _, d, t = next(((sc, cd, ct) for sc, cd, ct in cands if not pick or pick(ct.get("rows") or [])[0]), cands[0])
         ir = self.ir(d)
-        body = self.render_table(d, ir, t, level=1, rows_filter=rows_filter)
-        if rows_filter and not any(rows_filter(r) for r in t.get("rows") or []):
+        rs = t.get("rows") or []
+        idx, others = pick(rs) if pick else (list(range(len(rs))), [])
+        if pick and not idx:
             raise NotFound(f"no row of Figure {fig_no(t['label'])} ({_name_of(t.get('caption'))}) matches " + (f"offset {offset}" if offset not in (None, "") else f"'{field}'"))
-        lines.append(body)
-        if rows_filter:
-            for r in t.get("rows") or []:
-                if rows_filter(r):
-                    for rd, rir, rt in self._figure_refs(" ".join(clean(x) for x in r), d, ir, exclude={t["label"]})[:4]:
-                        lines.append(self.ref_table(rd, rir, rt, level=2))
+        shown = [(_brief(rs[i]) if i in context else rs[i]) for i in idx] if pick else rs
+        extra = []
+        if others:
+            names = [_row_name(rs, i) for i in others]
+            extra = [f"_Also mentioned in {len(others)} other row{'s' if len(others) > 1 else ''}: " + "; ".join(names[:8])
+                     + (" …" if len(names) > 8 else "") + " (ask for that field to see it)._", ""]
+        lines.append(self.render_table(d, ir, t, level=1, shown=shown, extra=extra))
+        if pick:
+            for r in shown:
+                for rd, rir, rt in self._figure_refs(" ".join(clean(x) for x in r), d, ir, exclude={t["label"]})[:4]:
+                    lines.append(self.ref_table(rd, rir, rt, level=2))
         alts = [(sc, od, ot) for sc, od, ot in cands[:6] if ot is not t]
         if alts:
             lines.append("Other matches:\n" + "\n".join(f"- {od['family']} {od['version']} Figure {fig_no(ot['label'])}: {_name_of(ot.get('caption'))}"
                                                      for _, od, ot in alts[:5]))
-        return paginate("\n\n".join(lines), page)
+        text = paginate("\n\n".join(lines), page)
+        return answer(text, structure_data(d, ir, t, shown, narrowed=bool(pick)) if page == 1 else None)
 
     # ------------------------------------------------------------------------- references
     def reference(self, text: str, spec: str | None = None, version: str | None = None, page: int = 1) -> str:
@@ -1663,11 +1879,11 @@ class SpecLibrary:
             raise NotFound(f"{title} has no Docling Markdown on this server (it was parsed without a To Markdown conversion)")
         if section and lines:
             raise QueryError("give section or lines, not both")
-        text = f.read_text(encoding="utf-8", errors="replace")
-        all_lines = text.splitlines()
+        md = self.markdown(f)
+        text, all_lines = md["text"], md["lines"]
         lo, hi, part = 1, len(all_lines), ""
         if section or lines:
-            lo, hi, part = self._raw_range(all_lines, title, section, lines)
+            lo, hi, part = self._raw_range(md, title, section, lines)
         note_md = note + "\n\n" if note else ""
         if not around:
             if part:
@@ -1692,10 +1908,30 @@ class SpecLibrary:
         extra = f"\n\n_{len(hits)} occurrences; the first 20 are shown._" if len(hits) > 20 else ""
         return paginate(head + "\n\n---\n\n".join(blocks) + extra, page)
 
+    def markdown(self, f: Path) -> dict:
+        """{text, lines, outline} of a Markdown file, kept for the MD_CACHE files read last while the file is unchanged (its
+        size and modification time): a spec's Markdown is megabytes, read and split again by every read_raw otherwise."""
+        st = f.stat()
+        key = (st.st_mtime_ns, st.st_size)
+        with self._lock:
+            e = self._md.get(str(f))
+            if e and e["key"] == key:
+                self._md.move_to_end(str(f))
+                return e
+        text = f.read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines()
+        e = {"key": key, "text": text, "lines": lines, "outline": md_outline(lines)}
+        with self._lock:
+            self._md[str(f)] = e
+            while len(self._md) > MD_CACHE:
+                self._md.popitem(last=False)
+        return e
+
     @staticmethod
-    def _raw_range(lines: list[str], title: str, section: str | None, span: str | None) -> tuple[int, int, str]:
+    def _raw_range(md: dict, title: str, section: str | None, span: str | None) -> tuple[int, int, str]:
         """(first line, last line, label) of one section of the Markdown (by number or heading, with its sub-sections) or of a
         line range ("120-180"). Lines count from 1."""
+        lines = md["lines"]
         n = len(lines)
         if span:
             m = re.fullmatch(r"\s*(\d+)\s*(?:[-–:]\s*(\d+))?\s*", span)
@@ -1708,7 +1944,7 @@ class SpecLibrary:
                 raise NotFound(f"{title} has {n} lines: line {a} is not one of them")
             b = min(n, b)
             return a, b, f"lines {a}–{b}"
-        heads = md_outline(lines)
+        heads = md["outline"]
         want = re.sub(r"^sec(?:tion)?\.?\s*", "", clean(section or "").lstrip("§").strip(), flags=re.I).rstrip(".")
         same = [h for h in heads if h["number"] and h["number"] == want]
         # the same number twice (a stray bold line, a heading the converter repeated): the one that spans the most is the section

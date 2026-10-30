@@ -20,7 +20,7 @@ from collections import deque
 from typing import Any, Callable
 
 from . import __version__, eventlog
-from .specquery import NotFound, QueryError, SpecLibrary, summarize_args
+from .specquery import Answer, NotFound, QueryError, SpecLibrary, summarize_args
 
 SLOW_MS = 2000
 RECENT = 200
@@ -156,6 +156,7 @@ def build_server(lib: SpecLibrary, usage: Usage | None = None, log_calls: Callab
     from mcp.server.mcpserver import MCPServer
     from mcp.server.mcpserver.exceptions import ToolError
     from mcp.types import ToolAnnotations
+    from mcp_types import CallToolResult, TextContent
 
     import anyio
 
@@ -200,6 +201,8 @@ def build_server(lib: SpecLibrary, usage: Usage | None = None, log_calls: Callab
                 if isinstance(res, tuple):          # (markdown, hit count) from search
                     res, n = res
                     outcome = "ok" if n else "miss"
+                if isinstance(res, Answer):          # Markdown for the agent, and the same rows as structured content
+                    return CallToolResult(content=[TextContent(type="text", text=str(res))], structured_content=res.data)
                 return res
             except NotFound as e:
                 outcome, err = "miss", str(e)
@@ -270,7 +273,10 @@ def build_server(lib: SpecLibrary, usage: Usage | None = None, log_calls: Callab
     def get_structure(name: str, spec: str | None = None, version: str | None = None, field: str | None = None, offset: str | None = None,
                       page: int = 1) -> str:
         """A data structure, log page or descriptor by name ("Identify Controller", "SMART / Health Information") or figure,
-        optionally narrowed to the row holding a byte `offset` (decimal, or hex like "4Dh") or a `field` ("MDTS")."""
+        optionally narrowed to the row holding a byte `offset` (decimal, or hex like "4Dh") or a `field` ("MDTS"): the rows that
+        define the field, with the bit rows under them (rows that only mention it are named in one line). Bit fields nested in a
+        row follow it as sub-rows ("↳ 16 · ..."). The answer also carries the rows as structured content (range, size, name,
+        abbreviation, columns, bits; descriptions when narrowed) for filling in code."""
         return lib.structure(name, spec, version, field, offset, page)
 
     @tool
