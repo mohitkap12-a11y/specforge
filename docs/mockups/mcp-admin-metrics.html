@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MCP Usage Metrics</title>
+<style>
+:root{--font:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--bg:#fafafa;--surface:#fff;--surface-2:#f5f5f5;--border:#e5e5e5;--border-strong:#d4d4d4;--text:#171717;--text-2:#525252;--muted:#737373;
+--ok:#0f7b3e;--warn:#a15c00;--bad:#d1242f;--info:#0b62d6;--violet:#6d3fd1;--ok-bg:#e7f6ec;--warn-bg:#fff4dc;--bad-bg:#fdebec;--info-bg:#e8f1fd;--neutral-bg:#f0f0f0;--violet-bg:#f0eafc;
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--grid:#ededed;
+--st-ok:#1a9b57;--st-miss:#e5a50a;--st-err:#e5484d;--seq0:#eef4fc;--seq1:#c6dbf5;--seq2:#8db8ec;--seq3:#4f91de;--seq4:#2a78d6;--seq5:#17519a}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#000;--surface:#0a0a0a;--surface-2:#111;--border:#232323;--border-strong:#333;--text:#ededed;--text-2:#a3a3a3;--muted:#8a8a8a;
+--ok:#3dd68c;--warn:#f5b84a;--bad:#ff6369;--info:#70b8ff;--violet:#b69bf2;--ok-bg:#0d2a1a;--warn-bg:#2d2008;--bad-bg:#321416;--info-bg:#0f2036;--neutral-bg:#1a1a1a;--violet-bg:#20193a;
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--grid:#1c1c1c;--st-ok:#30a46c;--st-miss:#c98a0b;--st-err:#e5484d;--seq0:#0f1a2a;--seq1:#15325a;--seq2:#1d4b86;--seq3:#2c66b5;--seq4:#3987e5;--seq5:#8ab8f2}}
+:root[data-theme="dark"]{--bg:#000;--surface:#0a0a0a;--surface-2:#111;--border:#232323;--border-strong:#333;--text:#ededed;--text-2:#a3a3a3;--muted:#8a8a8a;
+--ok:#3dd68c;--warn:#f5b84a;--bad:#ff6369;--info:#70b8ff;--violet:#b69bf2;--ok-bg:#0d2a1a;--warn-bg:#2d2008;--bad-bg:#321416;--info-bg:#0f2036;--neutral-bg:#1a1a1a;--violet-bg:#20193a;
+--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--grid:#1c1c1c;--st-ok:#30a46c;--st-miss:#c98a0b;--st-err:#e5484d;--seq0:#0f1a2a;--seq1:#15325a;--seq2:#1d4b86;--seq3:#2c66b5;--seq4:#3987e5;--seq5:#8ab8f2}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--font);font-feature-settings:"tnum";-webkit-font-smoothing:antialiased}
+h1,h2,h3{margin:0;letter-spacing:-.02em;font-weight:600}h1{font-size:22px}h2{font-size:15px}
+.mono{font-family:var(--mono);font-size:12px}.muted{color:var(--muted)}.small{font-size:12px}
+.shell{display:flex;min-height:100vh}
+.nav{width:232px;flex:none;background:var(--surface);border-right:1px solid var(--border);padding:16px 10px}
+.brand{display:flex;gap:10px;align-items:center;padding:0 10px 14px;font-weight:600}.mark{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,#0070f3,#7c3aed)}
+.grp{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:12px 12px 4px}
+.item{display:block;padding:6px 12px;border-radius:6px;color:var(--text-2)}.item.on{background:var(--neutral-bg);color:var(--text);font-weight:500}
+main{flex:1;min-width:0;padding:24px 28px 40px}
+.head{display:flex;align-items:flex-end;gap:16px;margin-bottom:6px}.grow{flex:1}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:14px 0 16px}.tab{padding:8px 12px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px}.tab.on{color:var(--text);border-color:var(--text);font-weight:500}
+.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:6px;overflow:hidden;background:var(--surface)}.seg span{padding:5px 11px;font-size:12px;color:var(--text-2);border-right:1px solid var(--border)}.seg span:last-child{border:0}.seg .on{background:var(--text);color:var(--surface)}
+.sel{border:1px solid var(--border);border-radius:6px;padding:5px 11px;font-size:12px;background:var(--surface);color:var(--text-2)}
+.btn{border:1px solid var(--border-strong);border-radius:6px;padding:5px 12px;font-size:12px;background:var(--surface);font-weight:500}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px 18px;min-width:0}
+.card-head{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.kpis{display:grid;grid-template-columns:repeat(8,1fr);gap:12px;margin-bottom:16px}
+.kpi .lbl{font-size:12px;color:var(--muted)}.kpi .v{font-size:24px;font-weight:600;letter-spacing:-.02em;line-height:1.25}.kpi .d{font-size:12px}
+.up{color:var(--ok)}.down{color:var(--bad)}.flat{color:var(--muted)}
+.row{display:grid;gap:16px;margin-bottom:16px}.r21{grid-template-columns:2fr 1fr}.r11{grid-template-columns:1fr 1fr}.r111{grid-template-columns:1fr 1fr 1fr}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:0 8px;border-radius:999px;font-size:11.5px;font-weight:500;background:var(--neutral-bg);color:var(--text-2);line-height:20px;white-space:nowrap}
+.badge.ok{background:var(--ok-bg);color:var(--ok)}.badge.warn{background:var(--warn-bg);color:var(--warn)}.badge.bad{background:var(--bad-bg);color:var(--bad)}.badge.info{background:var(--info-bg);color:var(--info)}.badge.violet{background:var(--violet-bg);color:var(--violet)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}th{text-align:left;font-weight:500;color:var(--muted);font-size:11.5px;padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}tr:last-child td{border-bottom:0}td.n,th.n{text-align:right}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--text-2);flex-wrap:wrap}.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+svg text{font-family:var(--font);font-size:11px;fill:var(--muted)}
+.bar{height:6px;border-radius:3px;background:var(--s1)}
+.meter{display:flex;height:8px;border-radius:4px;overflow:hidden;gap:2px;background:var(--surface)}
+.note{font-size:12px;color:var(--text-2);background:var(--surface-2);border:1px dashed var(--border-strong);border-radius:6px;padding:8px 10px}
+.cat{columns:3;column-gap:24px;font-size:12.5px}.cat div{break-inside:avoid;margin-bottom:12px}.cat b{display:block;font-size:12px;margin-bottom:3px}.cat ul{margin:0;padding-left:16px;color:var(--text-2)}
+.tag-now{color:var(--ok);font-weight:500}.tag-new{color:var(--violet);font-weight:500}
+@media (max-width:900px){.nav{display:none}main{padding:16px}.kpis{grid-template-columns:repeat(2,1fr)}.r21,.r11,.r111{grid-template-columns:1fr}.cat{columns:1}.card{overflow-x:auto}}
+</style></head>
+<body><div class="shell">
+<aside class="nav">
+ <div class="brand"><div class="mark"></div><div>SpecForge<div class="small muted" style="font-weight:400">NVMe spec tools</div></div></div>
+ <div class="grp">Tools</div><a class="item">Home</a><a class="item">To Markdown</a><a class="item">Compare versions</a>
+ <div class="grp">Coverage</div><a class="item">Workflow</a><a class="item">Specs</a><a class="item">Explorer</a><a class="item">Coverage</a><a class="item">Reports</a>
+ <div class="grp">Agents</div><a class="item on">MCP for agents</a>
+ <div class="grp">System</div><a class="item">Activity</a><a class="item">Users</a><a class="item">Settings</a>
+</aside>
+<main>
+ <div class="head"><div class="grow"><div class="small muted">MCP for agents</div><h1>MCP connector · Usage &amp; health</h1></div>
+  <span class="badge ok">● Endpoint on · Streamable HTTP + SSE</span><span class="badge">Rate limit 120 / min / address</span><span class="badge info">Index fresh · 4 docs</span></div>
+ <div class="tabs"><span class="tab">Setup guide</span><span class="tab on">Metrics</span><span class="tab">Clients</span><span class="tab">Call log</span><span class="tab">Settings</span></div>
+ <div class="filters">
+  <div class="seg"><span>1h</span><span>24h</span><span class="on">7d</span><span>30d</span><span>Custom</span></div>
+  <span class="sel">Tool: All ▾</span><span class="sel">Agent: All ▾</span><span class="sel">User / address: All ▾</span><span class="sel">Spec: All ▾</span><span class="sel">Outcome: All ▾</span>
+  <span class="grow"></span><span class="small muted">Updated 12 s ago · auto-refresh 30 s</span><span class="btn">Export CSV</span><span class="btn">Reset figures</span>
+ </div>
+
+ <div class="kpis" id="kpis"></div>
+
+ <div class="row r21">
+  <div class="card"><div class="card-head"><h2 class="grow">Tool calls over time</h2><div class="legend"><span><i style="background:var(--st-ok)"></i>Answered</span><span><i style="background:var(--st-miss)"></i>Miss (nothing found)</span><span><i style="background:var(--st-err)"></i>Error</span></div></div>
+   <svg id="calls" viewBox="0 0 760 230" width="100%"></svg></div>
+  <div class="card"><div class="card-head"><h2 class="grow">Agents connecting</h2><span class="small muted">from MCP clientInfo</span></div>
+   <div id="agents"></div>
+   <div style="margin-top:16px" class="card-head"><h2 class="grow">Transport</h2></div>
+   <div class="meter" style="height:12px"><div style="width:78%;background:var(--s1)"></div><div style="width:17%;background:var(--s2)"></div><div style="width:5%;background:var(--s3)"></div></div>
+   <div class="legend" style="margin-top:8px"><span><i style="background:var(--s1)"></i>Streamable HTTP 78%</span><span><i style="background:var(--s2)"></i>SSE 17%</span><span><i style="background:var(--s3)"></i>stdio 5%</span></div>
+  </div>
+ </div>
+
+ <div class="row r11">
+  <div class="card"><div class="card-head"><h2 class="grow">Latency</h2><div class="legend"><span><i style="background:var(--s1)"></i>p50</span><span><i style="background:var(--s2)"></i>p95</span><span><i style="border:1px dashed var(--bad);background:none"></i>slow threshold 2 s</span></div></div>
+   <svg id="lat" viewBox="0 0 560 200" width="100%"></svg></div>
+  <div class="card"><div class="card-head"><h2 class="grow">When agents use it</h2><span class="small muted">calls per hour, local time</span></div>
+   <svg id="heat" viewBox="0 0 560 200" width="100%"></svg></div>
+ </div>
+
+ <div class="card" style="margin-bottom:16px"><div class="card-head"><h2 class="grow">Tools</h2><span class="small muted">sorted by calls · click a row for its call log</span></div>
+  <table id="tools"></table></div>
+
+ <div class="row r111">
+  <div class="card"><div class="card-head"><h2 class="grow">Specs queried</h2></div><div id="specs"></div></div>
+  <div class="card"><div class="card-head"><h2 class="grow">Top commands &amp; structures</h2></div><div id="items"></div></div>
+  <div class="card"><div class="card-head"><h2 class="grow">Answer size &amp; paging</h2></div>
+   <table><tr><th>Measure</th><th class="n">Value</th></tr>
+   <tr><td>Avg answer size</td><td class="n">2.9 k tokens</td></tr><tr><td>p95 answer size</td><td class="n">11.4 k tokens</td></tr>
+   <tr><td>Answers that were paged</td><td class="n">14.2%</td></tr><tr><td>Agents that fetched page 2+</td><td class="n">61% of paged</td></tr>
+   <tr><td>Tokens served (7d)</td><td class="n">53.1 M</td></tr><tr><td>Calls per agent session</td><td class="n">median 7 · p95 31</td></tr>
+   <tr><td>Session length</td><td class="n">median 4 m 10 s</td></tr><tr><td>diff waits for a comparison</td><td class="n">38 · avg 21 s</td></tr></table></div>
+ </div>
+
+ <div class="row r11">
+  <div class="card"><div class="card-head"><h2 class="grow">Clients</h2><span class="badge ok">6 active now</span><span class="small muted">31 in range</span></div><table id="clients"></table></div>
+  <div class="card"><div class="card-head"><h2 class="grow">Top misses</h2><span class="small muted">what agents looked for and did not find: spec or parser gaps</span></div><table id="misses"></table></div>
+ </div>
+
+ <div class="row r11">
+  <div class="card"><div class="card-head"><h2 class="grow">Errors, slow calls &amp; refusals</h2></div><table id="errs"></table></div>
+  <div class="card"><div class="card-head"><h2 class="grow">Common call chains</h2><span class="small muted">consecutive calls in one session</span></div><table id="chains"></table>
+   <p class="note" style="margin:12px 0 0">Watch for chains like <span class="mono">search_spec → search_spec → search_spec</span>: the agent is not finding what it needs on the first try.</p></div>
+ </div>
+
+ <div class="card"><div class="card-head"><h2 class="grow">Metric catalog</h2><span class="small"><span class="tag-now">● collected today</span> &nbsp; <span class="tag-new">● needs new instrumentation</span></span></div>
+  <div class="cat">
+   <div><b>Volume</b><ul><li class="tag-now">Calls total and per tool</li><li class="tag-now">Requests per client address</li><li class="tag-new">Calls over time (persisted buckets)</li><li class="tag-new">Sessions, calls per session</li></ul></div>
+   <div><b>Quality</b><ul><li class="tag-now">Misses (nothing found) and errors per tool</li><li class="tag-now">Recent misses with arguments</li><li class="tag-new">Top missed queries, grouped</li><li class="tag-new">Retry chains (same tool, similar args)</li></ul></div>
+   <div><b>Performance</b><ul><li class="tag-now">Avg and max latency per tool</li><li class="tag-now">Slow calls (≥ 2 s)</li><li class="tag-new">p50 / p95 / p99 latency</li><li class="tag-new">Tool thread queue wait</li></ul></div>
+   <div><b>Who</b><ul><li class="tag-now">Client address, first / last seen, active</li><li class="tag-new">Agent name &amp; version (clientInfo)</li><li class="tag-new">Signed-in user behind the address</li><li class="tag-new">Transport per request</li></ul></div>
+   <div><b>Content</b><ul><li class="tag-new">Specs / versions queried</li><li class="tag-new">Commands, structures, figures requested</li><li class="tag-new">Answer size (chars / tokens), paging</li><li class="tag-now">Comparisons started by MCP</li></ul></div>
+   <div><b>Protection &amp; health</b><ul><li class="tag-now">Rate-limited and refused (endpoint off) counts</li><li class="tag-now">Index documents, rebuild job</li><li class="tag-new">Uptime, index freshness vs library</li><li class="tag-new">Alerts: error rate, miss rate, p95 thresholds</li></ul></div>
+  </div></div>
+</main></div>
+
+<script>
+const $=id=>document.getElementById(id), fmt=n=>n.toLocaleString("en-US");
+// KPI row
+const k=[["Tool calls","18,426","▲ 23% vs prev 7d","up"],["Active clients","6 / 31","now / in range","flat"],["Agent sessions","2,614","▲ 11%","up"],["Answered","91.8%","▲ 0.6 pt","up"],
+["Miss rate","6.9%","▼ 1.1 pt","up"],["Error rate","1.3%","▲ 0.4 pt","down"],["p95 latency","1.42 s","▼ 180 ms","up"],["Rate limited","142","3 addresses","down"]];
+$("kpis").innerHTML=k.map(([l,v,d,c])=>`<div class="card kpi"><div class="lbl">${l}</div><div class="v">${v}</div><div class="d ${c}">${d}</div></div>`).join("");
+
+// stacked calls over time: 7 days x 6 four-hour buckets = 42
+const N=42, ok=[],ms=[],er=[];
+for(let i=0;i<N;i++){const h=i%6,day=Math.floor(i/6),wk=day>=5?.35:1,base=[.15,.25,1,1.15,.8,.3][h]*wk*(1+day*.04);
+ const t=Math.round(base*780+((i*37)%50));ok.push(Math.round(t*.915));ms.push(Math.round(t*(.06+((i*13)%5)/100)));er.push(i==20?62:Math.round(t*.012+(i%3)));}
+(function(){const W=760,H=230,L=40,B=200,T=10,max=1250,bw=(W-L-10)/N;let s=`<g>`;
+ for(const v of [0,250,500,750,1000,1250]){const y=B-(v/max)*(B-T);s+=`<line x1="${L}" x2="${W}" y1="${y}" y2="${y}" stroke="var(--grid)"/><text x="${L-6}" y="${y+4}" text-anchor="end">${v}</text>`}
+ for(let i=0;i<N;i++){const x=L+i*bw+1.5,w=bw-3;let y=B;
+  for(const [v,c] of [[ok[i],"--st-ok"],[ms[i],"--st-miss"],[er[i],"--st-err"]]){const h=v/max*(B-T);y-=h;s+=`<rect x="${x}" y="${y+1}" width="${w}" height="${Math.max(h-2,1)}" rx="2" fill="var(${c})"><title>${fmt(v)}</title></rect>`}}
+ ["Thu 23","Fri 24","Sat 25","Sun 26","Mon 27","Tue 28","Wed 29"].forEach((d,j)=>s+=`<text x="${L+(j*6+3)*bw}" y="${B+18}" text-anchor="middle">${d}</text>`);
+ const xe=L+20.5*bw;s+=`<line x1="${xe}" x2="${xe}" y1="${T+12}" y2="${B-((ok[20]+ms[20]+er[20])/max)*(B-T)-4}" stroke="var(--text-2)"/><text x="${xe+6}" y="${T+14}" style="fill:var(--text-2)">62 errors · index rebuild</text>`;
+ $("calls").innerHTML=s+"</g>"})();
+
+// agents
+const ag=[["Claude Code","2.1",8120],["OpenCode","0.14",5310],["Roo Code","3.28",3470],["Cline","3.9",980],["Other / unknown","",546]];
+$("agents").innerHTML=`<table><tr><th>Agent</th><th class="n">Calls</th><th style="width:40%"></th></tr>`+ag.map(([n,v,c])=>`<tr><td>${n} <span class="muted small">${v}</span></td><td class="n">${fmt(c)}</td><td><div class="bar" style="width:${c/8120*100}%"></div></td></tr>`).join("")+"</table>";
+
+// latency lines
+(function(){const W=560,H=200,L=40,B=172,T=10,max=2500,n=42;let s="";
+ for(const v of [0,500,1000,1500,2000,2500]){const y=B-v/max*(B-T);s+=`<line x1="${L}" x2="${W}" y1="${y}" y2="${y}" stroke="var(--grid)"/><text x="${L-6}" y="${y+4}" text-anchor="end">${v>=1000?v/1000+" s":v}</text>`}
+ const yT=B-2000/max*(B-T);s+=`<line x1="${L}" x2="${W}" y1="${yT}" y2="${yT}" stroke="var(--bad)" stroke-dasharray="4 4"/>`;
+ const p50=[],p95=[];for(let i=0;i<n;i++){p50.push(160+((i*29)%60)+(i%6==2||i%6==3?50:0));p95.push(1100+((i*53)%380)+(i==20?900:0)-i*6)}
+ const line=(a,c)=>`<polyline fill="none" stroke="var(${c})" stroke-width="2" stroke-linejoin="round" points="${a.map((v,i)=>`${L+i*(W-L-8)/(n-1)},${B-v/max*(B-T)}`).join(" ")}"/>`;
+ s+=line(p95,"--s2")+line(p50,"--s1");
+ ["Thu","Fri","Sat","Sun","Mon","Tue","Wed"].forEach((d,j)=>s+=`<text x="${L+(j*6+3)*(W-L-8)/(n-1)}" y="${B+18}" text-anchor="middle">${d}</text>`);
+ s+=`<text x="${W-4}" y="${B-p95[n-1]/max*(B-T)-8}" text-anchor="end" style="fill:var(--text-2)">p95 1.42 s</text><text x="${W-4}" y="${B-p50[n-1]/max*(B-T)-8}" text-anchor="end" style="fill:var(--text-2)">p50 210 ms</text>`;
+ $("lat").innerHTML=s})();
+
+// heatmap weekday x hour
+(function(){const days=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],L=34,T=6,cw=21.5,ch=21;let s="";const seq=["--seq0","--seq1","--seq2","--seq3","--seq4","--seq5"];
+ days.forEach((d,r)=>{s+=`<text x="${L-6}" y="${T+r*ch+ch/2+4}" text-anchor="end">${d}</text>`;
+  for(let h=0;h<24;h++){let v=(h>=9&&h<=18?1:h>=7&&h<=21?.4:.05)*(r>=5?.25:1)*(h==12||h==13?.7:1)*(1+((r*7+h*3)%5)/8);
+   const b=Math.min(5,Math.floor(v*4.2));s+=`<rect x="${L+h*cw}" y="${T+r*ch}" width="${cw-2}" height="${ch-2}" rx="3" fill="var(${seq[b]})"><title>${d} ${h}:00 · ${Math.round(v*140)} calls</title></rect>`}});
+ for(const h of [0,6,12,18,23])s+=`<text x="${L+h*cw+cw/2}" y="${T+7*ch+14}" text-anchor="middle">${h}:00</text>`;
+ s+=`<text x="${L}" y="${T+7*ch+34}">fewer</text>`;seq.forEach((c,i)=>s+=`<rect x="${L+40+i*16}" y="${T+7*ch+25}" width="14" height="10" rx="2" fill="var(${c})"/>`);s+=`<text x="${L+40+6*16+4}" y="${T+7*ch+34}">more</text>`;
+ $("heat").setAttribute("viewBox",`0 0 ${L+24*cw+4} ${T+7*ch+40}`);$("heat").innerHTML=s})();
+
+// tools table
+const tl=[["search_spec",5840,2.1,9.8,180,940,4210,1.8,"14 s"],["get_command_field",3260,.8,5.2,95,410,1880,1.1,"40 s"],["get_section",2710,.4,3.1,140,720,3020,4.6,"1 m"],
+["get_command",2120,.6,4.4,160,880,2640,6.2,"2 m"],["get_structure",1580,1.1,8.7,120,610,2210,2.9,"3 m"],["get_table",1090,.3,2.4,110,530,1490,3.8,"6 m"],
+["resolve_reference",720,1.9,11.2,85,390,1320,.6,"9 m"],["list_changes",440,2.7,1.4,420,2650,8900,7.9,"21 m"],["diff",310,4.2,3.9,610,3120,21400,5.4,"34 m"],
+["read_raw",250,.8,6.0,230,1180,3900,9.7,"48 m"],["list_specs",106,0,0,12,30,88,.3,"1 h"],["list_commands",0,0,0,0,0,0,0,"never"]];
+const tmax=5840;
+$("tools").innerHTML=`<tr><th>Tool</th><th style="width:16%">Calls</th><th class="n">Share</th><th>Outcome mix</th><th class="n">Errors</th><th class="n">Misses</th><th class="n">p50</th><th class="n">p95</th><th class="n">Max</th><th class="n">Avg answer</th><th class="n">Slow ≥2 s</th><th>Last call</th><th></th></tr>`+
+tl.map(([n,c,e,m,p50,p95,mx,tok,last])=>{const okp=100-e-m;const slow=p95>2000?Math.round(c*.08):mx>2000?Math.round(c*.004):0;
+ const flag=c==0?`<span class="badge">unused</span>`:e>=2.5?`<span class="badge bad">errors</span>`:m>=9?`<span class="badge warn">high misses</span>`:p95>2000?`<span class="badge warn">slow</span>`:`<span class="badge ok">healthy</span>`;
+ return `<tr><td class="mono">${n}</td><td><div style="display:flex;align-items:center;gap:8px"><span style="width:44px;text-align:right">${fmt(c)}</span><div class="bar" style="width:${c/tmax*100}%"></div></div></td><td class="n">${(c/18426*100).toFixed(1)}%</td>
+ <td style="width:110px">${c?`<div class="meter"><div style="width:${okp}%;background:var(--st-ok)"></div><div style="width:${m}%;background:var(--st-miss)"></div><div style="width:${e}%;background:var(--st-err)"></div></div>`:""}</td>
+ <td class="n">${e}%</td><td class="n">${m}%</td><td class="n">${p50} ms</td><td class="n">${p95>=1000?(p95/1000).toFixed(2)+" s":p95+" ms"}</td><td class="n">${mx>=1000?(mx/1000).toFixed(1)+" s":mx+" ms"}</td><td class="n">${tok} k tok</td><td class="n">${slow}</td><td class="muted">${last}${last!="never"?" ago":""}</td><td>${flag}</td></tr>`}).join("");
+
+const hb=(rows,max)=>`<table>`+rows.map(([a,b,c])=>`<tr><td>${a}${b?` <span class="muted small">${b}</span>`:""}</td><td class="n">${fmt(c)}</td><td style="width:38%"><div class="bar" style="width:${c/max*100}%"></div></td></tr>`).join("")+"</table>";
+$("specs").innerHTML=hb([["NVMe Base","2.4",9210],["NVMe-MI","2.2",4120],["NVM Command Set","1.3",3380],["NVMe Base","2.3",890],["ZNS","1.2",410],["To Markdown docs","",416]],9210);
+$("items").innerHTML=hb([["Identify Controller","CNS 01h",1840],["Set Features","FID 07h",1120],["Get Log Page","LID 02h",980],["Create I/O SQ","",760],["Format NVM","",640],["MI Health Status Poll","",520]],1840);
+
+$("clients").innerHTML=`<tr><th>Address</th><th>User</th><th>Agent</th><th class="n">Calls</th><th class="n">Err</th><th class="n">429s</th><th>Last seen</th></tr>`+
+[["10.20.4.17","a.rao","Claude Code 2.1",4210,.9,0,"now",1],["10.20.4.33","j.lee","OpenCode 0.14",3020,1.2,0,"1 m",1],["10.20.6.102","ci-bot","Claude Code 2.1",2880,2.8,128,"3 m",1],
+ ["10.20.4.51","m.ortiz","Roo Code 3.28",1960,.7,0,"6 m",1],["10.20.5.9","s.kim","OpenCode 0.14",1510,1.0,14,"11 m",1],["10.20.4.80","p.nair","Cline 3.9",980,1.6,0,"2 h",0],["127.0.0.1","local","stdio",920,.2,0,"5 h",0]]
+.map(([ip,u,a,c,e,l,s,act])=>`<tr><td class="mono">${ip}</td><td>${u}</td><td>${a}</td><td class="n">${fmt(c)}</td><td class="n">${e}%</td><td class="n">${l?`<span class="badge warn">${l}</span>`:"0"}</td><td>${act?`<span class="badge ok">active</span> `:`<span class="badge">idle</span> `}<span class="muted small">${s}</span></td></tr>`).join("");
+
+$("misses").innerHTML=`<tr><th>Tool</th><th>Arguments</th><th class="n">Times</th><th class="n">Agents</th><th>Likely cause</th></tr>`+
+[["search_spec",'query="Boot Partition Write Protection"',148,4,"not in parsed specs"],["get_structure",'name="Telemetry Host-Initiated Log"',96,3,"structure not extracted"],["resolve_reference",'"Figure 412"',71,2,"figure numbering"],
+ ["get_command_field",'command="Sanitize", field="OWPASS"',58,3,"field name variant"],["search_spec",'spec="ocp"',44,2,"spec not in library"],["get_table",'figure="MI 2.2 Fig 156"',31,1,"table parse failed"]]
+.map(([t,a,n,g,c])=>`<tr><td class="mono">${t}</td><td class="mono" style="max-width:170px;overflow:hidden;text-overflow:ellipsis">${a}</td><td class="n">${n}</td><td class="n">${g}</td><td><span class="badge warn">${c}</span></td></tr>`).join("");
+
+$("errs").innerHTML=`<tr><th>When</th><th>Kind</th><th>Tool</th><th>Detail</th><th>Client</th></tr>`+
+[["Tue 14:02","bad","Error","diff","QueryError: no comparison for nvm 1.2 → 1.3","10.20.6.102"],["Tue 14:01","bad","Error × 62","get_section","OperationalError: database is locked (index rebuild)","5 clients"],
+ ["Wed 10:47","warn","Slow","list_changes","8.9 s · impact=high · 2.3 → 2.4","10.20.4.17"],["Wed 09:15","warn","Rate limited","—","128 requests over 120 / min","10.20.6.102"],
+ ["Mon 18:30","","Refused","—","endpoint turned off (maintenance) · 23 requests","3 clients"]]
+.map(([w,c,k,t,d,ip])=>`<tr><td class="muted">${w}</td><td><span class="badge ${c}">${k}</span></td><td class="mono">${t}</td><td style="max-width:210px;overflow:hidden;text-overflow:ellipsis">${d}</td><td class="mono">${ip}</td></tr>`).join("");
+
+$("chains").innerHTML=`<tr><th>Chain</th><th class="n">Sessions</th><th class="n">Ends answered</th></tr>`+
+[["search_spec → get_section",812,"96%"],["get_command → get_command_field",604,"98%"],["search_spec → get_table",377,"94%"],["list_changes → diff",201,"91%"],["search_spec → search_spec → search_spec",168,"52%"]]
+.map(([c,n,r])=>`<tr><td class="mono">${c}</td><td class="n">${n}</td><td class="n">${parseInt(r)<70?`<span class="badge warn">${r}</span>`:r}</td></tr>`).join("");
+</script></body></html>
