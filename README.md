@@ -87,10 +87,10 @@ The result is stored (filter, search and page it in the UI) and exports to a Mar
   | `get_section`, `get_table` | a section (with its tables, optionally its sub-sections) or a figure |
   | `list_commands`, `get_command` | commands with opcode, section and Command Dword tables, and where other specs extend them |
   | `get_command_field` | one Command Dword (`10`, `CDW10`, `NMD0`) or field (`CNS`) with the value tables its description refers to |
-  | `get_structure` | a data structure / log page / descriptor, optionally the row of one byte offset or field (`Identify Controller`, `MDTS`) |
+  | `get_structure` | a data structure / log page / descriptor, optionally the row of one byte offset or field (`Identify Controller`, `MDTS`); bit fields follow their row as `↳` sub-rows, and the rows also come back as structured content (range, size, name, abbreviation, bits) |
   | `resolve_reference` | "Figure 312", "section 3.1 of the NVM Express NVM Command Set Specification" |
   | `list_changes`, `diff` | what changed between two versions (default: latest vs the one before), overall or for one command, structure, section or figure |
-  | `read_raw` | the Docling Markdown of a document (also converted-but-not-parsed files), paged or around a phrase |
+  | `read_raw` | the Docling Markdown of a document (also converted-but-not-parsed files): paged, one section, a line range, or around a phrase |
 
   Resources: `specforge://specs` and `specforge://<family>@<version>/sec:<n>` / `fig:<n>`.
 * **Versions:** a spec is named by id (`nvme-base`), short name (`base`, `mi`, `nvm`, `zns` ...) or title; without a version the latest parsed one is used and the answer says so; `previous` is the version before it.
