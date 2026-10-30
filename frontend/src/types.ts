@@ -114,9 +114,11 @@ export interface CrossUnit {
 export interface SpecInSet { family: string; version: string; sections: number }
 
 export type ConvertEngine = "docling" | "builtin";
-/** One of the signed-in user's background conversions (GET /api/convert/markdown/jobs); the Markdown itself is fetched on demand. */
+/** A conversion on the To Markdown list (GET /api/convert/markdown/jobs): every finished one in the shared library, plus the
+ *  signed-in user's own queued, running, failed and cancelled ones. The Markdown itself is fetched on demand. */
 export interface ConversionEntry {
-  job: number; source: string | null; state: Job["state"]; message: string | null; created: string; error: string | null;
+  job: number; source: string | null; state: Job["state"]; message: string | null; created: string; updated: string; error: string | null;
+  user: string | null; mine: boolean; can_remove: boolean;   // who converted it; only they or an admin may remove it
   cancelling: boolean;   // cancel asked; a running Docling conversion stops only when the current file is done
   result: Omit<MarkdownConversion, "markdown"> | null;
 }

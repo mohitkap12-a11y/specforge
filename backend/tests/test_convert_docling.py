@@ -202,36 +202,69 @@ def test_background_conversion_job(stub, pdf_file, ws):
         assert [p.name for d in folder.iterdir() for p in d.iterdir()] == ["out.md"]   # the upload is deleted after converting
 
         stub(status="failure")
-        bad = client.post("/api/convert/markdown/jobs", files={"file": ("w.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()["job"]
+        bad = _post(client, pdf_file, "w.pdf")
         j = _wait(client, bad)
         assert j["state"] == "failed" and "page 2 broken" in j["error"]
         assert client.get(f"/api/convert/markdown/jobs/{bad}").status_code == 409
         assert client.get("/api/convert/markdown/jobs/99999").status_code == 404
 
-        for d in folder.iterdir():                                     # expired results are pruned on the next upload
+        for d in folder.iterdir():                                     # a finished conversion is kept, however old
             os.utime(d, (0, 0))
-        client.post("/api/convert/markdown/jobs", files={"file": ("w.pdf", io.BytesIO(pdf_file.read_bytes()))})
-        assert client.get(f"/api/convert/markdown/jobs/{job}").status_code == 410
+        orphan = folder / "left-by-a-crash"
+        orphan.mkdir()
+        os.utime(orphan, (0, 0))
+        _post(client, pdf_file, "x.pdf")
+        assert client.get(f"/api/convert/markdown/jobs/{job}").status_code == 200
+        assert not orphan.exists()                                     # a folder no conversion owns is pruned
 
 
-def test_conversion_results_are_private(stub, pdf_file, ws, monkeypatch):
-    from specforge import jobs
+def test_finished_conversions_are_shared_with_every_user(stub, pdf_file, ws, monkeypatch):
+    """The To Markdown list is a library: anyone can preview and download a finished file; only its owner or an admin removes it."""
+    import specforge.api.app as appmod
     from specforge.api.app import create_app
-    from specforge.core.db import get_conn
 
     with TestClient(create_app()) as client:
-        job = client.post("/api/convert/markdown/jobs", files={"file": ("w.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()["job"]
-        _wait(client, job)
-        c = get_conn()
-        c.execute("UPDATE job SET payload_json=? WHERE id=?", ('{"user": "someone-else"}', job))
-        c.commit()
-        assert jobs.get(c, job)["state"] == "done"
-        assert client.get(f"/api/convert/markdown/jobs/{job}").status_code == 200    # the local user is an admin
-        import specforge.api.app as appmod
+        done = _post(client, pdf_file, "Shared.pdf")
+        _wait(client, done)
+        stub(status="failure")
+        failed = _post(client, pdf_file, "Broken.pdf")
+        _wait(client, failed)
+        with monkeypatch.context() as m:
+            m.setattr(appmod, "LOCAL_USER", {**appmod.LOCAL_USER, "username": "reader", "role": "user"})
+            listed = client.get("/api/convert/markdown/jobs").json()
+            assert [(c["source"], c["user"], c["mine"], c["can_remove"]) for c in listed] == [("Shared.pdf", "local", False, False)]
+            assert "| 7:0" in client.get(f"/api/convert/markdown/jobs/{done}").json()["markdown"]
+            assert client.get(f"/api/convert/markdown/jobs/{done}?download=true").status_code == 200
+            assert client.get(f"/api/convert/markdown/jobs/{failed}").status_code == 404    # someone else's failure is private
+            assert client.delete(f"/api/convert/markdown/jobs/{done}").status_code == 403
+            assert client.delete(f"/api/convert/markdown/jobs/{failed}").status_code == 404
+            m.setattr(appmod, "LOCAL_USER", {**appmod.LOCAL_USER, "username": "boss", "role": "admin"})
+            assert client.get(f"/api/convert/markdown/jobs/{failed}").status_code == 409     # an admin sees it
+            assert client.delete(f"/api/convert/markdown/jobs/{done}").json() == {"ok": True}
 
-        monkeypatch.setattr(appmod, "LOCAL_USER", {**appmod.LOCAL_USER, "role": "user"})
+
+def test_a_file_already_in_the_library_is_not_converted_again(stub, pdf_file, ws, monkeypatch):
+    import specforge.api.app as appmod
+    from specforge.api.app import create_app
+
     with TestClient(create_app()) as client:
-        assert client.get(f"/api/convert/markdown/jobs/{job}").status_code == 404
+        first = client.post("/api/convert/markdown/jobs", files={"file": ("Spec.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()["job"]
+        _wait(client, first)
+        StubConverter.calls = []
+        with monkeypatch.context() as m:                           # another user uploads the same bytes under another name
+            m.setattr(appmod, "LOCAL_USER", {**appmod.LOCAL_USER, "username": "other", "role": "user"})
+            again = client.post("/api/convert/markdown/jobs", files={"file": ("copy.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()
+        assert again == {"job": first, "reused": True} and StubConverter.calls == []
+        assert len(list((ws / "conversions").iterdir())) == 1
+        # other options are a different file
+        other = client.post("/api/convert/markdown/jobs?front_matter=false", files={"file": ("Spec.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()
+        assert "reused" not in other and other["job"] != first
+        builtin = client.post("/api/convert/markdown/jobs?engine=builtin", files={"file": ("Spec.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()
+        assert "reused" not in builtin
+        _wait(client, other["job"])
+        _wait(client, builtin["job"])
+        assert client.delete(f"/api/convert/markdown/jobs/{first}").json() == {"ok": True}   # once removed, it converts again
+        assert "reused" not in client.post("/api/convert/markdown/jobs", files={"file": ("Spec.pdf", io.BytesIO(pdf_file.read_bytes()))}).json()
 
 
 @pytest.mark.skipif(os.environ.get("SPECFORGE_TEST_DOCLING") != "1", reason="set SPECFORGE_TEST_DOCLING=1 to run real Docling")
@@ -260,7 +293,9 @@ def test_real_docling_keeps_table_alignment(tmp_path, monkeypatch):
 
 
 def _post(client, pdf_file, name):
-    return client.post("/api/convert/markdown/jobs", files={"file": (name, io.BytesIO(pdf_file.read_bytes()))}).json()["job"]
+    """Upload the test PDF as a distinct file (a trailing comment naming it), so it is not taken for one already converted."""
+    data = pdf_file.read_bytes() + b"\n%" + name.encode()
+    return client.post("/api/convert/markdown/jobs", files={"file": (name, io.BytesIO(data))}).json()["job"]
 
 
 def _listed(client):
@@ -286,9 +321,9 @@ def test_conversion_list_survives_and_removes(stub, pdf_file, ws, monkeypatch):
         assert listed[0]["result"] is None and "page 2 broken" in listed[0]["error"] and listed[0]["cancelling"] is False
 
         import specforge.api.app as appmod
-        with monkeypatch.context() as m:                          # another user sees none of them
+        with monkeypatch.context() as m:                          # another user sees the finished one, not the failure
             m.setattr(appmod, "LOCAL_USER", {**appmod.LOCAL_USER, "username": "other"})
-            assert client.get("/api/convert/markdown/jobs").json() == []
+            assert _listed(client) == [("A.pdf", "done")]
 
         assert client.delete(f"/api/convert/markdown/jobs/{first}").json() == {"ok": True}
         assert _listed(client) == [("B.pdf", "failed")]

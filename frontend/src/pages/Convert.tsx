@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Download, FileDown, Trash2, UploadCloud } from "lucide-react";
+import { Copy, Download, Eye, FileDown, Search, Trash2, UploadCloud, X } from "lucide-react";
 import { api } from "../api";
-import { Badge, Empty, ErrorNote, PageHeader, Switch } from "../components/ui";
+import { MarkdownPreview } from "../components/MarkdownPreview";
+import { Badge, Empty, ErrorNote, PageHeader, Segmented, Switch } from "../components/ui";
 import { useToast } from "../components/Toasts";
 import { useJobs } from "../components/jobs";
 import { conversionSummary, jobErrorText } from "../util";
@@ -13,6 +14,7 @@ type Upload = { id: number; name: string; error?: string };
 let nextId = 1;
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const when = (ts?: string | null) => (ts ? new Date(ts.replace(" ", "T") + "Z").toLocaleString() : "");
 
 function saveFile(name: string, text: string) {
   const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));
@@ -48,36 +50,49 @@ function Conversion({ c }: { c: ConversionEntry }) {
       .then(() => push({ title: "Markdown copied", tone: "ok" }), (e) => push({ title: "Copy failed", description: errText(e), tone: "bad" }));
   };
   const download = () => fetchMd().then((x) => saveFile(x.filename, x.markdown), (e) => push({ title: "Download failed", description: errText(e), tone: "bad" }));
-  const remove = () => api.removeConversion(c.job).then(() => qc.invalidateQueries({ queryKey: ["conversions"] }), (e) => push({ title: "Remove failed", description: errText(e), tone: "bad" }));
+  const remove = () => {
+    if (r && !c.mine && !window.confirm(`Remove ${c.source ?? "this file"} from the library? ${c.user ?? "Its owner"} converted it, and nobody will be able to open it any more.`)) return;
+    api.removeConversion(c.job).then(() => qc.invalidateQueries({ queryKey: ["conversions"] }), (e) => push({ title: "Remove failed", description: errText(e), tone: "bad" }));
+  };
   return (
     <div className="card">
-      <div className="card-head">
-        <strong>{c.source ?? `Conversion #${c.job}`}</strong>
-        {working && <span className="spinner" aria-label="Converting" />}
-        {working && <span className="muted small">{c.cancelling ? "Cancelling: stops when the current file is done…" : c.state === "queued" ? "Waiting for the previous file…" : c.message ?? "Converting…"}</span>}
-        {c.state === "failed" && <Badge value="failed" label="Failed" />}
-        {c.state === "cancelled" && <Badge value="draft" label="Cancelled" />}
-        {r && <span className="muted small">{conversionSummary(r.stats)}</span>}
-        {r && <Badge value={r.engine === "docling" ? "ok" : "info"} label={r.engine === "docling" ? "Docling" : "Built-in"} />}
-        <span className="grow" />
-        {working && !c.cancelling && <button onClick={() => api.cancelJob(c.job).then(() => qc.invalidateQueries({ queryKey: ["conversions"] }))}>Cancel</button>}
-        {r && (
-          <>
-            <button onClick={() => setOpen(!open)}>{open ? "Hide preview" : "Preview"}</button>
-            <button onClick={copy}><Copy size={14} /> Copy</button>
-            <button className="primary" onClick={() => void download()}><Download size={14} /> Download {r.filename}</button>
-          </>
-        )}
-        <button aria-label="Remove from the list" title={working ? "Cancel and remove" : "Remove"} onClick={() => void remove()}><Trash2 size={14} /></button>
+      <div className="card-head conv-head">
+        <div className="grow">
+          <div className="row">
+            <strong>{c.source ?? `Conversion #${c.job}`}</strong>
+            {working && <span className="spinner" aria-label="Converting" />}
+            {working && <span className="muted small">{c.cancelling ? "Cancelling: stops when the current file is done…" : c.state === "queued" ? "Waiting for the previous file…" : c.message ?? "Converting…"}</span>}
+            {c.state === "failed" && <Badge value="failed" label="Failed" />}
+            {c.state === "cancelled" && <Badge value="draft" label="Cancelled" />}
+            {r && <Badge value={r.engine === "docling" ? "ok" : "info"} label={r.engine === "docling" ? "Docling" : "Built-in"} />}
+          </div>
+          <div className="muted small">
+            {r && <>{conversionSummary(r.stats)} · </>}
+            {c.mine ? "converted by you" : `converted by ${c.user ?? "unknown"}`}{r ? ` · ${when(c.updated)}` : ""}
+          </div>
+        </div>
+        <div className="row">
+          {working && c.mine && !c.cancelling && <button onClick={() => api.cancelJob(c.job).then(() => qc.invalidateQueries({ queryKey: ["conversions"] }))}>Cancel</button>}
+          {r && (
+            <>
+              <button onClick={() => setOpen(true)}><Eye size={14} /> Preview</button>
+              <button onClick={copy}><Copy size={14} /> Copy</button>
+              <button className="primary" onClick={() => void download()}><Download size={14} /> Download .md</button>
+            </>
+          )}
+          {c.can_remove && <button aria-label="Remove from the list" title={working ? "Cancel and remove" : "Remove"} onClick={remove}><Trash2 size={14} /></button>}
+        </div>
       </div>
       {c.state === "failed" && <ErrorNote error={new Error(jobErrorText(c.error))} />}
       {r?.warnings.map((w) => <div key={w} className="muted small">⚠ {w}</div>)}
-      {open && md.isLoading && <div className="muted small">Loading…</div>}
-      <ErrorNote error={open ? md.error : null} />
-      {open && md.data && <pre className="scroll" tabIndex={0}>{md.data.markdown}</pre>}
+      {open && r && <MarkdownPreview title={c.source ?? r.filename} data={md.data} loading={md.isLoading} error={md.error}
+        onClose={() => setOpen(false)} onCopy={copy} onDownload={() => void download()} />}
     </div>
   );
 }
+
+const matches = (c: ConversionEntry, q: string) =>
+  [c.source, c.user, c.result?.title, c.result?.filename, c.result?.format, c.result?.engine].some((v) => v?.toLowerCase().includes(q));
 
 export default function ConvertPage() {
   const input = useRef<HTMLInputElement>(null);
@@ -86,7 +101,10 @@ export default function ConvertPage() {
   const [front, setFront] = useState(true);
   const [engine, setEngine] = useState<ConvertEngine | "">("");   // "" = the server's default (SPECFORGE_CONVERT_ENGINE)
   const [uploads, setUploads] = useState<Upload[]>([]);
+  const [filter, setFilter] = useState("");
+  const [whose, setWhose] = useState<"all" | "mine">("all");
   const { track } = useJobs();
+  const { push } = useToast();
   // the list lives on the server, so conversions survive leaving the page, a refresh or another tab
   const list = useQuery({
     queryKey: ["conversions"], queryFn: api.conversions,
@@ -97,8 +115,9 @@ export default function ConvertPage() {
       const id = nextId++;
       setUploads((u) => [{ id, name: f.name }, ...u]);
       try {
-        const { job } = await api.toMarkdownJob(f, front, engine || undefined);
-        track(job, `Convert ${f.name}`);
+        const { job, reused } = await api.toMarkdownJob(f, front, engine || undefined);
+        if (reused) push({ title: `${f.name} is already converted`, description: "The existing file in the list is used; it was not converted again.", tone: "ok" });
+        else track(job, `Convert ${f.name}`);
         setUploads((u) => u.filter((x) => x.id !== id));
         await qc.invalidateQueries({ queryKey: ["conversions"] });
       } catch (e) { setUploads((u) => u.map((x) => (x.id === id ? { ...x, error: errText(e) } : x))); }
@@ -106,10 +125,12 @@ export default function ConvertPage() {
   };
   const onFiles = (list: FileList | null) => { if (list?.length) void run(Array.from(list)); if (input.current) input.current.value = ""; };
   const items = list.data ?? [];
+  const q = filter.trim().toLowerCase();
+  const shown = useMemo(() => items.filter((c) => (whose === "all" || c.mine) && (!q || matches(c, q))), [items, whose, q]);
   const busy = uploads.some((u) => !u.error) || items.some((c) => c.state === "queued" || c.state === "running");
   return (
     <>
-      <PageHeader title="To Markdown" description="Convert a PDF, DOC or DOCX specification into a clean Markdown file with Docling: its layout model and TableFormer keep headings, text and tables (merged cells, multi-row headers, tables split across pages) aligned. Large specs take a while. Your converted files stay here for 24 hours." />
+      <PageHeader title="To Markdown" description="Convert a PDF, DOC or DOCX specification into a clean Markdown file with Docling: its layout model and TableFormer keep headings, text and tables (merged cells, multi-row headers, tables split across pages) aligned. Large specs take a while. Converted files form a library every user can preview and download; a file already in it is not converted again." />
       <div className={`dropzone ${over ? "over" : ""}`}
         onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
         onDrop={(e) => { e.preventDefault(); setOver(false); onFiles(e.dataTransfer.files); }}>
@@ -139,8 +160,20 @@ export default function ConvertPage() {
           <ErrorNote error={u.error ? new Error(u.error) : null} />
         </div>
       ))}
+      {items.length > 0 && (
+        <div className="cmp-filters">
+          <div className="md-search list-search">
+            <Search size={14} className="muted" />
+            <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Search by file name, title or who converted it" aria-label="Search converted files" />
+            {filter && <button className="iconbtn" aria-label="Clear search" onClick={() => setFilter("")}><X size={14} /></button>}
+          </div>
+          <Segmented label="Show" value={whose} onChange={setWhose} options={[{ value: "all", label: "All files" }, { value: "mine", label: "Mine" }]} />
+          <span className="muted small">{shown.length === items.length ? `${items.length} file${items.length === 1 ? "" : "s"}` : `${shown.length} of ${items.length}`}</span>
+        </div>
+      )}
       {!list.isLoading && !list.error && items.length === 0 && uploads.length === 0 && <Empty icon={FileDown} title="Nothing converted yet">Converted files appear here with a preview, copy and download.</Empty>}
-      {items.map((c) => <Conversion key={c.job} c={c} />)}
+      {items.length > 0 && shown.length === 0 && <Empty icon={Search} title="No matching files">Nothing in the list matches “{filter.trim()}”{whose === "mine" ? " among your files" : ""}.</Empty>}
+      {shown.map((c) => <Conversion key={c.job} c={c} />)}
     </>
   );
 }

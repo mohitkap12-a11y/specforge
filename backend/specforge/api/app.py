@@ -348,8 +348,11 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------ spec -> markdown
     # Conversions run one at a time on the converter's own thread. The UI uses the job endpoint (a large spec takes
-    # minutes to hours with Docling, longer than a proxy keeps a request open); its result is kept for a day.
+    # minutes to hours with Docling, longer than a proxy keeps a request open). Finished conversions form a library
+    # shared by every user and are kept until someone removes them; a failed or cancelled one stays on its owner's list
+    # for a day.
     CONVERT_KEEP_SECONDS = 24 * 3600
+    ORPHAN_GRACE_SECONDS = 3600     # a folder with no job yet may be an upload whose job is still being created
 
     def _convert_params(file: UploadFile, engine: str | None) -> tuple[str, str]:
         if engine is not None and engine not in ENGINES:
@@ -393,13 +396,28 @@ def create_app() -> FastAPI:
         return d if d.parent == root and d.is_dir() else None
 
     def _prune_conversions() -> None:
-        """Delete results older than a day (a folder's mtime is when its Markdown was written); never a queued or running upload."""
-        busy = {jloads(j["payload_json"], {}).get("dir") for j in
-                rows(conn(), "SELECT payload_json FROM job WHERE type='convert-markdown' AND state IN ('queued','running')")}
-        cutoff = time.time() - CONVERT_KEEP_SECONDS
+        """Delete folders no live conversion owns (left behind by a crash); a finished conversion is kept until it is removed."""
+        live = {jloads(j["payload_json"], {}).get("dir") for j in
+                rows(conn(), "SELECT payload_json FROM job WHERE type='convert-markdown' AND state IN ('queued','running','done') "
+                             "AND json_extract(payload_json, '$.hidden') IS NULL")}
+        cutoff = time.time() - ORPHAN_GRACE_SECONDS
         for d in _conversions_dir().iterdir():
-            if d.is_dir() and d.name not in busy and d.stat().st_mtime < cutoff:
+            if d.is_dir() and d.name not in live and d.stat().st_mtime < cutoff:
                 shutil.rmtree(d, ignore_errors=True)
+
+    def _sha256_of(path: str) -> str:
+        from ..core.hashing import sha256_file
+        return sha256_file(path)
+
+    def _converted_already(sha: str, front_matter: bool, engine: str) -> int | None:
+        """A finished conversion of the same file with the same options whose Markdown is still on disk, so it is not converted twice."""
+        for j in rows(conn(), "SELECT id, result_json FROM job WHERE type='convert-markdown' AND state='done' "
+                              "AND json_extract(payload_json, '$.hidden') IS NULL AND json_extract(payload_json, '$.sha256') = ? "
+                              "AND json_extract(payload_json, '$.front_matter') = ? ORDER BY id DESC", (sha, int(front_matter))):
+            res = jloads(j["result_json"], None) or {}
+            if res.get("engine") == engine and safe_join(_conversions_dir(), f"{res.get('dir', '')}/out.md") is not None:
+                return j["id"]
+        return None
 
     @app.post("/api/convert/markdown")
     async def convert_markdown(file: UploadFile = File(...), front_matter: bool = Query(True), download: bool = Query(False),
@@ -422,15 +440,21 @@ def create_app() -> FastAPI:
 
     @app.post("/api/convert/markdown/jobs")
     def convert_markdown_job(file: UploadFile = File(...), front_matter: bool = Query(True), engine: str | None = Query(None)):
-        """Background conversion: returns {job}; fetch the result from /api/convert/markdown/jobs/{job} once it is done."""
+        """Background conversion: returns {job}; fetch the result from /api/convert/markdown/jobs/{job} once it is done.
+        A file that is already in the library with the same options is not converted again: {job, reused: true} names that conversion."""
         name, suffix = _convert_params(file, engine)
         _prune_conversions()
         folder = Path(tempfile.mkdtemp(dir=_conversions_dir()))
         try:
             path = _save_upload(file, suffix, folder)
+            sha = _sha256_of(path)
         except BaseException:
             shutil.rmtree(folder, ignore_errors=True)
             raise
+        if (same := _converted_already(sha, front_matter, engine or convert.default_engine())) is not None:
+            shutil.rmtree(folder, ignore_errors=True)
+            audit(f"{name} is already converted to Markdown; the existing conversion is reused", job_id=same)
+            return {"job": same, "reused": True}
         user = me()["username"]
 
         def work(c, prog):
@@ -446,13 +470,17 @@ def create_app() -> FastAPI:
                 Path(path).unlink(missing_ok=True)
             eventlog.emit("info", "api", f"Converted {name} to Markdown", user=user, format=res.source_format, engine=res.engine, **res.stats)
             return {**_conversion_json(name, res), "dir": folder.name}
-        job = jobs.submit(conn(), "convert-markdown", work, {"filename": name, "user": user, "engine": engine, "dir": folder.name}, DB,
+        job = jobs.submit(conn(), "convert-markdown", work, {"filename": name, "user": user, "engine": engine, "dir": folder.name,
+                                                             "sha256": sha, "front_matter": front_matter}, DB,
                           pool=convert.serial_pool())
         audit(f"Conversion of {name} to Markdown queued", job_id=job, engine=engine or convert.default_engine())
         return {"job": job}
 
+    def _may_remove(payload: dict) -> bool:
+        return payload.get("user") == me()["username"] or me()["role"] == "admin"
+
     def _conversion_entry(j: dict) -> dict | None:
-        """A conversion job as the To Markdown page lists it; None once its file has expired."""
+        """A conversion job as the To Markdown page lists it; None if its file is gone."""
         j = jobs.with_progress(j, conn())
         payload = jloads(j["payload_json"], {})
         res = jloads(j["result_json"], None) or {}
@@ -460,31 +488,36 @@ def create_app() -> FastAPI:
             return None
         active = j["state"] in ("queued", "running")
         return {"job": j["id"], "source": payload.get("filename"), "state": j["state"], "message": j["message"], "created": j["created"],
+                "updated": j["updated"], "user": payload.get("user"), "mine": payload.get("user") == me()["username"],
+                "can_remove": _may_remove(payload),
                 "cancelling": active and jobs.cancel_requested(j["id"], DB), "error": j["error"],
                 "result": {k: v for k, v in res.items() if k != "dir"} if j["state"] == "done" else None}
 
-    def _own_conversion(job_id: int) -> dict:
+    def _visible_conversion(job_id: int) -> dict:
+        """A finished conversion is in the shared library; one still running, failed or cancelled only its owner (or an admin) sees."""
         j = jobs.get(conn(), job_id)
         payload = jloads(j["payload_json"], {}) if j else {}
-        if not j or j["type"] != "convert-markdown" or payload.get("hidden") or \
-                (payload.get("user") != me()["username"] and me()["role"] != "admin"):
+        if not j or j["type"] != "convert-markdown" or payload.get("hidden") or (j["state"] != "done" and not _may_remove(payload)):
             raise HTTPException(404, "conversion not found")
         return j
 
     @app.get("/api/convert/markdown/jobs")
     def convert_markdown_list():
-        """The signed-in user's conversions, newest first: every queued or running one, and those that ended in the last 24 hours."""
-        found = rows(conn(), "SELECT * FROM job WHERE type='convert-markdown' AND json_extract(payload_json, '$.user') = ? "
-                             "AND json_extract(payload_json, '$.hidden') IS NULL "
-                             "AND (state IN ('queued','running') OR updated >= datetime('now', ?)) ORDER BY id DESC",
+        """Newest first: every finished conversion in the shared library (whoever converted it), plus the signed-in user's own
+        queued or running ones and those that failed or were cancelled in the last 24 hours."""
+        found = rows(conn(), "SELECT * FROM job WHERE type='convert-markdown' AND json_extract(payload_json, '$.hidden') IS NULL "
+                             "AND (state = 'done' OR (json_extract(payload_json, '$.user') = ? "
+                             "AND (state IN ('queued','running') OR updated >= datetime('now', ?)))) ORDER BY id DESC",
                      (me()["username"], f"-{CONVERT_KEEP_SECONDS} seconds"))
         return [e for j in found if (e := _conversion_entry(j)) is not None]
 
     @app.delete("/api/convert/markdown/jobs/{job_id}")
     def convert_markdown_remove(job_id: int):
-        """Remove a conversion from the list: cancel it if it is still queued or running, delete its files and forget the file name."""
-        j = _own_conversion(job_id)
+        """Remove a conversion (its owner or an admin): cancel it if it is still queued or running, delete its files and forget the file name."""
+        j = _visible_conversion(job_id)
         payload = jloads(j["payload_json"], {})
+        if not _may_remove(payload):
+            raise HTTPException(403, "only the user who converted this file or an admin can remove it")
         if j["state"] in ("queued", "running"):
             jobs.cancel(job_id, DB)
         j = jobs.get(conn(), job_id)
@@ -500,13 +533,13 @@ def create_app() -> FastAPI:
 
     @app.get("/api/convert/markdown/jobs/{job_id}")
     def convert_markdown_result(job_id: int, download: bool = Query(False)):
-        j = _own_conversion(job_id)
+        j = _visible_conversion(job_id)
         if j["state"] != "done":
             raise HTTPException(409, f"the conversion is {j['state']}")
         res = jloads(j["result_json"], {})
         md_file = safe_join(_conversions_dir(), f"{res.get('dir', '')}/out.md")
         if md_file is None:
-            raise HTTPException(410, "the converted file has expired; convert it again")
+            raise HTTPException(410, "the converted file is no longer on the server; convert it again")
         markdown = md_file.read_text(encoding="utf-8")
         if download:
             return Response(markdown, media_type="text/markdown; charset=utf-8",
