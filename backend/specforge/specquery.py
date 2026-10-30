@@ -459,21 +459,13 @@ class SpecLibrary:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------------- search index
-    def _ensure_index_tables(self, c: sqlite3.Connection) -> None:
-        c.execute("CREATE VIRTUAL TABLE IF NOT EXISTS mcp_fts USING fts5(number, title, body, run_id UNINDEXED, key UNINDEXED, "
-                  "kind UNINDEXED, page UNINDEXED, tokenize='unicode61 remove_diacritics 2')")
-        c.execute("CREATE TABLE IF NOT EXISTS mcp_index(run_id INTEGER PRIMARY KEY, run_created TEXT, version TEXT, entries INTEGER, "
-                  "seconds REAL, built TEXT DEFAULT CURRENT_TIMESTAMP)")
-
     def index_state(self) -> dict[int, dict]:
         c = self.conn()
-        self._ensure_index_tables(c)
         return {r["run_id"]: r for r in rows(c, "SELECT * FROM mcp_index")}
 
     def ensure_index(self, d: dict, force: bool = False) -> bool:
         """Index one parse run for search (once; again when the run or INDEX_VERSION changed). True when it was (re)built."""
         c = self.conn()
-        self._ensure_index_tables(c)
         with self._lock:
             lock = self._index_locks.setdefault(d["run_id"], threading.Lock())
         with lock:
@@ -504,7 +496,6 @@ class SpecLibrary:
     def prune_index(self) -> int:
         """Drop index entries of parse runs that no longer exist or are no longer the one served."""
         c = self.conn()
-        self._ensure_index_tables(c)
         keep = {d["run_id"] for d in self.documents()}
         stale = [r["run_id"] for r in rows(c, "SELECT run_id FROM mcp_index") if r["run_id"] not in keep]
         for rid in stale:

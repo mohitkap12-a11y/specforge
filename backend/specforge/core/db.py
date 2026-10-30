@@ -199,6 +199,12 @@ CREATE TABLE IF NOT EXISTS job(
   total INTEGER DEFAULT 0, message TEXT, payload_json TEXT, result_json TEXT, error TEXT,
   created TEXT DEFAULT CURRENT_TIMESTAMP, updated TEXT DEFAULT CURRENT_TIMESTAMP
 );
+-- Search index of the MCP endpoint (specquery.py): one entry per section, table and table row of each served parse run.
+-- Created here with the rest of the schema, never at run time: DDL on a busy database fails other connections' statements.
+CREATE VIRTUAL TABLE IF NOT EXISTS mcp_fts USING fts5(number, title, body, run_id UNINDEXED, key UNINDEXED, kind UNINDEXED,
+  page UNINDEXED, tokenize='unicode61 remove_diacritics 2');
+CREATE TABLE IF NOT EXISTS mcp_index(run_id INTEGER PRIMARY KEY, run_created TEXT, version TEXT, entries INTEGER, seconds REAL,
+  built TEXT DEFAULT CURRENT_TIMESTAMP);
 -- Other users following a job they asked for while it was already queued or running (same file, same spec)
 CREATE TABLE IF NOT EXISTS job_watcher(
   job_id INTEGER NOT NULL REFERENCES job(id) ON DELETE CASCADE, user TEXT NOT NULL, PRIMARY KEY(job_id, user)

@@ -334,9 +334,10 @@ class McpEndpoint:
         self.limiter = RateLimiter()
         self._cfg: tuple[float, dict] = (0.0, {})
         self.server = build_server(lib, self.usage, log_calls=lambda: bool(self.cfg().get("log_calls", True)))
-        open_ = TransportSecuritySettings(enable_dns_rebinding_protection=False)    # reached by the server's intranet name
-        self.http_app = self.server.streamable_http_app(streamable_http_path="/mcp", stateless_http=True, json_response=True,
-                                                        transport_security=open_, host="0.0.0.0")
+        open_ = TransportSecuritySettings(enable_dns_rebinding_protection=False)    # reached by the server's intranet name (see local_only)
+        self._http = lambda: self.server.streamable_http_app(streamable_http_path="/mcp", stateless_http=True, json_response=True,
+                                                             transport_security=open_, host="0.0.0.0")
+        self.http_app = self._http()
         self.sse_router = Router(routes=[Mount("/mcp", app=self.server.sse_app(sse_path="/sse", message_path="/messages/",
                                                                               transport_security=open_, host="0.0.0.0"))])
         self.running = False
@@ -366,6 +367,8 @@ class McpEndpoint:
 
     @contextlib.asynccontextmanager
     async def lifespan(self):
+        # a session manager runs once: each start of the app (a restart in tests) gets a new one
+        self.http_app = self._http()
         async with self.server.session_manager.run():
             self.running = True
             try:
