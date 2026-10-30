@@ -111,6 +111,10 @@ def test_structures_by_offset_and_field(lib):
     whole = lib.structure("Identify Namespace")
     assert not whole.data["narrowed"] and len(whole.data["fields"]) == 2 and "description" not in whole.data["fields"][0]
     assert "below threshold" not in whole and "appears more than once" not in whole          # parser internals left out
+    ir = {"_notes": {"sec:5.2": ["Section number 5.2 appears more than once; renamed 5.2#2"],
+                     "fig:9": ["Figure/Table 9 appears more than once without being a continuation", "Table quality 0.5 below threshold (pymupdf)"]}}
+    assert lib.notes_for(ir, "sec:5.2") == ["> Parser note: Section number 5.2 appears more than once; renamed 5.2#2", ""]   # kept: lookups may be ambiguous
+    assert lib.notes_for(ir, "fig:9", {"quality": 0.9}) == []
 
 
 def test_references_follow_other_specifications(lib):

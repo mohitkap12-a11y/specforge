@@ -40,7 +40,7 @@ from .ingest import store
 from .ingest.normalize import SPEC_ALIASES, _ALIAS_RE, clean, extract_references, norm_title, parse_byte_range
 
 PAGE_CHARS = 120_000            # about 30k tokens per answer: a whole Identify Controller structure fits in one page
-INDEX_VERSION = "2"             # bump when what the search index holds changes: every run is indexed again
+INDEX_VERSION = "3"             # bump when what the search index holds changes: every run is indexed again
 MAX_HITS = 25
 CELL_CHARS = 1500
 
@@ -819,7 +819,7 @@ class SpecLibrary:
             out.setdefault(k, []).append(r["message"])
         return out
 
-    _ROUTINE_NOTE = re.compile(r"below threshold|appears more than once|without being a continuation", re.I)
+    _ROUTINE_NOTE = re.compile(r"below threshold|^Figure/Table \S+ appears more than once", re.I)   # not "Section number ... appears more than once"
 
     def notes_for(self, ir: dict, node: str, table: dict | None = None) -> list[str]:
         """Parser notes worth an agent's attention. Left out: table-quality scores and figure numbers seen twice (pieces of one
