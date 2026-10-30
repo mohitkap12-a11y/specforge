@@ -33,7 +33,8 @@ SLOW_MS = 2000
 SESSION_GAP = 600              # seconds without a call from the same client and agent that end an agent session
 MAX_QUEUE = 20000
 MAX_ROWS = 2_000_000           # hard cap besides the age limit
-PRUNE_EVERY = 2000
+PRUNE_EVERY = 2000             # inserts between pruning passes, and at least one pass per PRUNE_SECONDS while calls arrive
+PRUNE_SECONDS = 3600
 MAX_ARGS = 8000                # characters of argument JSON kept per call
 MAX_ERROR = 2000
 # arguments that change how much of an answer is shown, not what was asked: left out of a miss's fingerprint
@@ -132,8 +133,10 @@ def make_row(tool: str, outcome: str, ms: float, args: dict | None, error: str |
         args_json = json.dumps(args, ensure_ascii=False, default=str)
     except Exception:  # noqa: BLE001
         args_json = json.dumps({"_repr": repr(args)})
+    if len(args_json) > MAX_ARGS:                  # cut the text, not the JSON: the stored value must still parse
+        args_json = json.dumps({"_truncated": args_json[:MAX_ARGS - 100]}, ensure_ascii=False)
     return {"ts": ts if ts is not None else time.time(), "tool": tool, "outcome": outcome, "ms": round(ms, 1),
-            "args_json": args_json[:MAX_ARGS], "error": (error or None) and error[:MAX_ERROR], "reason": reason,
+            "args_json": args_json, "error": (error or None) and error[:MAX_ERROR], "reason": reason,
             "fingerprint": fingerprint(tool, outcome, reason, args, error), "ip": ip, "agent": agent, "agent_version": agent_version,
             "user_agent": (user_agent or None) and user_agent[:200], "transport": transport,
             "spec": str(args["spec"])[:120] if args.get("spec") else None, "version": str(args["version"])[:40] if args.get("version") else None,
@@ -153,6 +156,7 @@ class CallLog:
         self.accepted = 0
         self.finished = 0
         self.inserted = 0
+        self.pruned_at = 0.0           # 0: prune with the first batch after start, so old rows go even on a quiet server
 
     def add(self, row: dict) -> None:
         """Never blocks and never raises: the call it records has already been answered."""
@@ -201,8 +205,8 @@ class CallLog:
                                      [tuple(r.get(c) for c in COLUMNS) for r in batch])
                     conn.commit()
                     self.inserted += len(batch)
-                    if self.inserted >= PRUNE_EVERY:
-                        self.inserted = 0
+                    if self.inserted >= PRUNE_EVERY or time.time() - self.pruned_at >= PRUNE_SECONDS:
+                        self.inserted, self.pruned_at = 0, time.time()
                         prune(conn, self.keep_days())
                     break
                 except sqlite3.OperationalError as e:
@@ -438,15 +442,23 @@ def issues(conn: sqlite3.Connection, since: float, until: float, filters: dict, 
     sample = {r["id"]: r for r in conn.execute(f"SELECT id, args_json, error, agent, agent_version FROM mcp_call WHERE id IN ({','.join('?' * len(ids))})", ids)}
     for x, i in zip(out, ids):
         s = sample.get(i)
-        x["args"] = json.loads(s["args_json"]) if s and s["args_json"] else {}
+        x["args"] = _args(s["args_json"]) if s else {}
         x["error"] = s["error"] if s else None
         x["last_agent"] = " ".join(v for v in (s["agent"], s["agent_version"]) if v) if s else None
     return out
 
 
+def _args(raw: str | None) -> dict:
+    try:
+        v = json.loads(raw or "{}")
+    except ValueError:              # rows written before arguments were cut as JSON
+        return {"_truncated": raw}
+    return v if isinstance(v, dict) else {"_value": v}
+
+
 def _row(r: sqlite3.Row) -> dict:
     d = dict(r)
-    d["args"] = json.loads(d.pop("args_json") or "{}")
+    d["args"] = _args(d.pop("args_json"))
     return d
 
 
@@ -486,7 +498,7 @@ def issue_detail(conn: sqlite3.Connection, fp: str, since: float, until: float, 
             "first": rows[0]["ts"], "last": rows[-1]["ts"], "status": st["status"] if st else "open", "note": st["note"] if st else None,
             "updated": st["updated"] if st else None, "updated_by": st["updated_by"] if st else None,
             "per_day": [{"day": d, "count": c} for d, c in sorted(days.items())],
-            "variants": [{"args": json.loads(k or "{}"), "count": c} for k, c in variants.most_common(20)],
+            "variants": [{"args": _args(k), "count": c} for k, c in variants.most_common(20)],
             "errors": [{"error": k, "count": c} for k, c in errors.most_common(10)],
             "agents": [{"agent": k, "count": c} for k, c in agents.most_common(10)],
             "clients": [{"ip": k, "count": c} for k, c in clients.most_common(10)],
@@ -504,6 +516,11 @@ def set_issue(conn: sqlite3.Connection, fp: str, status: str | None, note: str |
     return dict(conn.execute("SELECT * FROM mcp_issue WHERE fingerprint = ?", (fp,)).fetchone())
 
 
+def _cell(v: Any) -> Any:
+    """Text a caller chose (arguments, User-Agent, messages) must not start a spreadsheet formula when an admin opens the CSV."""
+    return "'" + v if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
+
+
 CSV_COLUMNS = ("id", "time_utc", "tool", "outcome", "reason", "ms", "args", "error", "ip", "agent", "agent_version", "transport", "spec",
                "version", "answer_chars", "page", "paged", "fingerprint", "user_agent")
 
@@ -518,9 +535,9 @@ def csv_lines(conn: sqlite3.Connection, filters: dict, since: float | None, unti
     while chunk := cur.fetchmany(1000):
         buf.seek(0); buf.truncate()
         for r in chunk:
-            out.writerow([r["id"], time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(r["ts"])), r["tool"], r["outcome"], r["reason"] or "", r["ms"],
+            out.writerow([_cell(v) for v in [r["id"], time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(r["ts"])), r["tool"], r["outcome"], r["reason"] or "", r["ms"],
                           r["args_json"] or "", r["error"] or "", r["ip"], r["agent"] or "", r["agent_version"] or "", r["transport"] or "",
                           r["spec"] or "", r["version"] or "", r["answer_chars"] if r["answer_chars"] is not None else "", r["page"] or "",
-                          r["paged"] or 0, r["fingerprint"] or "", r["user_agent"] or ""])
+                          r["paged"] or 0, r["fingerprint"] or "", r["user_agent"] or ""]])
         yield buf.getvalue()
 

@@ -1,5 +1,7 @@
 """The MCP endpoint for coding agents: spec lookups (specquery), the tools over Streamable HTTP, the admin switch, rate limit
 and status page, and access without sign-in."""
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from test_compare import v_new
@@ -690,3 +692,25 @@ def test_rate_limited_and_refused_requests_are_kept(ws):
         rpc(c, "tools/list", {})
         k = c.get("/api/mcp/metrics", params={"range": "1h"}).json()["kpis"]
         assert (k["rate_limited"], k["refused"], k["calls"]) == (2, 1, 0)
+
+
+def test_long_arguments_stay_json_csv_cells_cannot_be_formulas_and_old_calls_are_pruned(conn):
+    import time as _t
+
+    from specforge import mcp_metrics as mm
+
+    row = mm.make_row("search_spec", "miss", 1.0, {"query": "x" * 20_000}, None, ip="1.2.3.4", user_agent="=HYPERLINK(\"http://evil\")", ts=_t.time())
+    assert len(row["args_json"]) <= mm.MAX_ARGS and json.loads(row["args_json"])["_truncated"].startswith('{"query": "xxx')
+    old = mm.make_row("get_section", "ok", 1.0, {"section": "1"}, None, ip="1.2.3.4", ts=_t.time() - 40 * 86400)
+    for r in (row, old):
+        conn.execute(f"INSERT INTO mcp_call({','.join(mm.COLUMNS)}) VALUES({','.join('?' * len(mm.COLUMNS))})", [r[c] for c in mm.COLUMNS])
+    conn.execute("INSERT INTO mcp_call(ts, tool, outcome, ms, args_json, ip) VALUES(?, 'get_table', 'miss', 1, '{\"figure\": \"1', 'x')", (_t.time(),))
+    conn.commit()
+    assert {c["tool"]: c["args"] for c in mm.calls(conn, {})["items"]}["get_table"] == {"_truncated": '{"figure": "1'}   # an old cut row still reads
+    lines = "".join(mm.csv_lines(conn, {"tool": ["search_spec"]}, None, None)).splitlines()
+    assert "'=HYPERLINK" in lines[1] and ",=HYPERLINK" not in lines[1]
+    # the first batch after a start prunes, even far below PRUNE_EVERY inserts
+    log = mm.CallLog(str(conn.execute("PRAGMA database_list").fetchone()[2]), keep_days=lambda: 30)
+    log.add(mm.make_row("list_specs", "ok", 1.0, {}, None, ip="1.2.3.4"))
+    assert log.drain(5)
+    assert conn.execute("SELECT COUNT(*) FROM mcp_call WHERE tool = 'get_section'").fetchone()[0] == 0
