@@ -101,7 +101,7 @@ def test_reset_wipes_work_but_keeps_settings(client, demo_dir):
     docs = client.post("/api/specs/upload", files=[("files", (p.name, p.read_bytes(), "application/pdf")) for p in sorted(demo_dir.glob("nvme-base-2.4.pdf"))]).json()
     client.post("/api/sets", json={"name": "demo", "document_ids": [d["id"] for d in docs]})
     r = client.post("/api/reset")
-    assert r.status_code == 200 and r.json()["deleted"]["spec_document"] == 1
+    assert r.status_code == 200 and r.json()["deleted"]["specs"] == 1
     assert client.get("/api/specs").json() == [] and client.get("/api/sets").json() == []
     assert client.get("/api/settings").json()["ollama"]["base_url"] == "http://example:1"
     from specforge.core.config import workspace_dir

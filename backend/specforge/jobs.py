@@ -7,7 +7,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from . import eventlog
 from .core.db import connect, row, rows
@@ -50,14 +50,23 @@ class Progress:
 
 
 def submit(conn, type_: str, fn: Callable[..., Any], payload: dict | None = None, db_file: str | None = None,
-           pool: ThreadPoolExecutor | None = None) -> int:
-    """Queue fn(conn, progress) as a job; `pool` runs it on a dedicated executor instead of the shared one."""
-    cur = conn.execute("INSERT INTO job(type,state,payload_json) VALUES(?, 'queued', ?)", (type_, json.dumps(payload or {})))
+           pool: ThreadPoolExecutor | None = None, user: str | None = None, label: str | None = None,
+           queue: str | None = None) -> int:
+    """Queue fn(conn, progress) as a job; `pool` runs it on a dedicated executor instead of the shared one. `queue` names
+    that executor's first-come-first-served line, so a waiting job can say how many are ahead of it (see position)."""
+    cur = conn.execute("INSERT INTO job(type,state,payload_json,user,label,queue) VALUES(?, 'queued', ?, ?, ?, ?)",
+                       (type_, json.dumps(payload or {}), user, label, queue))
     conn.commit()
     job_id = cur.lastrowid
     db = db_file or db_file_of(conn)             # the worker must use the database the job row was written to
-    key = (db, job_id)
     eventlog.emit("info", "job", f"Queued {type_}", job_id=job_id, db=db, type=type_, payload=payload or {})
+    schedule(job_id, type_, fn, db, pool)
+    return job_id  # type: ignore[return-value]
+
+
+def schedule(job_id: int, type_: str, fn: Callable[..., Any], db: str, pool: ThreadPoolExecutor | None = None) -> None:
+    """Run an existing queued job row (a new one from submit, or one resumed after a restart)."""
+    key = (db, job_id)
 
     def run():
         c = connect(db)
@@ -93,7 +102,6 @@ def submit(conn, type_: str, fn: Callable[..., Any], payload: dict | None = None
                 _progress.pop(key, None)
 
     (pool or _pool).submit(run)
-    return job_id  # type: ignore[return-value]
 
 
 def cancel(job_id: int, db_file: str | None = None) -> None:
@@ -132,7 +140,20 @@ def _overlay(j: dict | None, conn) -> dict | None:
             p = _progress.get((db_file_of(conn), j["id"]))
         if p:
             j["message"], j["progress"], j["total"] = p
+    if j:
+        j.update(position(conn, j))
     return j
+
+
+def position(conn, j: dict) -> dict:
+    """Where a queued job stands in its line: {"ahead": jobs that run before it, "ahead_of": the one running now}.
+    Its executor starts jobs in the order they were queued, which is id order."""
+    if j.get("state") != "queued" or not j.get("queue"):
+        return {"ahead": 0, "ahead_of": None}
+    before = rows(conn, "SELECT id, state, label, type, user FROM job WHERE queue=? AND state IN ('queued','running') AND id<? "
+                        "ORDER BY state='running' DESC, id", (j["queue"], j["id"]))
+    run = next((b for b in before if b["state"] == "running"), None)
+    return {"ahead": len(before), "ahead_of": {"label": run["label"] or run["type"], "user": run["user"]} if run else None}
 
 
 def with_progress(j: dict | None, conn) -> dict | None:
@@ -153,7 +174,17 @@ def active(conn) -> list[dict]:
     return [_overlay(x, conn) for x in rows(conn, "SELECT * FROM job WHERE state IN ('queued','running') ORDER BY id DESC")]
 
 
-def recover_interrupted(conn) -> int:
-    cur = conn.execute("UPDATE job SET state='failed', error='interrupted by restart' WHERE state IN ('queued','running')")
+def recover_interrupted(conn, resumable: Iterable[str] = ()) -> tuple[int, list[dict]]:
+    """After a restart: jobs of the `resumable` types that were queued or running go back to 'queued' and are returned
+    oldest first, to be scheduled again in their original order (a job that was running starts over); every other
+    unfinished job is marked failed. Returns (number failed, jobs to resume)."""
+    kinds = list(resumable)
+    marks = ",".join("?" * len(kinds))
+    keep = f" AND type NOT IN ({marks})" if kinds else ""
+    cur = conn.execute(f"UPDATE job SET state='failed', error='interrupted by restart' WHERE state IN ('queued','running'){keep}", kinds)
+    again = rows(conn, f"SELECT * FROM job WHERE state IN ('queued','running') AND type IN ({marks}) ORDER BY id", kinds) if kinds else []
+    if again:
+        conn.execute(f"UPDATE job SET state='queued', updated=CURRENT_TIMESTAMP WHERE id IN ({','.join('?' * len(again))})",
+                     [j["id"] for j in again])
     conn.commit()
-    return cur.rowcount
+    return cur.rowcount, [{**j, "state": "queued"} for j in again]

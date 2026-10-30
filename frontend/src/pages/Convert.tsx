@@ -5,7 +5,7 @@ import { api } from "../api";
 import { MarkdownPreview } from "../components/MarkdownPreview";
 import { Badge, Empty, ErrorNote, PageHeader, Segmented, Switch } from "../components/ui";
 import { useToast } from "../components/Toasts";
-import { useJobs } from "../components/jobs";
+import { queueText, useJobs } from "../components/jobs";
 import { conversionSummary, jobErrorText } from "../util";
 import type { ConvertEngine, ConversionEntry } from "../types";
 
@@ -73,7 +73,7 @@ function Conversion({ c }: { c: ConversionEntry }) {
                 : c.source ?? `Conversion #${c.job}`}
             </strong>
             {working && <span className="spinner" aria-label="Converting" />}
-            {working && <span className="muted small">{c.cancelling ? "Cancelling: stops when the current file is done…" : c.state === "queued" ? "Waiting for the previous file…" : c.message ?? "Converting…"}</span>}
+            {working && <span className="muted small">{c.cancelling ? "Cancelling: stops when the current file is done…" : c.state === "queued" ? (c.ahead > 0 ? `Queued on the server: ${queueText(c)}` : "Queued: next in line") : c.message ?? "Converting…"}</span>}
             {c.state === "failed" && <Badge value="failed" label="Failed" />}
             {c.state === "cancelled" && <Badge value="draft" label="Cancelled" />}
             {r && <Badge value={r.engine === "docling" ? "ok" : "info"} label={r.engine === "docling" ? "Docling" : "Built-in"} />}
@@ -128,8 +128,9 @@ export default function ConvertPage() {
       const id = nextId++;
       setUploads((u) => [{ id, name: f.name }, ...u]);
       try {
-        const { job, reused } = await api.toMarkdownJob(f, front, engine || undefined);
-        if (reused) push({ title: `${f.name} is already converted`, description: "The existing file in the list is used; it was not converted again.", tone: "ok" });
+        const { job, reused, joined } = await api.toMarkdownJob(f, front, engine || undefined);
+        if (joined) track(job, `Convert ${f.name}`);      // being converted for someone else: follow it (the bell says so)
+        else if (reused) push({ title: `${f.name} is already converted`, description: "The existing file in the list is used; it was not converted again.", tone: "ok" });
         else track(job, `Convert ${f.name}`);
         setUploads((u) => u.filter((x) => x.id !== id));
         await qc.invalidateQueries({ queryKey: ["conversions"] });

@@ -9,6 +9,7 @@ import { useAuth } from "../components/auth";
 import { useDebounced } from "../hooks";
 import { bufferPaused, trimRows } from "../util";
 import type { Job, LogEvent, LogLevel } from "../types";
+import { queueText } from "../components/jobs";
 
 const MAX_ROWS = 4000;       // kept while following the live tail
 const HARD_MAX_ROWS = 20000; // ceiling while the user is reading history
@@ -256,10 +257,10 @@ function RunningNow({ onLogs }: { onLogs: (id: number) => void }) {
     <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(320px, 100%), 1fr))", marginBottom: 16 }}>
       {running.map((j) => (
         <div key={j.id} className="runcard">
-          <div className="row"><span className="spinner" /><strong className="grow">{j.type}</strong><span className="muted small">#{j.id} · {dur(Date.now() - startOf(j))}</span></div>
-          <div className="small" style={{ minHeight: 18 }}>{j.state === "queued" ? "Queued…" : j.message || "Working…"}</div>
+          <div className="row"><span className="spinner" /><strong className="grow">{j.label ?? j.type}</strong><span className="muted small">#{j.id}{j.user ? ` · ${j.user}` : ""} · {dur(Date.now() - startOf(j))}</span></div>
+          <div className="small" style={{ minHeight: 18 }}>{j.state === "queued" ? queueText(j) || "Queued…" : j.message || "Working…"}</div>
           <div className={`progress ${j.total > 0 ? "" : "indeterminate"}`}><span style={{ width: j.total > 0 ? `${Math.min(100, (100 * j.progress) / j.total)}%` : undefined }} /></div>
-          <div className="row"><button className="sm" onClick={() => onLogs(j.id)}>Filter logs to this job</button><span className="grow" /><button className="sm danger" onClick={() => api.cancelJob(j.id)}>Cancel</button></div>
+          <div className="row"><button className="sm" onClick={() => onLogs(j.id)}>Filter logs to this job</button><span className="grow" />{j.can_cancel && <button className="sm danger" onClick={() => api.cancelJob(j.id)}>Cancel</button>}</div>
         </div>
       ))}
     </div>
@@ -277,20 +278,20 @@ function JobsTable({ onLogs }: { onLogs: (id: number) => void }) {
       {list.length > 0 && (
         <div className="scroll">
           <table className="t">
-            <thead><tr><th>#</th><th>Job</th><th>State</th><th>Progress</th><th>Started</th><th /></tr></thead>
+            <thead><tr><th>#</th><th>Job</th><th>By</th><th>State</th><th>Progress</th><th>Started</th><th /></tr></thead>
             <tbody>{list.map((j) => (
               <Fragment key={j.id}>
                 <tr className="click" onClick={() => setOpen(open === j.id ? null : j.id)}>
-                  <td>{j.id}</td><td>{j.type}</td><td><Badge value={j.state} label={j.state} /></td>
+                  <td>{j.id}</td><td>{j.label ?? j.type}</td><td className="small muted">{j.user ?? ""}</td><td><Badge value={j.state} label={j.state} /></td>
                   <td>{j.total > 0 ? `${j.progress}/${j.total}` : j.progress || ""} <span className="muted small">{j.message ?? ""}</span></td>
                   <td className="small muted">{j.created ?? ""}</td>
                   <td onClick={(e) => e.stopPropagation()} className="row" style={{ flexWrap: "nowrap" }}>
                     <button className="sm" onClick={() => onLogs(j.id)}>Logs</button>
-                    {(j.state === "running" || j.state === "queued") && <button className="sm danger" onClick={() => api.cancelJob(j.id).then(() => q.refetch())}>Cancel</button>}
+                    {(j.state === "running" || j.state === "queued") && j.can_cancel && <button className="sm danger" onClick={() => api.cancelJob(j.id).then(() => q.refetch())}>Cancel</button>}
                   </td>
                 </tr>
                 {open === j.id && (
-                  <tr><td colSpan={6}>
+                  <tr><td colSpan={7}>
                     {j.error && <pre>{j.error}</pre>}
                     {j.result ? <pre>{JSON.stringify(j.result, null, 1)}</pre> : !j.error && <span className="muted">No result recorded.</span>}
                   </td></tr>

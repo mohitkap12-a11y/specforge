@@ -397,3 +397,24 @@ fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
 mark.hit { background: color-mix(in srgb, #ffd33d 55%, transparent); color: inherit; border-radius: 2px; }
 mark.hit.cur { background: #ff9632; color: #000; outline: 2px solid #ff9632; }
 @media (max-width: 860px) { .md-outline { display: none; } .md-scroll { padding: 16px; } .modal-wrap { padding: 0; } .modal { height: 100%; border-radius: 0; } }
+
+/* header bell: jobs in progress and their place in the server's queue */
+.bell-wrap { position: relative; }
+.bell-count { position: absolute; top: 1px; right: 0; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; background: var(--glow); color: #fff; font-size: 10px; font-weight: 600; line-height: 16px; text-align: center; box-shadow: 0 0 0 2px var(--bg); }
+.bell-panel { position: absolute; right: 0; top: 42px; z-index: 80; width: min(380px, calc(100vw - 32px)); max-height: min(70vh, 560px); overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-lg); animation: slidein .14s ease-out; }
+.bell-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
+.bell-sub { padding: 8px 14px 2px; font-size: 11px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; min-height: 26px; }
+.bell-list { list-style: none; margin: 0; padding: 0 6px 6px; }
+.bell-item { display: grid; gap: 6px; padding: 10px 8px; border-radius: var(--radius-sm); }
+.bell-item + .bell-item { border-top: 1px solid var(--border); }
+.bell-item .muted.small { word-break: break-word; }
+.bell-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; }
+.bell-empty { margin: 0; padding: 14px; }
+@media (max-width: 640px) { .bell-panel { position: fixed; left: 16px; right: 16px; top: 60px; width: auto; } }
+
+/* Settings > Reset: one option per area */
+.reset-options { display: grid; gap: 8px; }
+.reset-option { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; }
+.reset-option > span { display: grid; gap: 2px; }
+.reset-option.on { border-color: var(--bad); background: var(--bad-bg); }
+.reset-option input { margin-top: 3px; }

@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, Download, GitCompareArrows, Trash2 } from "lucide-react";
 import { api } from "../api";
 import { Empty, ErrorNote, Loading, PageHeader, Pager, Switch } from "../components/ui";
-import { useJobs } from "../components/jobs";
+import { isActive, useJobs } from "../components/jobs";
 import { compareVersions, splitMarks } from "../util";
 import type { AIPoint, CompareChange, CompareEntity, CompareOption, Comparison, EntityGroup, Impact } from "../types";
 
@@ -104,7 +104,7 @@ function Points({ items }: { items: AIPoint[] }) {
 
 function Summary({ comp }: { comp: Comparison }) {
   const qc = useQueryClient();
-  const { track, active } = useJobs();
+  const { track, jobs } = useJobs();
   const [waiting, setWaiting] = useState(false);     // the submitted summary job has not finished yet
   const run = useMutation({
     mutationFn: (redo: boolean) => api.compareSummarize(comp.id, redo),
@@ -113,7 +113,7 @@ function Summary({ comp }: { comp: Comparison }) {
       track(r.job, `AI summary of comparison #${comp.id}`, () => { setWaiting(false); qc.invalidateQueries({ queryKey: ["comparison", comp.id] }); });
     },
   });
-  const writing = waiting || run.isPending || active.some((j) => j.type === "compare-summary");   // also covers a job started before a page reload
+  const writing = waiting || run.isPending || jobs.some((j) => j.type === "compare-summary" && isActive(j));   // also covers a job started before a page reload
   const ai = comp.ai;
   return (
     <div className="card">

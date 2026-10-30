@@ -199,6 +199,10 @@ CREATE TABLE IF NOT EXISTS job(
   total INTEGER DEFAULT 0, message TEXT, payload_json TEXT, result_json TEXT, error TEXT,
   created TEXT DEFAULT CURRENT_TIMESTAMP, updated TEXT DEFAULT CURRENT_TIMESTAMP
 );
+-- Other users following a job they asked for while it was already queued or running (same file, same spec)
+CREATE TABLE IF NOT EXISTS job_watcher(
+  job_id INTEGER NOT NULL REFERENCES job(id) ON DELETE CASCADE, user TEXT NOT NULL, PRIMARY KEY(job_id, user)
+);
 """
 
 # Columns added after the first release: (table, column, declaration).  CREATE TABLE IF NOT EXISTS leaves an existing table as it
@@ -207,6 +211,9 @@ MIGRATIONS = [
     ("scenario", "source_id", "INTEGER REFERENCES cmd_source(id) ON DELETE CASCADE"),
     ("scenario_item", "state", "TEXT"),
     ("scenario_item", "detail_json", "TEXT"),
+    ("job", "user", "TEXT"),        # who asked for it (NULL: started from the CLI or before jobs had owners)
+    ("job", "label", "TEXT"),       # what it is about, as the notification bell shows it ("Parse NVMe Base 2.4")
+    ("job", "queue", "TEXT"),       # the first-come-first-served line it waits in ('docling': one conversion at a time)
 ]
 
 _local = threading.local()

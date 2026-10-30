@@ -55,7 +55,7 @@ def safe_join(root: Path, rel: str) -> Path | None:
 # Reachable without a session (the login page needs them). Everything else under /api/ needs an active account.
 PUBLIC = {("POST", "/api/auth/login"), ("POST", "/api/auth/register"), ("POST", "/api/auth/logout"), ("GET", "/api/auth/me")}
 # Admin only: user management, global settings, wiping shared data.
-ADMIN_ONLY = {("PUT", "/api/settings"), ("POST", "/api/reset"), ("DELETE", "/api/logs"),
+ADMIN_ONLY = {("PUT", "/api/settings"), ("GET", "/api/reset"), ("POST", "/api/reset"), ("DELETE", "/api/logs"),
               ("GET", "/api/fs/browse")}     # lists the server's folders: other users type or drop a path instead
 ADMIN_PREFIX = "/api/users"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -152,13 +152,74 @@ def create_app() -> FastAPI:
         u = auth.current_user.get()
         eventlog.emit(level, "api", message, **({"user": u["username"]} if u else {}), **data)
 
+    def submit_job(type_: str, work, payload: dict, label: str | None = None, **kw) -> int:
+        """jobs.submit on the workspace database, owned by the signed-in user."""
+        u = me()
+        return jobs.submit(conn(), type_, work, payload, DB, user=u["username"] if u else None, label=label, **kw)
+
+    def _set_label(set_id) -> str:
+        r = row(conn(), "SELECT name FROM spec_set WHERE id=?", (set_id,))
+        return f"set {r['name']}" if r else f"set #{set_id}"
+
+    def _source_label(source_id) -> str:
+        r = row(conn(), "SELECT name, path FROM cmd_source WHERE id=?", (source_id,))
+        return (r["name"] or Path(r["path"]).name) if r else f"command DB #{source_id}"
+
+    def job_owner(j: dict) -> str | None:
+        return j.get("user") or jloads(j.get("payload_json"), {}).get("user")   # conversions recorded their owner before jobs had one
+
+    def watches(j: dict) -> bool:
+        """The signed-in user asked for this job: they started it, or joined it when they asked for the same work."""
+        u = me()["username"]
+        return job_owner(j) == u or row(conn(), "SELECT 1 AS x FROM job_watcher WHERE job_id=? AND user=?", (j["id"], u)) is not None
+
+    def watch(job_id: int) -> None:
+        conn().execute("INSERT OR IGNORE INTO job_watcher(job_id, user) VALUES(?, ?)", (job_id, me()["username"]))
+        conn().commit()
+
+    def may_cancel(j: dict) -> bool:
+        return me()["role"] == "admin" or (job_owner(j) is not None and job_owner(j) == me()["username"])
+
+    def job_json(j: dict) -> dict:
+        j = {**j, "user": job_owner(j), "mine": watches(j), "can_cancel": may_cancel(j)}
+        j.pop("payload_json", None)
+        return j
+
+    def resume(j: dict) -> None:
+        """Schedule a conversion or parse that was waiting (or running) when the server stopped, in its old place in line."""
+        p = jloads(j["payload_json"], {})
+        try:
+            if p.get("hidden"):
+                raise LookupError("it was removed")
+            if j["type"] == "convert-markdown":
+                folder = _conversion_dir(p.get("dir"))
+                upload = folder / p["upload"] if folder and p.get("upload") else None
+                if upload is None or not upload.is_file():
+                    raise LookupError("its uploaded file is gone (it was queued before queued jobs survived a restart)")
+                work = _convert_work(p["filename"], folder, str(upload), p.get("front_matter", True), p.get("engine"), j["user"] or p.get("user"))
+                jobs.schedule(j["id"], j["type"], work, DB, convert.serial_pool())
+            else:
+                d = row(conn(), "SELECT * FROM spec_document WHERE id=?", (p.get("document_id"),))
+                if d is None:
+                    raise LookupError("its spec was deleted")
+                work, pool = _parse_work(d, p.get("activate"), None if p.get("engine") in (None, "auto") else p["engine"], j["user"], None)
+                jobs.schedule(j["id"], j["type"], work, DB, pool)
+        except (LookupError, KeyError) as e:
+            conn().execute("UPDATE job SET state='failed', error=?, updated=CURRENT_TIMESTAMP WHERE id=?",
+                           (f"interrupted by restart and not resumed: {e}", j["id"]))
+            conn().commit()
+
     @app.on_event("startup")
     def _startup():
-        n = jobs.recover_interrupted(conn())
+        n, again = jobs.recover_interrupted(conn(), resumable=("convert-markdown", "parse"))
         eventlog.configure(settings())
         eventlog.emit("info", "system", f"SpecForge {__version__} started", workspace=str(config.workspace_dir()), parser_version=config.PARSER_VERSION)
         if n:
             eventlog.emit("warn", "system", f"{n} job(s) were interrupted by the previous shutdown and marked failed")
+        for j in again:
+            resume(j)
+        if again:
+            eventlog.emit("info", "system", f"{len(again)} queued conversion(s) and parse(s) resumed after the restart, in their old order")
         if AUTH and not auth.count_admins(conn()):
             eventlog.emit("warn", "system", "Sign-in is on but there is no admin account yet: run `specforge user create <name> --admin` on the server")
         elif not AUTH:
@@ -314,26 +375,89 @@ def create_app() -> FastAPI:
         audit("Settings saved", sections=sorted(body) if isinstance(body, dict) else [])
         return saved
 
+    # What each reset deletes. Parse runs, comparisons, catalogs, scenarios and coverage depend on the specs (ON DELETE
+    # CASCADE), so resetting the specs takes them along; coverage is what came from the test executions (imported command
+    # DBs and what was derived from them) and leaves the specs, sets, catalogs and drafted scenarios alone.
+    RESET_SCOPES = {
+        "comparisons": {"delete": ("spec_compare",), "files": (), "blocked_by": {"compare-summary"},
+                        "message": "saved spec comparisons removed"},
+        "coverage": {"delete": ("cmd_source",), "files": ("cmddb-uploads",),
+                     "blocked_by": {"import-cmddb", "exec-analyze", "exec-describe", "coverage"},
+                     "message": "imported command DBs, the scenarios derived from them and coverage runs removed"},
+        "specs": {"delete": ("spec_document", "spec_set", "correction", "enrichment"), "files": ("specs", "uploads"),
+                  "blocked_by": {"parse", "catalog", "cross-scenarios", "exec-analyze", "exec-describe", "coverage", "compare-summary"},
+                  "message": "specs, parse runs, sets, catalogs, scenarios, comparisons and coverage runs removed "
+                             "(To Markdown library and imported command DBs kept)"},
+        "all": {"delete": ("spec_document", "spec_set", "cmd_source", "correction", "llm_cache", "enrichment", "job", "event_log"),
+                "files": ("specs", "uploads", "cmddb-uploads", "conversions"), "blocked_by": None,
+                "message": "all specs, sets, scenarios, command databases, coverage runs, the To Markdown library and logs removed (settings kept)"},
+    }
+
+    def _reset_counts(scope: str) -> dict:
+        """How much a reset would delete, as the confirmation shows it."""
+        n = lambda sql: conn().execute(sql).fetchone()[0]   # noqa: E731
+        exec_scen = "SELECT COUNT(*) FROM scenario WHERE source_id IS NOT NULL"
+        if scope == "comparisons":
+            return {"comparisons": n("SELECT COUNT(*) FROM spec_compare")}
+        if scope == "coverage":
+            return {"command_dbs": n("SELECT COUNT(*) FROM cmd_source"), "executed_scenarios": n(exec_scen),
+                    "coverage_runs": n("SELECT COUNT(*) FROM coverage_run")}
+        out = {"specs": n("SELECT COUNT(*) FROM spec_document"), "parse_runs": n("SELECT COUNT(*) FROM parse_run"),
+               "sets": n("SELECT COUNT(*) FROM spec_set"), "scenarios": n("SELECT COUNT(*) FROM scenario"),
+               "comparisons": n("SELECT COUNT(*) FROM spec_compare"), "coverage_runs": n("SELECT COUNT(*) FROM coverage_run")}
+        if scope == "all":
+            out |= {"command_dbs": n("SELECT COUNT(*) FROM cmd_source"),
+                    "converted_files": n("SELECT COUNT(*) FROM job WHERE type='convert-markdown' AND state='done' "
+                                         "AND json_extract(payload_json, '$.hidden') IS NULL"),
+                    "jobs": n("SELECT COUNT(*) FROM job"), "log_events": n("SELECT COUNT(*) FROM event_log")}
+        return out
+
+    def _reset_scope(scope: str | None) -> dict:
+        if (spec := RESET_SCOPES.get(scope or "all")) is None:
+            raise HTTPException(400, f"Unknown reset '{scope}'; use one of: {', '.join(RESET_SCOPES)}.")
+        return spec
+
+    def _reset_blockers(spec: dict) -> list[dict]:
+        return [j for j in jobs.active(conn()) if spec["blocked_by"] is None or j["type"] in spec["blocked_by"]]
+
+    @app.get("/api/reset")
+    def reset_preview(scope: str = Query("all")):
+        """What POST /api/reset with this scope would delete, and the running jobs that stop it for now."""
+        spec = _reset_scope(scope)
+        return {"scope": scope, "counts": _reset_counts(scope),
+                "blocked_by": [{"id": j["id"], "label": j["label"] or j["type"], "user": j["user"]} for j in _reset_blockers(spec)]}
+
     @app.post("/api/reset")
-    def reset_workspace():
-        """Wipe everything produced while working (specs, sets, scenarios, command DBs, coverage, jobs, log, cache). Settings are kept."""
-        if jobs.active(conn()):
-            raise HTTPException(409, "Jobs are still running. Cancel them or wait for them to finish, then reset.")
-        eventlog.drain(1.0)
+    def reset_workspace(body: Any = Body(None)):
+        """Wipe what one area produced: scope 'comparisons', 'coverage' (what came from test executions), 'specs' (and
+        everything built on them) or 'all' (the default: also command DBs, the To Markdown library, jobs, the log and the AI
+        cache). Settings and user accounts are always kept. Refused while a job of that area is queued or running."""
+        scope = (body or {}).get("scope", "all") if isinstance(body, dict) else "all"
+        spec = _reset_scope(scope)
+        if busy := _reset_blockers(spec):
+            raise HTTPException(409, f"{len(busy)} job(s) of this area are still queued or running ("
+                                     + ", ".join(j["label"] or j["type"] for j in busy[:3])
+                                     + "). Cancel them or wait for them to finish, then reset.")
+        if scope == "all":
+            eventlog.drain(1.0)
         c = conn()
-        counts = {}
-        for table in ("spec_document", "spec_set", "cmd_source", "correction", "llm_cache", "enrichment", "job", "event_log"):
-            counts[table] = c.execute(f"DELETE FROM {table}").rowcount    # parse runs, nodes, catalogs, scenarios and coverage go with these via ON DELETE CASCADE
+        counts = _reset_counts(scope)
+        for table in spec["delete"]:
+            c.execute(f"DELETE FROM {table}")
         c.commit()
         files = 0
-        shutil.rmtree(config.workspace_dir() / "conversions", ignore_errors=True)
-        for sub in ("specs", "uploads"):
-            for f in (config.workspace_dir() / sub).iterdir():
-                if f.is_file():
+        for sub in spec["files"]:
+            root = config.workspace_dir() / sub
+            if not root.is_dir():
+                continue
+            for f in root.iterdir():
+                if f.is_dir():
+                    shutil.rmtree(f, ignore_errors=True)
+                else:
                     f.unlink(missing_ok=True)
-                    files += 1
-        eventlog.emit("warn", "system", "Workspace reset: all specs, sets, scenarios, command databases, coverage runs and logs removed (settings kept)", **counts, files=files)
-        return {"ok": True, "deleted": counts, "files": files}
+                files += 1
+        eventlog.emit("warn", "system", f"Reset ({scope}): {spec['message']}", user=me()["username"], **counts, files=files)
+        return {"ok": True, "scope": scope, "deleted": counts, "files": files}
 
     @app.get("/api/providers/{name}/models")
     def provider_models(name: str):
@@ -455,7 +579,30 @@ def create_app() -> FastAPI:
             shutil.rmtree(folder, ignore_errors=True)
             audit(f"{name} is already converted to Markdown; the existing conversion is reused", job_id=same)
             return {"job": same, "reused": True}
+        if (same := _converting_now(sha, front_matter, engine or convert.default_engine())) is not None:
+            shutil.rmtree(folder, ignore_errors=True)
+            watch(same["id"])
+            audit(f"{name} is already being converted (asked for by {job_owner(same)}); following that conversion", job_id=same["id"])
+            return {"job": same["id"], "reused": True, "joined": job_owner(same)}
         user = me()["username"]
+        job = submit_job("convert-markdown", _convert_work(name, folder, path, front_matter, engine, user),
+                         {"filename": name, "user": user, "engine": engine, "dir": folder.name, "upload": Path(path).name,
+                          "sha256": sha, "front_matter": front_matter},
+                         label=f"Convert {name} to Markdown", pool=convert.serial_pool(), queue=convert.QUEUE)
+        audit(f"Conversion of {name} to Markdown queued", job_id=job, engine=engine or convert.default_engine())
+        return {"job": job}
+
+    def _converting_now(sha: str, front_matter: bool, engine: str) -> dict | None:
+        """A queued or running conversion of the same file with the same options: asking again joins it."""
+        for j in rows(conn(), "SELECT * FROM job WHERE type='convert-markdown' AND state IN ('queued','running') "
+                              "AND json_extract(payload_json, '$.hidden') IS NULL AND json_extract(payload_json, '$.sha256') = ? "
+                              "AND json_extract(payload_json, '$.front_matter') = ? ORDER BY id", (sha, int(front_matter))):
+            if (jloads(j["payload_json"], {}).get("engine") or convert.default_engine()) == engine and not jobs.cancel_requested(j["id"], DB):
+                return j
+        return None
+
+    def _convert_work(name: str, folder: Path, path: str, front_matter: bool, engine: str | None, user: str | None):
+        suffix = Path(name).suffix.lower()
 
         def work(c, prog):
             try:
@@ -471,14 +618,10 @@ def create_app() -> FastAPI:
                 raise
             eventlog.emit("info", "api", f"Converted {name} to Markdown", user=user, format=res.source_format, engine=res.engine, **res.stats)
             return {**_conversion_json(name, res), "dir": folder.name}
-        job = jobs.submit(conn(), "convert-markdown", work, {"filename": name, "user": user, "engine": engine, "dir": folder.name,
-                                                             "sha256": sha, "front_matter": front_matter}, DB,
-                          pool=convert.serial_pool())
-        audit(f"Conversion of {name} to Markdown queued", job_id=job, engine=engine or convert.default_engine())
-        return {"job": job}
+        return work
 
-    def _owns(payload: dict) -> bool:
-        return payload.get("user") == me()["username"] or me()["role"] == "admin"
+    def _owns(j: dict) -> bool:
+        return me()["role"] == "admin" or watches(j)
 
     def _may_remove(j: dict, payload: dict) -> bool:
         """A finished file in the shared library only an admin deletes; its owner may still cancel or dismiss one that is not finished."""
@@ -501,24 +644,27 @@ def create_app() -> FastAPI:
                 "updated": j["updated"], "user": payload.get("user"), "mine": payload.get("user") == me()["username"],
                 "can_remove": _may_remove(j, payload), "has_source": j["state"] == "done" and _source_file(res) is not None,
                 "cancelling": active and jobs.cancel_requested(j["id"], DB), "error": j["error"],
+                "ahead": j["ahead"], "ahead_of": j["ahead_of"],     # its place in the conversion queue while it waits
                 "result": {k: v for k, v in res.items() if k != "dir"} if j["state"] == "done" else None}
 
     def _visible_conversion(job_id: int) -> dict:
         """A finished conversion is in the shared library; one still running, failed or cancelled only its owner (or an admin) sees."""
         j = jobs.get(conn(), job_id)
         payload = jloads(j["payload_json"], {}) if j else {}
-        if not j or j["type"] != "convert-markdown" or payload.get("hidden") or (j["state"] != "done" and not _owns(payload)):
+        if not j or j["type"] != "convert-markdown" or payload.get("hidden") or (j["state"] != "done" and not _owns(j)):
             raise HTTPException(404, "conversion not found")
         return j
 
     @app.get("/api/convert/markdown/jobs")
     def convert_markdown_list():
         """Newest first: every finished conversion in the shared library (whoever converted it), plus the signed-in user's own
-        queued or running ones and those that failed or were cancelled in the last 24 hours."""
+        queued or running ones (also those they joined) and those that failed or were cancelled in the last 24 hours."""
+        u = me()["username"]
         found = rows(conn(), "SELECT * FROM job WHERE type='convert-markdown' AND json_extract(payload_json, '$.hidden') IS NULL "
-                             "AND (state = 'done' OR (json_extract(payload_json, '$.user') = ? "
+                             "AND (state = 'done' OR ((json_extract(payload_json, '$.user') = ? "
+                             "OR id IN (SELECT job_id FROM job_watcher WHERE user = ?)) "
                              "AND (state IN ('queued','running') OR updated >= datetime('now', ?)))) ORDER BY id DESC",
-                     (me()["username"], f"-{CONVERT_KEEP_SECONDS} seconds"))
+                     (u, u, f"-{CONVERT_KEEP_SECONDS} seconds"))
         return [e for j in found if (e := _conversion_entry(j)) is not None]
 
     @app.delete("/api/convert/markdown/jobs/{job_id}")
@@ -645,7 +791,7 @@ def create_app() -> FastAPI:
         def work(c, prog):
             return compare_ai.summarize(c, cid, LLMService(c, st), redo=redo, progress=prog)
         audit(f"AI summary of comparison #{cid} requested", compare_id=cid, redo=redo)
-        return {"job": jobs.submit(conn(), "compare-summary", work, {"compare_id": cid}, DB)}
+        return {"job": submit_job("compare-summary", work, {"compare_id": cid}, label=f"AI summary of comparison #{cid}")}
 
     @app.delete("/api/compare/{cid}")
     def compare_delete(cid: int):
@@ -707,38 +853,55 @@ def create_app() -> FastAPI:
         (folder / "docling.json").write_text(json.dumps(res.docling), encoding="utf-8")
         shutil.copyfile(src, folder / f"source{Path(src).suffix.lower()}")
         payload = {"filename": name, "user": user, "engine": "docling", "dir": folder.name, "sha256": _sha256_of(src), "front_matter": True}
-        c.execute("INSERT INTO job(type,state,payload_json,result_json,message) VALUES('convert-markdown','done',?,?,?)",
-                  (json.dumps(payload), json.dumps({**_conversion_json(name, res), "dir": folder.name}), f"Converted {name}"))
+        c.execute("INSERT INTO job(type,state,payload_json,result_json,message,user,label) VALUES('convert-markdown','done',?,?,?,?,?)",
+                  (json.dumps(payload), json.dumps({**_conversion_json(name, res), "dir": folder.name}), f"Converted {name}", user,
+                   f"Convert {name} to Markdown"))
         c.commit()
 
-    def _start_parse(doc_id: int, activate: bool | None, engine: str | None) -> int:
+    def _parse_work(d: dict, activate: bool | None, engine: str | None, user: str | None, st: dict | None):
+        """The work of a parse job and the executor it runs on. A parse that must convert the file with Docling first
+        waits in the conversion queue (first come, first served, one file at a time, shared with the To Markdown page)
+        and runs there whole; the result joins that page's library so neither tool converts this file again. A parse
+        that needs no conversion runs on the shared job pool, without waiting behind conversions."""
+        need_docling = engine == "docling" and store.find_docling(conn(), d, copy=False) is None
+        name = d["filename"] or Path(d["path"]).name
+
+        def work(c, prog):
+            if need_docling and store.find_docling(c, d) is None:    # a conversion queued earlier may have made one meanwhile
+                prog(f"Converting {name} with Docling (large specs take a while)")
+                res = convert_file(d["path"], filename=name, engine="docling")    # already on the conversion thread
+                if res.engine != "docling" or res.docling is None:
+                    raise RuntimeError("Docling is not available on this server: " + "; ".join(res.warnings or ["no document returned"]))
+                _library_add(c, d["path"], name, user, res)
+            rid = store.run_parse(c, d["id"], st, progress=lambda s, a, b: prog(f"{s} {a}/{b}", a, b), activate=activate, engine=engine)
+            return {"run_id": rid}
+        return work, (convert.serial_pool() if need_docling else None)
+
+    def _start_parse(doc_id: int, activate: bool | None, engine: str | None) -> dict:
+        """{job}; {job, joined: owner} when the same spec is already queued or being parsed with the same engine."""
         d = row(conn(), "SELECT * FROM spec_document WHERE id=?", (doc_id,))
         if not d:
             raise HTTPException(404, "document not found")
         if engine is not None and engine not in store.ENGINES:
             raise HTTPException(400, f"Unknown parser engine '{engine}'; use one of: {', '.join(store.ENGINES)}.")
-        st, user = settings(), me()["username"]
-        need_docling = engine == "docling" and store.find_docling(conn(), d, copy=False) is None
-
-        def work(c, prog):
-            if need_docling and store.find_docling(c, d) is None:
-                # Docling runs on the converter's thread, one file at a time, like the To Markdown page; the result
-                # joins that page's library so neither tool converts this file again
-                prog(f"Converting {d['filename']} with Docling (large specs take a while)")
-                res = convert.submit(d["path"], filename=d["filename"] or Path(d["path"]).name, engine="docling").result()
-                if res.engine != "docling" or res.docling is None:
-                    raise RuntimeError("Docling is not available on this server: " + "; ".join(res.warnings or ["no document returned"]))
-                _library_add(c, d["path"], d["filename"] or Path(d["path"]).name, user, res)
-            rid = store.run_parse(c, doc_id, st, progress=lambda s, a, b: prog(f"{s} {a}/{b}", a, b), activate=activate, engine=engine)
-            return {"run_id": rid}
+        same = row(conn(), "SELECT * FROM job WHERE type='parse' AND state IN ('queued','running') "
+                           "AND json_extract(payload_json, '$.document_id') = ? AND json_extract(payload_json, '$.engine') = ? "
+                           "ORDER BY id LIMIT 1", (doc_id, engine or "auto"))
+        if same and not jobs.cancel_requested(same["id"], DB):
+            watch(same["id"])
+            audit(f"Parse of spec #{doc_id} requested while it is already queued or running; following job #{same['id']}",
+                  document_id=doc_id, job_id=same["id"])
+            return {"job": same["id"], "joined": job_owner(same)}
+        work, pool = _parse_work(d, activate, engine, me()["username"], settings())
         audit(f"Parse requested for spec #{doc_id}", document_id=doc_id, activate=activate, engine=engine or "auto")
-        return jobs.submit(conn(), "parse", work, {"document_id": doc_id, "engine": engine or "auto"}, DB)
+        return {"job": submit_job("parse", work, {"document_id": doc_id, "engine": engine or "auto", "activate": activate},
+                                  label=f"Parse {d['family']} {d['version']}", pool=pool, queue=convert.QUEUE if pool else None)}
 
     @app.post("/api/specs/{doc_id}/parse")
     def parse(doc_id: int, activate: bool = Query(False), engine: str | None = Query(None)):
         """engine: auto (Docling when the file has a Docling conversion, else built-in), docling (converts it first if
         needed) or builtin."""
-        return {"job": _start_parse(doc_id, True if activate else None, engine)}
+        return _start_parse(doc_id, True if activate else None, engine)
 
     @app.post("/api/specs/from-conversion/{job_id}")
     def spec_from_conversion(job_id: int):
@@ -756,7 +919,7 @@ def create_app() -> FastAPI:
         name = jloads(j["payload_json"], {}).get("filename") or src.name
         d = store.register_document(conn(), src, filename=name)
         audit(f"Added {name} from the To Markdown library as {d['family']} {d['version']}", document_id=d["id"], job_id=job_id)
-        return {"document": d, "job": _start_parse(d["id"], None, None)}
+        return {"document": d, **_start_parse(d["id"], None, None)}
 
     @app.post("/api/runs/{run_id}/activate")
     def activate(run_id: int):
@@ -924,7 +1087,7 @@ def create_app() -> FastAPI:
             res = catalog.build_catalog(c, set_id)
             return {**res, "issues": res["issues"][:500]}
         audit(f"Catalog build requested for set #{set_id}", set_id=set_id)
-        return {"job": jobs.submit(conn(), "catalog", work, {"set_id": set_id}, DB)}
+        return {"job": submit_job("catalog", work, {"set_id": set_id}, label=f"Build catalog of {_set_label(set_id)}")}
 
     @app.get("/api/sets/{set_id}/catalog")
     def get_catalog(set_id: int, kind: str | None = None, command: str | None = None, q: str | None = None,
@@ -1190,7 +1353,7 @@ def create_app() -> FastAPI:
         def work(c, prog):
             return generate_cross_scenarios(c, set_id, LLMService(c, st), secs, cmds, focus, mx, progress=lambda a, b: prog("cross-command scenarios", a, b), passes=passes)
         audit(f"Cross-command scenario generation requested for set #{set_id}", set_id=set_id, sections=len(secs), commands=len(cmds), passes=passes, focus=focus or None)
-        return {"job": jobs.submit(conn(), "cross-scenarios", work, {"set_id": set_id}, DB)}
+        return {"job": submit_job("cross-scenarios", work, {"set_id": set_id}, label=f"Draft scenarios for {_set_label(set_id)}")}
 
     # ------------------------------------------------------------------ executed scenarios (derived from a command DB)
     def _exec_source(set_id: int, body: dict) -> int:
@@ -1222,7 +1385,7 @@ def create_app() -> FastAPI:
         def work(c, prog):
             return execscen.analyze_execution(c, set_id, src, progress=lambda a, b: prog("analysing executed commands", a, b))
         audit(f"Execution analysis requested (set #{set_id}, command DB #{src})", set_id=set_id, source_id=src)
-        return {"job": jobs.submit(conn(), "exec-analyze", work, {"set_id": set_id, "source_id": src}, DB)}
+        return {"job": submit_job("exec-analyze", work, {"set_id": set_id, "source_id": src}, label=f"Analyse {_source_label(src)}")}
 
     @app.post("/api/sets/{set_id}/exec/describe")
     def exec_describe(set_id: int, body: dict = Body(...)):
@@ -1240,7 +1403,7 @@ def create_app() -> FastAPI:
             return execscen.describe_scenarios(c, set_id, src, LLMService(c, st), ids, redo, progress=lambda a, b: prog("describing executed scenarios", a, b))
         audit(f"AI description of executed scenarios requested (set #{set_id}, command DB #{src})", set_id=set_id, source_id=src,
               scenarios=len(ids) if ids else "all undescribed" if not redo else "all")
-        return {"job": jobs.submit(conn(), "exec-describe", work, {"set_id": set_id, "source_id": src}, DB)}
+        return {"job": submit_job("exec-describe", work, {"set_id": set_id, "source_id": src}, label=f"Describe scenarios of {_source_label(src)}")}
 
     # ------------------------------------------------------------------ command DBs
     @app.get("/api/cmddb/suggest")
@@ -1376,7 +1539,7 @@ def create_app() -> FastAPI:
         def work(c, prog):
             return cmddb.import_source(c, sid, st.get("mi_layout"), progress=lambda n: prog(f"decoded {n} rows", n, 0))
         audit(f"Import requested for command database #{sid}", source_id=sid)
-        return {"job": jobs.submit(conn(), "import-cmddb", work, {"source_id": sid}, DB)}
+        return {"job": submit_job("import-cmddb", work, {"source_id": sid}, label=f"Import {_source_label(sid)}")}
 
     @app.get("/api/cmddb/{sid}/commands")
     def browse(sid: int, opcode: int | None = None, queue: str | None = None, interface: str | None = None, test: str | None = None,
@@ -1404,7 +1567,7 @@ def create_app() -> FastAPI:
             rid = coverage.run_coverage(c, body["set_id"], body["source_id"], progress=lambda a, b: prog("matching scenarios", a, b))
             return {"run_id": rid}
         audit(f"Coverage run requested (set #{body['set_id']}, command DB #{body['source_id']})", set_id=body["set_id"], source_id=body["source_id"])
-        return {"job": jobs.submit(conn(), "coverage", work, body, DB)}
+        return {"job": submit_job("coverage", work, body, label=f"Coverage of {_source_label(body.get('source_id'))}")}
 
     @app.get("/api/coverage/runs")
     def cov_runs(set_id: int | None = None):
@@ -1489,9 +1652,11 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------ jobs
     @app.get("/api/jobs")
     def list_jobs(state: str | None = None):
-        if state == "active":      # every queued/running job, however old (recent() is capped)
-            return jobs.active(conn())
-        return jobs.recent(conn())
+        """An admin sees every job; another user the jobs they asked for (started or joined)."""
+        found = jobs.active(conn()) if state == "active" else jobs.recent(conn())    # active: however old (recent() is capped)
+        if me()["role"] != "admin":
+            found = [j for j in found if watches(j)]
+        return [job_json(j) for j in found]
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: int):
@@ -1499,11 +1664,18 @@ def create_app() -> FastAPI:
         if not j:
             raise HTTPException(404)
         j["result"] = jloads(j.pop("result_json"), None)
-        return j
+        return job_json(j)
 
     @app.post("/api/jobs/{job_id}/cancel")
     def cancel_job(job_id: int):
+        """The user who started a job, or an admin, may cancel it (others who joined it only follow it)."""
+        j = jobs.get(conn(), job_id)
+        if not j:
+            raise HTTPException(404)
+        if not may_cancel(j):
+            raise HTTPException(403, f"only {job_owner(j) or 'an admin'} or an admin can cancel this job")
         jobs.cancel(job_id, DB)
+        audit(f"Cancel requested for job #{job_id} ({j['label'] or j['type']})", job_id=job_id)
         return {"ok": True}
 
     @app.get("/api/jobs/{job_id}/events")

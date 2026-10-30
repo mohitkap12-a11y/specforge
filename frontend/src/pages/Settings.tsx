@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Link, useLocation } from "react-router-dom";
 import { api } from "../api";
+import type { ResetScope } from "../types";
 import { ErrorNote, Field, Loading, PageHeader, Segmented, Switch } from "../components/ui";
 import { useToast } from "../components/Toasts";
 import { useAuth } from "../components/auth";
@@ -58,10 +59,6 @@ export default function SettingsPage() {
   const save = useMutation({
     mutationFn: (b: S) => api.saveSettings(b),
     onSuccess: () => { qc.invalidateQueries(); toast.push({ title: "Settings saved", tone: "ok" }); },
-  });
-  const reset = useMutation({
-    mutationFn: () => api.resetWorkspace(),
-    onSuccess: () => { qc.invalidateQueries(); toast.push({ title: "Workspace reset", tone: "ok" }); },
   });
   if (q.isLoading || q.error || !s) return <><PageHeader title="Settings" /><Loading q={q} /></>;
 
@@ -153,11 +150,8 @@ export default function SettingsPage() {
             <p className="muted small" style={{ marginTop: 8 }}>Stored in this browser only. Tip: press <span className="kbd">⌘ K</span> / <span className="kbd">Ctrl K</span> anywhere to jump to a page.</p>
           </Section>
 
-          {isAdmin && <Section id="reset" title="Reset workspace" description="Start over: permanently deletes all uploaded specs and parse runs, spec sets, catalogs, scenarios, command databases, coverage runs, jobs, the activity log and the AI cache. Your settings above and the user accounts are kept.">
-            <button className="danger" disabled={reset.isPending} onClick={() => { if (confirm("Delete everything created so far (specs, sets, scenarios, command DBs, coverage runs, logs)? This cannot be undone. Settings are kept.")) reset.mutate(); }}>
-              {reset.isPending && <span className="spinner" />}Reset everything
-            </button>
-            <ErrorNote error={reset.error} />
+          {isAdmin && <Section id="reset" title="Reset" description="Start over in one area. Each reset permanently deletes what it lists; your settings and the user accounts are always kept. Only admins see this.">
+            <ResetPanel />
           </Section>}
 
           <Section id="about" title="About">
@@ -182,5 +176,67 @@ export default function SettingsPage() {
         </div>
       )}
     </>
+  );
+}
+
+const RESETS: { scope: ResetScope; title: string; text: string }[] = [
+  { scope: "comparisons", title: "Comparisons", text: "Saved version comparisons and their AI summaries. Nothing else changes." },
+  { scope: "coverage", title: "Coverage", text: "What came from test executions: imported command DBs, the scenarios derived from them, and coverage runs. Specs, sets, catalogs and drafted scenarios are kept." },
+  { scope: "specs", title: "Specs", text: "Specs, parse runs, spec sets, catalogs and scenarios. Comparisons and coverage runs are built on the specs, so they are deleted too. The To Markdown library and imported command DBs are kept: a spec added again is not converted again." },
+  { scope: "all", title: "Everything", text: "All of the above, plus imported command DBs, the To Markdown library, job history, the activity log and the AI cache." },
+];
+const COUNT_LABELS: Record<string, string> = {
+  specs: "specs", parse_runs: "parse runs", sets: "spec sets", scenarios: "scenarios", comparisons: "comparisons", coverage_runs: "coverage runs",
+  command_dbs: "command DBs", executed_scenarios: "scenarios derived from executions", converted_files: "converted files (To Markdown)", jobs: "jobs", log_events: "log events",
+};
+const CONFIRM_WORD = "reset";
+
+/** Pick an area, see what would be deleted (and what is still running there), type the word, reset. */
+function ResetPanel() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [scope, setScope] = useState<ResetScope>("comparisons");
+  const [word, setWord] = useState("");
+  const preview = useQuery({ queryKey: ["reset-preview", scope], queryFn: () => api.resetPreview(scope), refetchInterval: 5000 });
+  const chosen = RESETS.find((r) => r.scope === scope)!;
+  const run = useMutation({
+    mutationFn: () => api.resetWorkspace(scope),
+    onSuccess: () => { setWord(""); qc.invalidateQueries(); toast.push({ title: `${chosen.title} reset`, tone: "ok" }); },
+  });
+  const counts = Object.entries(preview.data?.counts ?? {});
+  const blocked = preview.data?.blocked_by ?? [];
+  const empty = counts.length > 0 && counts.every(([, n]) => n === 0);
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <div role="radiogroup" aria-label="What to reset" className="reset-options">
+        {RESETS.map((r) => (
+          <label key={r.scope} className={`reset-option ${scope === r.scope ? "on" : ""}`}>
+            <input type="radio" name="reset-scope" checked={scope === r.scope} onChange={() => { setScope(r.scope); setWord(""); run.reset(); }} />
+            <span><strong>{r.title}</strong><span className="muted small">{r.text}</span></span>
+          </label>
+        ))}
+      </div>
+      <div className="small">
+        {preview.isLoading ? <span className="muted">Counting…</span> : empty ? <span className="muted">Nothing to delete here.</span> : (
+          <>Deletes {counts.filter(([, n]) => n > 0).map(([k, n]) => `${n} ${COUNT_LABELS[k] ?? k}`).join(", ")}.</>
+        )}
+      </div>
+      {blocked.length > 0 && (
+        <div className="toast bad" role="alert">
+          {blocked.length} job{blocked.length > 1 ? "s" : ""} of this area {blocked.length > 1 ? "are" : "is"} still queued or running: {blocked.slice(0, 3).map((j) => `${j.label}${j.user ? ` (${j.user})` : ""}`).join(", ")}{blocked.length > 3 ? "…" : ""}. Cancel {blocked.length > 1 ? "them" : "it"} from the bell or wait, then reset.
+        </div>
+      )}
+      <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+        <label className="field" style={{ minWidth: 220 }}>
+          <span>Type <span className="kbd">{CONFIRM_WORD}</span> to confirm</span>
+          <input value={word} onChange={(e) => setWord(e.target.value)} autoComplete="off" spellCheck={false} aria-label={`Type ${CONFIRM_WORD} to confirm`} />
+        </label>
+        <button className="danger" style={{ alignSelf: "end" }} disabled={run.isPending || word.trim().toLowerCase() !== CONFIRM_WORD || blocked.length > 0 || empty}
+          onClick={() => run.mutate()}>
+          {run.isPending && <span className="spinner" />}Reset {chosen.title.toLowerCase()}
+        </button>
+      </div>
+      <ErrorNote error={run.error} />
+    </div>
   );
 }
