@@ -189,7 +189,9 @@ export interface AppUser {
   note?: string | null; created?: string; decided_at?: string | null; decided_by?: string | null; last_login?: string | null;
 }
 /** `auth` false: the server runs without sign-in (single local user, who is admin). */
-export interface Me { auth: boolean; user: AppUser | null; pending: number }
+/** Staged rollouts an admin turns on for every user (see PUT /api/features). */
+export interface Features { coverage_released: boolean }
+export interface Me { auth: boolean; user: AppUser | null; pending: number; features?: Partial<Features> }
 
 export type ResetScope = "comparisons" | "coverage" | "specs" | "all";
 /** What a reset would delete, and the queued or running jobs of that area that stop it for now. */

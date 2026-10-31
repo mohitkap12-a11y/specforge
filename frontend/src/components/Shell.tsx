@@ -6,7 +6,7 @@ import { api } from "../api";
 import { isActive, useJobs } from "./jobs";
 import { Bell } from "./Bell";
 import { CommandPalette } from "./CommandPalette";
-import { GROUPS, NAV, navFor } from "./nav";
+import { COMING_SOON, GROUPS, NAV, isCoveragePage, navFor, type NavItem } from "./nav";
 import { useAuth } from "./auth";
 import { useTheme } from "../theme";
 
@@ -20,12 +20,14 @@ export function Shell({ children }: { children: ReactNode }) {
   const [palette, setPalette] = useState(false);
   const [theme, setTheme] = useTheme();
   const { jobs } = useJobs();
-  const { me, user, isAdmin, canManageUsers, signOut } = useAuth();
-  const pages = navFor(canManageUsers);
+  const { me, user, isAdmin, canManageUsers, coverage, signOut } = useAuth();
+  const pages = navFor(canManageUsers, coverage);
   const health = useQuery({ queryKey: ["health"], queryFn: api.health, staleTime: 60_000 });
   const running = jobs.filter(isActive).length;
-  const tool = GROUPS.find((g) => g.key === NAV.find((n) => (n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to)))?.group)?.title ?? null;
-  const current = NAV.find((n) => (n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to)));
+  const here = (n: NavItem) => (n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to));
+  // a Coverage Tool page opened while it is coming soon: the placeholder (the pages themselves are not in the menu)
+  const current = coverage === "soon" && isCoveragePage(loc.pathname) ? COMING_SOON : pages.find(here) ?? NAV.find(here);
+  const tool = current?.soon ? null : GROUPS.find((g) => g.key === current?.group)?.title ?? null;
 
   const toggle = useCallback(() => setCollapsed((c) => {
     try { localStorage.setItem(KEY, c ? "0" : "1"); } catch { /* ignore */ }
@@ -45,9 +47,11 @@ export function Shell({ children }: { children: ReactNode }) {
   const dark = theme === "dark" || (theme === "system" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
   const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
   const tip = (label: string) => (collapsed ? label : undefined);   // native tooltip only while the labels are hidden
-  const link = (n: (typeof NAV)[number]) => (
-    <NavLink key={n.to} to={n.to} end={n.to === "/"} title={tip(n.label)} aria-label={n.label} className={({ isActive }) => `item ${isActive ? "active" : ""}`}>
+  const link = (n: NavItem) => (
+    <NavLink key={n.to} to={n.to} end={n.to === "/"} title={tip(n.soon ? `${n.label} (coming soon)` : n.label)} aria-label={n.soon ? `${n.label} (coming soon)` : n.label}
+      className={({ isActive }) => `item ${n.soon ? "soon" : ""} ${isActive || (n.soon && current === COMING_SOON) ? "active" : ""}`}>
       <n.icon size={17} /><span className="lbl">{n.label}</span>
+      {n.soon && <span className="soon-tag lbl">Soon</span>}
       {n.to === "/activity" && running > 0 && <span className="count" aria-label={`${running} running`}>{running}</span>}
       {n.to === "/users" && me.pending > 0 && <span className="count" aria-label={`${me.pending} access requests waiting`}>{me.pending}</span>}
     </NavLink>
@@ -67,7 +71,9 @@ export function Shell({ children }: { children: ReactNode }) {
           </button>
           {GROUPS.map((g) => (
             <div key={g.key}>
-              {g.title ? <div className="nav-group"><span className="lbl">{g.title}</span></div> : <div style={{ height: 6 }} />}
+              {g.title ? <div className="nav-group"><span className="lbl">{g.title}</span>
+                {g.key === "coverage" && coverage === "preview" && <span className="lbl preview-tag" title="Only admins see the Coverage Tool until it is released in Settings → Feature rollout">Admin preview</span>}
+              </div> : <div style={{ height: 6 }} />}
               {pages.filter((n) => n.group === g.key).map(link)}
             </div>
           ))}

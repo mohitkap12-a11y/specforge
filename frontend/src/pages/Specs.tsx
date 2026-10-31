@@ -5,6 +5,7 @@ import { api } from "../api";
 import { FileUp, UploadCloud } from "lucide-react";
 import { Badge, Empty, ErrorNote, Loading, PageHeader } from "../components/ui";
 import { useJobs } from "../components/jobs";
+import { useAuth } from "../components/auth";
 import type { ParseRun, ParserEngine, SpecDoc } from "../types";
 
 const engineOf = (run: ParseRun) => (run.stats?.engine === "docling" ? "docling" : "builtin");
@@ -92,6 +93,7 @@ function DocCard({ doc }: { doc: SpecDoc }) {
 
 export default function SpecsPage() {
   const qc = useQueryClient();
+  const { coverage } = useAuth();
   const specs = useQuery({ queryKey: ["specs"], queryFn: api.specs });
   const input = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
@@ -118,7 +120,7 @@ export default function SpecsPage() {
       <Loading q={specs} />
       {specs.data?.length === 0 && <Empty icon={FileUp} title="No specs yet">Upload the NVMe Base and NVM Command Set specifications to begin. PDF and DOCX are supported.</Empty>}
       {specs.data?.map((d) => <DocCard key={d.id} doc={d} />)}
-      {specs.data && specs.data.length > 0 && <p className="muted">Next: group specs into a set on the <Link to="/sets">Sets</Link> page.</p>}
+      {specs.data && specs.data.length > 0 && coverage !== "soon" && <p className="muted">Next: group specs into a set on the <Link to="/sets">Sets</Link> page.</p>}
     </>
   );
 }

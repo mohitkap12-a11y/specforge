@@ -1,5 +1,5 @@
 import type { McpCallRow, McpFilters, McpInfo, McpIssue, McpIssueDetail, McpIssueStatus, McpMetrics, McpSettings, McpStatus } from "./types";
-import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, ParserEngine, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, ResetPreview, ResetScope, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { AppUser, Features, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, ParserEngine, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, ResetPreview, ResetScope, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -91,6 +91,7 @@ export const api = {
   correctTable: (run: number, key: string, header: string[], rows: string[][]) => req<{ note: string }>("PUT", `/api/runs/${run}/tables/correction`, { key, header, rows }),
   settings: () => req<Record<string, any>>("GET", "/api/settings"),
   saveSettings: (b: Record<string, any>) => req<Record<string, any>>("PUT", "/api/settings", b),
+  setFeatures: (b: Partial<Features>) => req<Features>("PUT", "/api/features", b),
   providerModels: (name: string) => req<{ ok: boolean; error?: string; models: { id: string; provider?: string }[]; health?: unknown }>("GET", `/api/providers/${name}/models`),
   health: () => req<{ ok: boolean; version: string; workspace: string; parser_version: string; reparse_available: unknown[] }>("GET", "/api/health"),
   putMapping: (id: number, mapping: unknown) => req("PUT", `/api/cmddb/${id}/mapping`, mapping),

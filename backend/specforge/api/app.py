@@ -57,12 +57,16 @@ def safe_join(root: Path, rel: str) -> Path | None:
 # Reachable without a session (the login page needs them). Everything else under /api/ needs an active account.
 PUBLIC = {("POST", "/api/auth/login"), ("POST", "/api/auth/register"), ("POST", "/api/auth/logout"), ("GET", "/api/auth/me")}
 # Admin only: user management, global settings, wiping shared data.
-ADMIN_ONLY = {("PUT", "/api/settings"), ("GET", "/api/reset"), ("POST", "/api/reset"), ("DELETE", "/api/logs"),
+ADMIN_ONLY = {("PUT", "/api/settings"), ("PUT", "/api/features"), ("GET", "/api/reset"), ("POST", "/api/reset"), ("DELETE", "/api/logs"),
               ("GET", "/api/fs/browse"),     # lists the server's folders: other users type or drop a path instead
               ("GET", "/api/mcp/status"), ("PUT", "/api/mcp/settings"), ("POST", "/api/mcp/reindex"), ("POST", "/api/mcp/reset-stats")}
 ADMIN_PREFIX = "/api/users"
 # Every /api/mcp/ route but the guide's (metrics, misses & errors, call log, settings) is for admins
 MCP_PREFIX, MCP_PUBLIC = "/api/mcp/", {"/api/mcp/info"}
+# The Coverage Tool's own routes: admins only until an admin releases the tool (settings.features.coverage_released).
+# Specs, parse runs and the explorer are not here: the converter, Compare and the MCP endpoint share them.
+COVERAGE_PREFIXES = ("/api/sets", "/api/cmddb", "/api/coverage", "/api/scenarios", "/api/cross")
+FEATURES = {"coverage_released": bool}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # With login turned off (`serve --no-auth`, localhost only) the single local user is the admin.
 LOCAL_USER = {"id": 0, "username": "local", "display_name": None, "role": "admin", "status": "active"}
@@ -95,6 +99,14 @@ def client_ip(req: Request) -> str:
 def admin_only(method: str, path: str) -> bool:
     return ((method, path) in ADMIN_ONLY or path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/")
             or (path.startswith(MCP_PREFIX) and path not in MCP_PUBLIC))
+
+
+def coverage_route(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in COVERAGE_PREFIXES)
+
+
+def coverage_released(conn) -> bool:
+    return bool((config.load_settings(conn).get("features") or {}).get("coverage_released"))
 
 
 class McpDispatch:
@@ -141,6 +153,9 @@ class AuthGate:
             return await JSONResponse({"detail": "sign in required"}, 401)(scope, receive, send)
         if user is not None and user["role"] != "admin" and admin_only(method, path):
             return await JSONResponse({"detail": "only an admin can do this"}, 403)(scope, receive, send)
+        if (user is not None and user["role"] != "admin" and coverage_route(path)
+                and not await run_in_threadpool(lambda: coverage_released(get_conn()))):
+            return await JSONResponse({"detail": "the Coverage Tool is coming soon: an admin has not released it yet"}, 403)(scope, receive, send)
         if renewed:          # the server extended the session: extend the browser's cookie too
             cookie, inner = session_cookie(token, is_https(req)), send
 
@@ -178,6 +193,10 @@ def create_app() -> FastAPI:
 
     def settings() -> dict:
         return config.load_settings(conn())
+
+    def features() -> dict:
+        cur = settings().get("features") or {}
+        return {k: bool(cur.get(k)) for k in FEATURES}
 
     def audit(message: str, level: str = "info", **data) -> None:
         u = auth.current_user.get()
@@ -305,8 +324,9 @@ def create_app() -> FastAPI:
     @app.get("/api/auth/me")
     def auth_me():
         u = me()
-        return {"auth": AUTH, "user": public_user(u) if u else None,
-                "pending": auth.pending_count(conn()) if AUTH and u and u["role"] == "admin" else 0}
+        out = {"auth": AUTH, "user": public_user(u) if u else None,
+               "pending": auth.pending_count(conn()) if AUTH and u and u["role"] == "admin" else 0}
+        return {**out, "features": features()} if u else out
 
     @app.post("/api/auth/login")
     def auth_login(request: Request, response: Response, body: Any = Body(...)):
@@ -428,10 +448,28 @@ def create_app() -> FastAPI:
             pc = lg.get("preview_chars", 4000)
             if not (isinstance(pc, int) and not isinstance(pc, bool) and 200 <= pc <= 50_000):
                 raise HTTPException(422, "logging.preview_chars must be a whole number between 200 and 50000")
-        saved = config.save_settings(conn(), body)
+        # rollouts change only through PUT /api/features (audited): a settings form loaded before a rollout must not undo it
+        saved = config.save_settings(conn(), {**body, "features": settings().get("features") or {}})
         eventlog.configure(saved)
         audit("Settings saved", sections=sorted(body) if isinstance(body, dict) else [])
         return saved
+
+    @app.get("/api/features")
+    def get_features():
+        return features()
+
+    @app.put("/api/features")
+    def put_features(body: Any = Body(...)):
+        """An admin releases a feature to every user (or takes it back to an admin-only preview)."""
+        if not isinstance(body, dict) or not body or any(k not in FEATURES for k in body):
+            raise HTTPException(422, f"send one or more of: {', '.join(FEATURES)}")
+        if any(not isinstance(v, bool) for v in body.values()):
+            raise HTTPException(422, "feature flags must be true or false")
+        cur = settings()
+        config.save_settings(conn(), {**cur, "features": {**(cur.get("features") or {}), **body}})
+        for k, v in body.items():
+            audit(f"Feature rollout: {k}={v}" + (" (released to every user)" if v else " (admins only)"), **{k: v})
+        return features()
 
     # ------------------------------------------------------------------ MCP endpoint (/mcp): guide for everyone, status for admins
     MCP_SETTINGS = {"enabled": bool, "log_calls": bool, "rate_limit_per_min": (0, 100_000), "compare_wait_s": (1, 600), "public_url": str,
