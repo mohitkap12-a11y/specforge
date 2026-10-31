@@ -40,7 +40,7 @@ from .ingest import store
 from .ingest.normalize import SPEC_ALIASES, _ALIAS_RE, clean, extract_references, norm_title, parse_byte_range
 
 PAGE_CHARS = 120_000            # about 30k tokens per answer: a whole Identify Controller structure fits in one page
-INDEX_VERSION = "3"             # bump when what the search index holds changes: every run is indexed again
+INDEX_VERSION = "4"             # bump when what the search index holds changes: every run is indexed again
 MAX_HITS = 25
 CELL_CHARS = 1500
 
@@ -209,12 +209,12 @@ def _desc(r: list) -> str:
     return _SUB_HEAD.sub("", d) if d.startswith(SUB.strip()) else d
 
 
-_SUB_HEAD = re.compile(r"^↳\s*(?:[^·]{0,24}·\s*)?")
+_SUB_HEAD = re.compile(r"^↳+\s*(?:[^·]{0,24}·\s*)?")
 
 
 def _sub_bits(r: list) -> str:
     """The bits a sub-row starts with ("16" of "↳ 16 · MDTS and Size Limits ... (MEM): ..."), or ""."""
-    m = re.match(r"^↳\s*([^·]{1,24}?)\s*·", clean(r[-1]))
+    m = re.match(r"^↳+\s*([^·]{1,24}?)\s*·", clean(r[-1]))
     return m.group(1) if m else ""
 
 
@@ -233,10 +233,16 @@ def answer(text: str, data: dict | None) -> str:
 
 
 SUB = "↳ "      # first characters of a sub-row: a nested bit table's row, or text continued from the row above, in the last column
+SUB2 = "↳↳ "    # a row of a table nested one level deeper (a bit's values)
 
 
 def is_sub(r: list) -> bool:
     return bool(r) and not clean(r[0]) and clean(r[-1]).startswith(SUB.strip())
+
+
+def sub_depth(r: list) -> int:
+    """0 for a row of the table itself, 1 for a sub-row, 2 for a row of a table nested in a sub-row."""
+    return len(re.match(r"^↳*", clean(r[-1])).group(0)) if is_sub(r) else 0
 
 
 def _align(hp: list[int], kp: list[int]) -> dict[int, int]:
@@ -302,12 +308,29 @@ def logical_tables(raw: dict[str, dict]) -> tuple[dict[str, dict], dict[str, str
     (_layout); a table the PDF parser cut into pieces (continued over pages: its caption again, or an uncaptioned piece, in
     the same section) becomes one table under the label of its first piece, with repeated rows dropped. A piece's rows go
     under the columns of the same name; rows that fit no column (a nested bit table, continued text) become sub-rows: the
-    cells joined, after SUB, in the last column. alias maps every piece's label to that table."""
+    cells joined, after SUB, in the last column. A table the parser placed in a cell of another (parent_cell: a field's bit
+    table, a bit's value table) is not a table of its own: its rows follow that parent row as sub-rows (SUB, one level
+    deeper SUB2). alias maps every piece's label, and every nested table's, to the table that shows it."""
     out: dict[str, dict] = {}
     alias: dict[str, str] = {}
     named: dict | None = None           # the last captioned table with rows in the current section: what a piece continues
+    kids: dict[str, dict[int, list[dict]]] = {}            # parent label -> parent row -> the tables nested in that row
+    for lab, t in raw.items():
+        pk, cell = t.get("parent_key") or "", t.get("parent_cell")
+        if "/fig:" in pk and cell:
+            kids.setdefault(pk.rsplit("/fig:", 1)[1], {}).setdefault(int(cell[0]), []).append(t)
 
-    def place(g: dict, labels: list[str], laid: list[tuple[list[str], bool]]) -> None:
+    def nested_rows(label: str, row: int, w: int, depth: int = 1) -> list[list[str]]:
+        out_ = []
+        for c in kids.get(label, {}).get(row, []):
+            for i, r in enumerate(c.get("rows") or []):
+                text = " · ".join(clean(x) for x in r if clean(x))
+                if text:
+                    out_.append([""] * (w - 1) + [(SUB2 if depth > 1 else SUB) + text] if w > 1 else [SUB + text])
+                out_ += nested_rows(c["label"], i, w, depth + 1)
+        return out_
+
+    def place(g: dict, labels: list[str], laid: list[tuple[list[str], bool]], label: str = "") -> None:
         main = g["header"]
         w = len(main)
         keys = [_label_key(h) for h in main]
@@ -319,7 +342,8 @@ def logical_tables(raw: dict[str, dict]) -> tuple[dict[str, dict], dict[str, str
             named_idx = [k for k, h in zip(idx, labels) if h]
             if None not in idx and len(set(named_idx)) == len(named_idx):
                 by_name = idx
-        for cells, sub in laid:
+        for i, (cells, sub) in enumerate(laid):
+            extra = nested_rows(label, i, w) if label in kids else []
             if not sub and same:
                 r = list(cells)
             elif not sub and by_name is not None:
@@ -330,20 +354,29 @@ def logical_tables(raw: dict[str, dict]) -> tuple[dict[str, dict], dict[str, str
             else:
                 text = " · ".join(clean(c) for c in cells if clean(c))
                 if not text or _NESTED_HEADER.fullmatch(text):     # empty, or a nested table's own header row
+                    g["rows"] += extra
                     continue
                 r = [""] * (w - 1) + [SUB + text] if w > 1 else [SUB + text]
             sig = tuple(clean(x) for x in r)
             if sig not in g["_seen"]:
                 g["_seen"].add(sig)
                 g["rows"].append(r)
+            g["rows"] += extra
+
+    def owner(label: str) -> str:
+        t = raw.get(label) or {}
+        pk = t.get("parent_key") or ""
+        return owner(pk.rsplit("/fig:", 1)[1]) if "/fig:" in pk and t.get("parent_cell") else label
 
     for lab, t in raw.items():
+        if owner(lab) != lab:
+            continue
         labels, laid = _layout(t.get("header") or [], t.get("rows") or [])
         name = norm_title(_name_of(t.get("caption"))) if t.get("captioned", True) and t.get("caption") else ""
         if named is not None and named["section"] != t.get("section"):
             named = None
         if named is not None and laid and ((name and name == named["_name"]) or not t.get("captioned", True)):
-            place(named, labels, laid)
+            place(named, labels, laid, lab)
             named["page_to"] = max(named.get("page_to") or 0, t.get("page_to") or t.get("page_from") or 0) or named.get("page_to")
             named["parts"].append(lab)
             n0, n1 = named["_n"], len(laid)                  # quality weighted by rows: one bad scrap does not flag the table
@@ -352,11 +385,14 @@ def logical_tables(raw: dict[str, dict]) -> tuple[dict[str, dict], dict[str, str
             alias[lab] = named["label"]
             continue
         g = {**t, "header": labels, "rows": [], "parts": [lab], "_name": name, "_seen": set(), "_n": len(laid)}
-        place(g, labels, laid)
+        place(g, labels, laid, lab)
         out[lab] = g
         alias[lab] = lab
         if name and laid and not _sentence_like(t.get("caption") or ""):
             named = g
+    for lab in raw:
+        if lab not in alias:
+            alias[lab] = alias.get(owner(lab), owner(lab))
     for g in out.values():
         g.pop("_seen", None)
         g.pop("_name", None)
@@ -559,15 +595,16 @@ def _with_subs(rs: list[list], idx: list[int], context: set[int] | None = None) 
     out: set[int] = set()
     for i in idx:
         out.add(i)
-        if is_sub(rs[i]):
-            p = next((k for k in range(i - 1, -1, -1) if not is_sub(rs[k])), None)
+        d = sub_depth(rs[i])
+        # the rows it sits under (its field; for a value, also its bit), as context
+        for want in range(d - 1, -1, -1):
+            p = next((k for k in range(i - 1, -1, -1) if sub_depth(rs[k]) == want), None)
             if p is not None:
                 out.add(p)
                 if context is not None and p not in idx:
                     context.add(p)
-            continue
-        k = i + 1
-        while k < len(rs) and is_sub(rs[k]):
+        k = i + 1                                     # and the rows under it
+        while k < len(rs) and sub_depth(rs[k]) > d:
             out.add(k)
             k += 1
     return sorted(out)
@@ -605,7 +642,10 @@ def structure_data(d: dict, ir: dict, t: dict, shown: list[list], narrowed: bool
             e = {"bits": _sub_bits(r), "name": name or _desc(r)[:120], "abbreviation": abbr}
             if narrowed:
                 e["description"] = _desc(r)
-            if cur is not None:
+            if cur is not None and sub_depth(r) > 1 and cur.get("bits"):       # a value of the last bit
+                v = {"value": e["bits"], "definition": _desc(r) if narrowed else (name or _desc(r)[:120])}
+                cur["bits"][-1].setdefault("values", []).append(v)
+            elif cur is not None:
                 cur.setdefault("bits", []).append(e)
             continue
         cur = {"range": clean(r[0]), "name": name or _desc(r)[:120], "abbreviation": abbr}
