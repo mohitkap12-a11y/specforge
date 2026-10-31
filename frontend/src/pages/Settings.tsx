@@ -217,7 +217,7 @@ const RESETS: { scope: ResetScope; title: string; text: string }[] = [
 ];
 const COUNT_LABELS: Record<string, string> = {
   specs: "specs", parse_runs: "parse runs", sets: "spec sets", scenarios: "scenarios", comparisons: "comparisons", coverage_runs: "coverage runs",
-  command_dbs: "command DBs", executed_scenarios: "scenarios derived from executions", converted_files: "converted files (To Markdown)", jobs: "jobs", log_events: "log events",
+  command_dbs: "command DBs", executed_scenarios: "scenarios derived from executions", converted_files: "converted files (To Markdown)", jobs: "jobs", log_events: "log events", mcp_calls: "MCP calls recorded",
 };
 const CONFIRM_WORD = "reset";
 

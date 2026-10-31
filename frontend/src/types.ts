@@ -199,7 +199,7 @@ export interface ResetPreview { scope: ResetScope; counts: Record<string, number
 export interface McpTool { name: string; description: string; params: string[]; required: string[] }
 export interface McpInfo { url: string; sse_url: string; enabled: boolean; rate_limit_per_min: number; running: boolean; tools: McpTool[];
   specs: { family: string; version: string; title: string | null }[]; version: string }
-export interface McpSettings { enabled: boolean; log_calls: boolean; rate_limit_per_min: number; compare_wait_s: number; public_url: string; library_search: boolean }
+export interface McpSettings { enabled: boolean; log_calls: boolean; rate_limit_per_min: number; compare_wait_s: number; public_url: string; library_search: boolean; history_days?: number | null }
 export interface McpCall { ts: number; tool: string; args: string; ms: number; outcome: "ok" | "miss" | "error"; ip: string; error?: string }
 export interface McpToolStats { tool: string; calls: number; errors: number; misses: number; slow: number; avg_ms: number; max_ms: number; last?: number }
 export interface McpClient { ip: string; first_seen: number; last_seen?: number; requests: number; calls: number; limited: number; active: boolean }
@@ -209,4 +209,43 @@ export interface McpStatus {
   library: { filename: string; dir: string; index: "current" | "outdated" | "missing"; entries: number; built: string | null; seconds: number | null }[];
   usage: { since: number; client_count: number; active_clients: number; calls: number; errors: number; misses: number; rate_limited: number; refused_disabled: number; tools: McpToolStats[];
     clients: McpClient[]; recent: McpCall[]; recent_misses: McpCall[]; recent_slow: McpCall[]; recent_errors: McpCall[] };
+}
+
+/** Call history of the MCP endpoint (admin Metrics, Misses & errors and Call log tabs). */
+export type McpOutcome = "ok" | "miss" | "error" | "rate_limited" | "refused";
+export type McpRange = "1h" | "24h" | "7d" | "30d" | "90d";
+export interface McpFilters { range: McpRange; tool?: string; agent?: string; ip?: string; outcome?: string; transport?: string; spec?: string; reason?: string; fingerprint?: string; q?: string; slow?: boolean }
+export interface McpKpis {
+  calls: number; ok: number; misses: number; errors: number; rate_limited: number; refused: number; answered_pct: number | null; miss_pct: number | null; error_pct: number | null;
+  clients: number; agents: number; p50_ms: number | null; p95_ms: number | null; p99_ms: number | null; avg_ms: number | null; slow: number;
+  avg_chars: number | null; p95_chars: number | null; chars_total: number; paged_pct: number | null;
+  sessions?: number; calls_per_session_p50?: number | null; calls_per_session_p95?: number | null; session_s_p50?: number | null; recovered_pct?: number | null;
+}
+export interface McpBucket { t: number; ok: number; miss: number; error: number; refused: number; p50_ms: number | null; p95_ms: number | null }
+export interface McpGroupStats { calls: number; ok: number; misses: number; errors: number; miss_pct: number; error_pct: number; p50_ms: number | null; p95_ms: number | null; max_ms: number; last: number }
+export interface McpMetrics {
+  since: number; until: number; bucket_s: number; kpis: McpKpis; previous: McpKpis; series: McpBucket[]; heatmap: number[][];
+  tools: (McpGroupStats & { tool: string; slow: number; avg_chars: number | null; paged: number })[];
+  agents: (McpGroupStats & { agent: string; version: string })[];
+  clients: (McpGroupStats & { ip: string; first: number; agents: string[]; rate_limited: number; active: boolean })[];
+  specs: (McpGroupStats & { spec: string; version: string })[];
+  transports: { transport: string; calls: number }[];
+  reasons: { outcome: "miss" | "error"; reason: string; calls: number }[];
+  chains: { chain: string[]; count: number; answered_pct: number; retry: boolean }[];
+}
+export type McpIssueStatus = "open" | "investigating" | "fixed" | "ignored";
+export interface McpIssue {
+  fingerprint: string; tool: string; outcome: "miss" | "error"; reason: string | null; first: number; last: number; clients: number; agents: number; count: number; avg_ms: number;
+  status: McpIssueStatus; note: string | null; updated: string | null; updated_by: string | null; args: Record<string, unknown>; error: string | null; last_agent: string | null;
+}
+export interface McpCallRow {
+  id: number; ts: number; tool: string; outcome: McpOutcome; ms: number; args: Record<string, unknown>; error: string | null; reason: string | null; fingerprint: string | null;
+  ip: string; agent: string | null; agent_version: string | null; user_agent: string | null; transport: string | null; spec: string | null; version: string | null;
+  answer_chars: number | null; page: number | null; paged: number;
+}
+export interface McpIssueDetail {
+  fingerprint: string; tool: string; outcome: "miss" | "error"; reason: string | null; count: number; first: number; last: number; status: McpIssueStatus; note: string | null;
+  updated: string | null; updated_by: string | null; per_day: { day: string; count: number }[]; variants: { args: Record<string, unknown>; count: number }[];
+  errors: { error: string; count: number }[]; agents: { agent: string; count: number }[]; clients: { ip: string; count: number }[]; p50_ms: number | null;
+  recovered: number; followed: number; next: { call: McpCallRow; next: McpCallRow[] }[];
 }
