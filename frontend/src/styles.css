@@ -305,6 +305,12 @@ table.t { width: 100%; border-collapse: collapse; }
 .tool.agents .tool-ic { background: var(--warn-bg); color: var(--warn); } .tool.agents { border-top: 3px solid var(--warn); }
 .tool.convert .tool-ic { background: var(--info-bg); color: var(--info); } .tool.compare .tool-ic { background: var(--violet-bg); color: var(--violet); } .tool.coverage .tool-ic { background: var(--ok-bg); color: var(--ok); }
 .tool.convert { border-top: 3px solid var(--info); } .tool.compare { border-top: 3px solid var(--violet); } .tool.coverage { border-top: 3px solid var(--ok); }
+/* staged rollout: a tool not released to this user yet, and the admin-only preview marker */
+.tool.is-soon { opacity: .78; } .tool.is-soon .tool-ic { filter: grayscale(.6); } .tool h2 .badge { margin-left: 6px; vertical-align: 3px; font-size: 11px; text-decoration: none; }
+.nav-group .preview-tag { margin-left: 6px; padding: 0 5px; border-radius: 4px; font-size: 9.5px; letter-spacing: .04em; background: var(--warn-bg); color: var(--warn); }
+.nav a.item.soon { color: var(--muted); } .nav a.item .soon-tag { flex: none; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 550; background: var(--violet-bg); color: var(--violet); }
+.coming-soon { display: grid; gap: 10px; justify-items: start; max-width: 640px; } .coming-soon h2 { margin: 0; } .coming-soon p, .coming-soon ul { margin: 0; } .coming-soon ul { padding-left: 18px; display: grid; gap: 4px; }
+.coming-soon .ico { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 12px; background: var(--ok-bg); color: var(--ok); }
 .tool-foot { padding-top: 8px; border-top: 1px solid var(--border); }
 
 /* ---------- compare ---------- */

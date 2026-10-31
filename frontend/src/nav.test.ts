@@ -49,3 +49,34 @@ describe("tool separation", () => {
   });
   it("titles every tool group", () => expect(GROUPS.filter((g) => g.key !== "home").every((g) => g.title)).toBe(true));
 });
+
+import { COMING_SOON, COVERAGE_PAGES, coverageAccess, isCoveragePage } from "./components/nav";
+
+describe("coverage tool rollout", () => {
+  it("is admin-only until released, then everyone's", () => {
+    expect(coverageAccess(true, false)).toBe("preview");
+    expect(coverageAccess(false, false)).toBe("soon");
+    expect(coverageAccess(false, true)).toBe("released");
+    expect(coverageAccess(true, true)).toBe("released");
+  });
+  it("shows admins every coverage page in the preview, and everyone once released", () => {
+    expect(navFor(true, "preview")).toEqual(navFor(true, "released"));
+    expect(navFor(false, "released").map((n) => n.to)).toEqual(expect.arrayContaining(COVERAGE_PAGES));
+  });
+  it("shows the others one coming-soon entry instead of the coverage pages", () => {
+    const pages = navFor(false, "soon");
+    expect(pages.filter((n) => n.group === "coverage")).toEqual([COMING_SOON]);
+    for (const p of COVERAGE_PAGES) expect(pages.some((n) => n.to === p && !n.soon)).toBe(false);
+  });
+  it("keeps the spec library Compare needs, next to Spec Compare", () => {
+    const pages = navFor(false, "soon");
+    expect(pages.filter((n) => n.group === "compare").map((n) => n.to)).toEqual(["/compare", "/specs", "/explorer"]);
+    expect(COVERAGE_PAGES).not.toContain("/specs");
+  });
+  it("recognises coverage pages by path", () => {
+    expect(isCoveragePage("/coverage")).toBe(true);
+    expect(isCoveragePage("/sets/3")).toBe(true);
+    expect(isCoveragePage("/specs")).toBe(false);
+    expect(isCoveragePage("/compare")).toBe(false);
+  });
+});

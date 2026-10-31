@@ -11,7 +11,7 @@ import { setIn } from "../util";
 
 type S = Record<string, any>;
 const TASKS = [["classify", "Classify", "Labels items (reserved for future use)"], ["generate", "Draft scenarios", "Reads each normative statement and proposes test scenarios"], ["embed", "Embeddings", "Semantic search (reserved for future use)"]] as const;
-const SECTIONS = [["ai", "AI providers"], ["models", "Models"], ["parser", "Parser"], ["logging", "Logging"], ["mi", "NVMe-MI layout"], ["appearance", "Appearance"], ["reset", "Reset"], ["about", "About"]] as const;
+const SECTIONS = [["ai", "AI providers"], ["models", "Models"], ["parser", "Parser"], ["logging", "Logging"], ["mi", "NVMe-MI layout"], ["rollout", "Feature rollout"], ["appearance", "Appearance"], ["reset", "Reset"], ["about", "About"]] as const;
 /** What a non-admin sees: the rest are server-wide and only an admin can change them. */
 const PERSONAL_SECTIONS = SECTIONS.filter(([id]) => id === "appearance" || id === "about");
 
@@ -55,6 +55,39 @@ function About() {
           <dt>Reparse available</dt><dd>{health.data.reparse_available.length ? `${health.data.reparse_available.length} document(s)` : "none"}</dd>
         </dl>
       )}
+    </Section>
+  );
+}
+
+/** Staged rollout: the Coverage Tool is an admin-only preview until it is released here; applies at once, not with the save bar. */
+function Rollout() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const { me } = useAuth();
+  const released = !!me.features?.coverage_released;
+  const flip = useMutation({
+    mutationFn: (v: boolean) => api.setFeatures({ coverage_released: v }),
+    onSuccess: (_, v) => {
+      qc.invalidateQueries({ queryKey: ["me"] });
+      toast.push({ title: v ? "Coverage Tool released to every user" : "Coverage Tool is admin-only again", tone: "ok" });
+    },
+  });
+  const change = (v: boolean) => {
+    if (window.confirm(v ? "Release the Coverage Tool to every user? Its pages appear in everyone's menu right away."
+      : "Take the Coverage Tool back to an admin-only preview? Other users see it as coming soon again.")) flip.mutate(v);
+  };
+  return (
+    <Section id="rollout" title="Feature rollout" description="Tools still being tried out internally. Until you release one, only admins can use it; everyone else sees it as coming soon.">
+      <div className="row" style={{ flexWrap: "nowrap", alignItems: "flex-start" }}>
+        <Switch label="Release the Coverage Tool to every user" checked={released} onChange={(v) => !flip.isPending && change(v)} />
+        <div>
+          <strong>Coverage Tool</strong> <span className={`badge ${released ? "ok" : "warn"}`}>{released ? "Released" : "Admin preview"}</span>
+          <div className="muted small">{released
+            ? "Every user sees the Coverage Tool and all its pages in the menu."
+            : "Only admins see the Workflow, Sets, Catalog, Command DBs, Scenarios, Coverage and Reports pages. Specs and Explorer stay open to everyone (Spec Compare uses them)."}</div>
+        </div>
+      </div>
+      <ErrorNote error={flip.error} />
     </Section>
   );
 }
@@ -186,6 +219,8 @@ export default function SettingsPage() {
             <textarea rows={10} spellCheck={false} value={layout} onChange={(e) => setLayout(e.target.value)} aria-label="MI layout overrides" />
             {layoutErr && <div className="toast bad">Invalid: {layoutErr}</div>}
           </Section>
+
+          <Rollout />
 
           <Appearance />
 
