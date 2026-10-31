@@ -87,7 +87,7 @@ The result is stored (filter, search and page it in the UI) and exports to a Mar
   | `get_section`, `get_table` | a section (with its tables, optionally its sub-sections) or a figure |
   | `list_commands`, `get_command` | commands with opcode, section and Command Dword tables, and where other specs extend them |
   | `get_command_field` | one Command Dword (`10`, `CDW10`, `NMD0`) or field (`CNS`) with the value tables its description refers to |
-  | `get_structure` | a data structure / log page / descriptor, optionally the row of one byte offset or field (`Identify Controller`, `MDTS`); bit fields follow their row as `↳` sub-rows, and the rows also come back as structured content (range, size, name, abbreviation, bits) |
+  | `get_structure` | a data structure / log page / descriptor, optionally the row of one byte offset or field (`Identify Controller`, `MDTS`); bit fields follow their row as `↳` sub-rows (a bit's values as `↳↳`), and the rows also come back as structured content (range, size, name, abbreviation, bits, values) |
   | `resolve_reference` | "Figure 312", "section 3.1 of the NVM Express NVM Command Set Specification" |
   | `list_changes`, `diff` | what changed between two versions (default: latest vs the one before), overall or for one command, structure, section or figure |
   | `read_raw` | the Docling Markdown of a document (also converted-but-not-parsed files): paged, one section, a line range, or around a phrase |
@@ -300,7 +300,8 @@ docs/            ARCHITECTURE.md, IMPLEMENTATION_PLAN.md
 
 ## Known limitations
 
-* PDF: tables are detected from ruled lines (PyMuPDF, with pdfplumber as a low-quality fallback). Nested tables inside PDF cells are recorded as separate tables with a `nested_table` note; DOCX nesting is exact. Docling is not wired into the spec parser yet (it is used by the Markdown converter).
+* PDF: tables are detected from ruled lines (PyMuPDF, with pdfplumber as a low-quality fallback). DOCX nesting is exact.
+* PDF nested tables (a field's bit table, a bit's value table, drawn inside the Description cell: Identify Controller CTRATT and its bits, bit 24:23 and its values) are rebuilt from page geometry (`ingest/nested.py`), whether PyMuPDF finds one as a table of its own or as extra columns of its parent, and over page breaks. The parser stores each under its parent row (`parent_table` / `parent_cell`, label from the parent's key such as `338.99:96` and `338.99:96.24:23`, so it stays the same between versions), puts the parent's own text back in place of the flattened copy, and drops the copies the page-by-page extraction left. The built-in To Markdown converter prints each nested table right after its parent table, captioned `Figure 338 – Bytes 99:96, Controller Attributes (CTRATT): bits`. The MCP shows them as `↳` (bits) and `↳↳` (values) sub-rows and returns them in `get_structure`'s structured content. Specs parsed before this need a reparse (parser version 4).
 * PDF captions are expected *above* their table (carried over page breaks).
 * DOCX cross-references use text patterns; native `REF` fields are not resolved yet.
 * Cross-version section drift (a MI 2.0 reference to Base section numbers from another revision) is handled by user choice, not by title matching.
