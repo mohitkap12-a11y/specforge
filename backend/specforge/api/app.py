@@ -2095,7 +2095,7 @@ def create_app() -> FastAPI:
                 spec = BACKUP_ITEMS[key]
                 for table in spec["tables"]:
                     try:
-                        rows_res = c.execute(f"SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+                        rows_res = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
                         data = [dict(r) for r in c.execute(f"SELECT * FROM {table}").fetchall()]
                         z.writestr(f"db/{table}.json", json.dumps(data))
                         if rows_res and rows_res[0]:
@@ -2139,9 +2139,9 @@ def create_app() -> FastAPI:
         else:
             selected = set(BACKUP_ITEMS.keys())
         try:
-            meta = json.loads(z.read("backup_meta.json"))
+            _ = json.loads(z.read("backup_meta.json"))
         except Exception:
-            meta = {}
+            pass
         ws = config.workspace_dir()
         # import tables
         for key in selected:
