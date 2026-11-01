@@ -11,7 +11,7 @@ import { setIn } from "../util";
 
 type S = Record<string, any>;
 const TASKS = [["classify", "Classify", "Labels items (reserved for future use)"], ["generate", "Draft scenarios", "Reads each normative statement and proposes test scenarios"], ["embed", "Embeddings", "Semantic search (reserved for future use)"]] as const;
-const SECTIONS = [["ai", "AI providers"], ["models", "Models"], ["parser", "Parser"], ["logging", "Logging"], ["mi", "NVMe-MI layout"], ["rollout", "Feature rollout"], ["appearance", "Appearance"], ["reset", "Reset"], ["about", "About"]] as const;
+const SECTIONS = [["ai", "AI providers"], ["models", "Models"], ["parser", "Parser"], ["logging", "Logging"], ["mi", "NVMe-MI layout"], ["rollout", "Feature rollout"], ["backup", "Backup / Export-Import"], ["appearance", "Appearance"], ["reset", "Reset"], ["about", "About"]] as const;
 /** What a non-admin sees: the rest are server-wide and only an admin can change them. */
 const PERSONAL_SECTIONS = SECTIONS.filter(([id]) => id === "appearance" || id === "about");
 
@@ -56,6 +56,81 @@ function About() {
         </dl>
       )}
     </Section>
+  );
+}
+
+function BackupPanel() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const opts = useQuery({ queryKey: ["backup-options"], queryFn: api.backupOptions });
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    if (opts.data?.items) {
+      const s: Record<string, boolean> = {};
+      for (const o of opts.data.items) s[o.id] = true;
+      setSelected(s);
+    }
+  }, [opts.data]);
+  const [file, setFile] = useState<File | null>(null);
+  const [clearExisting, setClearExisting] = useState(false);
+  const imp = useMutation({
+    mutationFn: () => {
+      if (!file) throw new Error("Select a backup zip to import");
+      const items = Object.entries(selected).filter(([, v]) => v).map(([k]) => k);
+      return api.importBackup(file, items, clearExisting);
+    },
+    onSuccess: (r) => { qc.invalidateQueries(); toast.push({ title: "Backup imported", description: `Imported: ${r.imported_items.join(", ")}`, tone: "ok" }); setFile(null); },
+  });
+  const toggle = (id: string) => setSelected((s) => ({ ...s, [id]: !s[id] }));
+  const all = () => { const s: Record<string, boolean> = {}; for (const o of (opts.data?.items || [])) s[o.id] = true; setSelected(s); };
+  const none = () => setSelected({});
+  const itemsSel = Object.entries(selected).filter(([, v]) => v).map(([k]) => k);
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div>
+        <h3 style={{ marginTop: 0 }}>Export</h3>
+        <p className="muted small">Download a zip with selected tools/data. Move it to a new PC and import.</p>
+        <div className="row" style={{ flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+          <button className="sm" type="button" onClick={all}>Select all</button>
+          <button className="sm" type="button" onClick={none}>Clear</button>
+        </div>
+        <div style={{ display: "grid", gap: 6 }}>
+          {(opts.data?.items || []).map((o) => (
+            <label key={o.id} className="row" style={{ alignItems: "center", gap: 8 }}>
+              <input type="checkbox" checked={!!selected[o.id]} onChange={() => toggle(o.id)} />
+              <span>{o.label}</span>
+            </label>
+          ))}
+        </div>
+        <div className="row" style={{ marginTop: 12 }}>
+          <button className="primary" onClick={() => api.exportBackup(itemsSel)} disabled={itemsSel.length === 0}>Export selected as zip</button>
+        </div>
+      </div>
+      <div className="divider" />
+      <div>
+        <h3 style={{ marginTop: 0 }}>Import</h3>
+        <p className="muted small">Import a previously exported backup zip into this workspace.</p>
+        <div className="fields" style={{ alignItems: "center" }}>
+          <Field label="Backup zip file"><input type="file" accept=".zip" onChange={(e) => setFile(e.target.files?.[0] || null)} /></Field>
+        </div>
+        <div className="row" style={{ alignItems: "center", gap: 8, marginTop: 8 }}>
+          <Switch label="Clear existing data for selected items before import" checked={clearExisting} onChange={setClearExisting} />
+          <span className="small">Clear existing</span>
+        </div>
+        <div className="row" style={{ flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+          {(opts.data?.items || []).map((o) => (
+            <label key={o.id} className="row" style={{ alignItems: "center", gap: 6 }}>
+              <input type="checkbox" checked={!!selected[o.id]} onChange={() => toggle(o.id)} />
+              <span className="small">{o.label}</span>
+            </label>
+          ))}
+        </div>
+        <div className="row" style={{ marginTop: 12 }}>
+          <button className="primary" onClick={() => imp.mutate()} disabled={!file || itemsSel.length === 0 || imp.isPending}>{imp.isPending && <span className="spinner" />}Import</button>
+        </div>
+        <ErrorNote error={imp.error} />
+      </div>
+    </div>
   );
 }
 
@@ -221,6 +296,10 @@ export default function SettingsPage() {
           </Section>
 
           <Rollout />
+
+          <Section id="backup" title="Backup / Export-Import" description="Export selected tools/data to move hosting to a new PC, or import a backup. Only admins see this.">
+            <BackupPanel />
+          </Section>
 
           <Appearance />
 

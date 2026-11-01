@@ -144,6 +144,18 @@ export const api = {
   resetPreview: (scope: ResetScope) => req<ResetPreview>("GET", `/api/reset${qs({ scope })}`),
   resetWorkspace: (scope: ResetScope) => req<{ ok: boolean; deleted: Record<string, number> }>("POST", "/api/reset", { scope }),
   clearLogs: () => req<{ deleted: number }>("DELETE", "/api/logs"),
+  backupOptions: () => req<{ items: Array<{ id: string; label: string }> }>("GET", "/api/backup/options"),
+  exportBackup: (items?: string[]) => {
+    const q = items && items.length ? `?items=${encodeURIComponent(items.join(","))}` : "";
+    window.open(`/api/backup/export${q}`, "_blank");
+  },
+  importBackup: (file: File, items?: string[], clearExisting?: boolean) => {
+    const f = new FormData();
+    f.append("file", file);
+    if (items && items.length) f.append("items", items.join(","));
+    if (clearExisting) f.append("clear_existing", "true");
+    return req<{ ok: boolean; imported_items: string[] }>("POST", "/api/backup/import", f);
+  },
   activeJobs: () => req<Job[]>("GET", "/api/jobs?state=active"),
   jobs: () => req<Job[]>("GET", "/api/jobs"),
   job: (id: number) => req<Job>("GET", `/api/jobs/${id}`),
