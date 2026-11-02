@@ -112,3 +112,10 @@ def test_mcp_answers_carry_bits_and_values(excerpt, conn, ws):
     whole = lib.structure("Identify Controller", field="CTRATT", spec="base")
     assert [b["bits"] for b in whole.data["fields"][0]["bits"]][:3] == ["31:25", "24:23", "22"]
     assert "338.99:96" not in lib.ir(lib.resolve_doc("base")[0])["tables"]     # not a figure of its own
+
+    from specforge import catalog                                              # nor a command field table of its own
+    conn.execute("INSERT INTO spec_set(name) VALUES('t')")
+    conn.execute("INSERT INTO spec_set_member VALUES(1,?)", (d["id"],))
+    conn.commit()
+    issues = catalog.build_catalog(conn, 1)["issues"]
+    assert not [i for i in issues if i["kind"] == "unlinked_field_table" and "/fig:" in i["key"] and "." in i["key"].rsplit("fig:", 1)[1]]
