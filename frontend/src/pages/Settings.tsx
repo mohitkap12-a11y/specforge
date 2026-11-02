@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Link, useLocation } from "react-router-dom";
-import { api } from "../api";
+import { api, type BackupItem } from "../api";
 import type { ResetScope } from "../types";
 import { ErrorNote, Field, Loading, PageHeader, Segmented, Switch } from "../components/ui";
 import { useToast } from "../components/Toasts";
@@ -59,74 +59,123 @@ function About() {
   );
 }
 
+/** Every item the given ones need (an export always includes them; the server adds them too). */
+function withRequirements(ids: string[], all: BackupItem[]): Set<string> {
+  const byId = new Map(all.map((o) => [o.id, o]));
+  const out = new Set<string>();
+  const todo = [...ids];
+  while (todo.length) {
+    const id = todo.pop()!;
+    if (out.has(id)) continue;
+    out.add(id);
+    todo.push(...(byId.get(id)?.requires ?? []));
+  }
+  return out;
+}
+
+function BackupChecklist({ items, selected, onChange }: { items: BackupItem[]; selected: Set<string>; onChange: (s: Set<string>) => void }) {
+  const label = new Map(items.map((o) => [o.id, o.label]));
+  const toggle = (id: string) => {
+    if (selected.has(id)) {
+      // also untick what needs it: it cannot be exported or imported on its own
+      const keep = [...selected].filter((k) => k !== id && !withRequirements([k], items).has(id));
+      onChange(new Set(keep));
+    } else onChange(withRequirements([...selected, id], items));
+  };
+  return (
+    <div style={{ display: "grid", gap: 6 }}>
+      {items.map((o) => (
+        <label key={o.id} className="row" style={{ alignItems: "center", gap: 8 }}>
+          <input type="checkbox" checked={selected.has(o.id)} onChange={() => toggle(o.id)} />
+          <span>{o.label}</span>
+          {o.requires.length > 0 && <span className="muted small">needs {o.requires.map((r) => label.get(r) ?? r).join(", ")}</span>}
+        </label>
+      ))}
+    </div>
+  );
+}
+
 function BackupPanel() {
   const qc = useQueryClient();
   const toast = useToast();
   const opts = useQuery({ queryKey: ["backup-options"], queryFn: api.backupOptions });
-  const [selected, setSelected] = useState<Record<string, boolean>>({});
-  useEffect(() => {
-    if (opts.data?.items) {
-      const s: Record<string, boolean> = {};
-      for (const o of opts.data.items) s[o.id] = true;
-      setSelected(s);
-    }
-  }, [opts.data]);
+  const items = opts.data?.items ?? [];
+  const [exportSel, setExportSel] = useState<Set<string>>(new Set());
+  const [includeSecrets, setIncludeSecrets] = useState(false);
+  useEffect(() => { if (opts.data) setExportSel(new Set(opts.data.items.map((o) => o.id))); }, [opts.data]);
+
   const [file, setFile] = useState<File | null>(null);
-  const [clearExisting, setClearExisting] = useState(false);
+  const [fileKey, setFileKey] = useState(0);          // bumping it remounts the file input, which clears it
+  const [chooseItems, setChooseItems] = useState(false);
+  const [importSel, setImportSel] = useState<Set<string>>(new Set());
+  const [replace, setReplace] = useState(false);
+
+  const exp = useMutation({
+    mutationFn: () => api.exportBackup([...exportSel], includeSecrets),
+    onSuccess: () => toast.push({ title: "Backup downloaded", tone: "ok" }),
+  });
   const imp = useMutation({
     mutationFn: () => {
       if (!file) throw new Error("Select a backup zip to import");
-      const items = Object.entries(selected).filter(([, v]) => v).map(([k]) => k);
-      return api.importBackup(file, items, clearExisting);
+      return api.importBackup(file, chooseItems ? [...importSel] : undefined, replace);
     },
-    onSuccess: (r) => { qc.invalidateQueries(); toast.push({ title: "Backup imported", description: `Imported: ${r.imported_items.join(", ")}`, tone: "ok" }); setFile(null); },
+    onSuccess: (r) => {
+      qc.invalidateQueries();
+      const what = r.items.map((id) => items.find((o) => o.id === id)?.label ?? id).join(", ");
+      toast.push({ title: "Backup imported", description: `${what}: ${Object.values(r.rows).reduce((a, b) => a + b, 0)} rows, ${r.files} files`
+        + (r.warnings.length ? `. ${r.warnings.join(" ")}` : ""), tone: r.warnings.length ? "info" : "ok" });
+      setFile(null);
+      setFileKey((k) => k + 1);
+    },
   });
-  const toggle = (id: string) => setSelected((s) => ({ ...s, [id]: !s[id] }));
-  const all = () => { const s: Record<string, boolean> = {}; for (const o of (opts.data?.items || [])) s[o.id] = true; setSelected(s); };
-  const none = () => setSelected({});
-  const itemsSel = Object.entries(selected).filter(([, v]) => v).map(([k]) => k);
+  const startImport = () => {
+    if (replace && !window.confirm("Replace existing data? What this workspace has for the imported items is deleted first "
+      + "(user accounts: every one but yours). This cannot be undone.")) return;
+    imp.mutate();
+  };
+
+  if (opts.isLoading || opts.error) return <Loading q={opts} />;
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <div>
         <h3 style={{ marginTop: 0 }}>Export</h3>
-        <p className="muted small">Download a zip with selected tools/data. Move it to a new PC and import.</p>
+        <p className="muted small">Download a zip of the selected data, e.g. to move this server to a new machine. Items it depends on are included.
+          With User accounts the zip holds password hashes: keep it somewhere safe.</p>
         <div className="row" style={{ flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
-          <button className="sm" type="button" onClick={all}>Select all</button>
-          <button className="sm" type="button" onClick={none}>Clear</button>
+          <button className="sm" type="button" onClick={() => setExportSel(new Set(items.map((o) => o.id)))}>Select all</button>
+          <button className="sm" type="button" onClick={() => setExportSel(new Set())}>Clear</button>
         </div>
-        <div style={{ display: "grid", gap: 6 }}>
-          {(opts.data?.items || []).map((o) => (
-            <label key={o.id} className="row" style={{ alignItems: "center", gap: 8 }}>
-              <input type="checkbox" checked={!!selected[o.id]} onChange={() => toggle(o.id)} />
-              <span>{o.label}</span>
-            </label>
-          ))}
-        </div>
+        <BackupChecklist items={items} selected={exportSel} onChange={setExportSel} />
+        <label className="row" style={{ alignItems: "center", gap: 8, marginTop: 8 }}>
+          <Switch label="Include secrets such as API keys in the settings" checked={includeSecrets} onChange={setIncludeSecrets} />
+          <span className="small">Include secrets (API keys) in the settings</span>
+        </label>
         <div className="row" style={{ marginTop: 12 }}>
-          <button className="primary" onClick={() => api.exportBackup(itemsSel)} disabled={itemsSel.length === 0}>Export selected as zip</button>
+          <button className="primary" onClick={() => exp.mutate()} disabled={exportSel.size === 0 || exp.isPending}>
+            {exp.isPending && <span className="spinner" />}Export selected as zip</button>
         </div>
+        <ErrorNote error={exp.error} />
       </div>
       <div className="divider" />
       <div>
         <h3 style={{ marginTop: 0 }}>Import</h3>
-        <p className="muted small">Import a previously exported backup zip into this workspace.</p>
+        <p className="muted small">Import a backup exported by this version of SpecForge. It is applied completely or not at all,
+          and is refused while jobs are running. Paths into the old workspace are moved to this one; the MCP search index is rebuilt.</p>
         <div className="fields" style={{ alignItems: "center" }}>
-          <Field label="Backup zip file"><input type="file" accept=".zip" onChange={(e) => setFile(e.target.files?.[0] || null)} /></Field>
+          <Field label="Backup zip file"><input key={fileKey} type="file" accept=".zip,application/zip" onChange={(e) => setFile(e.target.files?.[0] || null)} /></Field>
         </div>
-        <div className="row" style={{ alignItems: "center", gap: 8, marginTop: 8 }}>
-          <Switch label="Clear existing data for selected items before import" checked={clearExisting} onChange={setClearExisting} />
-          <span className="small">Clear existing</span>
-        </div>
-        <div className="row" style={{ flexWrap: "wrap", gap: 8, marginTop: 8 }}>
-          {(opts.data?.items || []).map((o) => (
-            <label key={o.id} className="row" style={{ alignItems: "center", gap: 6 }}>
-              <input type="checkbox" checked={!!selected[o.id]} onChange={() => toggle(o.id)} />
-              <span className="small">{o.label}</span>
-            </label>
-          ))}
-        </div>
+        <label className="row" style={{ alignItems: "center", gap: 8, marginTop: 8 }}>
+          <Switch label="Import only some items" checked={chooseItems} onChange={(v) => { setChooseItems(v); if (v && importSel.size === 0) setImportSel(new Set(items.map((o) => o.id))); }} />
+          <span className="small">{chooseItems ? "Import only the items ticked below" : "Import everything the backup holds"}</span>
+        </label>
+        {chooseItems && <div style={{ marginTop: 8 }}><BackupChecklist items={items} selected={importSel} onChange={setImportSel} /></div>}
+        <label className="row" style={{ alignItems: "center", gap: 8, marginTop: 8 }}>
+          <Switch label="Replace existing data" checked={replace} onChange={setReplace} />
+          <span className="small">Replace existing data {replace ? "(deleted first)" : "(off: merge; refused where this workspace already has specs, sets, comparisons, coverage or jobs)"}</span>
+        </label>
         <div className="row" style={{ marginTop: 12 }}>
-          <button className="primary" onClick={() => imp.mutate()} disabled={!file || itemsSel.length === 0 || imp.isPending}>{imp.isPending && <span className="spinner" />}Import</button>
+          <button className={replace ? "danger" : "primary"} onClick={startImport} disabled={!file || (chooseItems && importSel.size === 0) || imp.isPending}>
+            {imp.isPending && <span className="spinner" />}{replace ? "Replace and import" : "Import"}</button>
         </div>
         <ErrorNote error={imp.error} />
       </div>
@@ -297,7 +346,7 @@ export default function SettingsPage() {
 
           <Rollout />
 
-          <Section id="backup" title="Backup / Export-Import" description="Export selected tools/data to move hosting to a new PC, or import a backup. Only admins see this.">
+          <Section id="backup" title="Backup / Export-Import" description="Export selected data to move this server to a new machine, or import such a backup. Only admins see this.">
             <BackupPanel />
           </Section>
 

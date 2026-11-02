@@ -144,17 +144,30 @@ export const api = {
   resetPreview: (scope: ResetScope) => req<ResetPreview>("GET", `/api/reset${qs({ scope })}`),
   resetWorkspace: (scope: ResetScope) => req<{ ok: boolean; deleted: Record<string, number> }>("POST", "/api/reset", { scope }),
   clearLogs: () => req<{ deleted: number }>("DELETE", "/api/logs"),
-  backupOptions: () => req<{ items: Array<{ id: string; label: string }> }>("GET", "/api/backup/options"),
-  exportBackup: (items?: string[]) => {
-    const q = items && items.length ? `?items=${encodeURIComponent(items.join(","))}` : "";
-    window.open(`/api/backup/export${q}`, "_blank");
+  backupOptions: () => req<{ items: BackupItem[] }>("GET", "/api/backup/options"),
+  /** Downloads the zip; errors (403, 409, ...) are thrown like any other call instead of opening a tab with raw JSON. */
+  exportBackup: async (items: string[], includeSecrets: boolean) => {
+    const r = await fetch(`/api/backup/export${qs({ items: items.join(","), include_secrets: includeSecrets ? "true" : undefined })}`);
+    if (r.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED));
+    if (!r.ok) {
+      let detail: unknown = r.statusText;
+      try { detail = (await r.json()).detail ?? detail; } catch { /* non-JSON error body */ }
+      throw new ApiError(r.status, errorText(detail));
+    }
+    const name = /filename="?([^";]+)"?/.exec(r.headers.get("content-disposition") ?? "")?.[1] ?? "specforge-backup.zip";
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(await r.blob());
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
   },
-  importBackup: (file: File, items?: string[], clearExisting?: boolean) => {
+  /** items undefined: everything the backup holds. replace: clear those items here first (otherwise merge). */
+  importBackup: (file: File, items: string[] | undefined, replace: boolean) => {
     const f = new FormData();
     f.append("file", file);
-    if (items && items.length) f.append("items", items.join(","));
-    if (clearExisting) f.append("clear_existing", "true");
-    return req<{ ok: boolean; imported_items: string[] }>("POST", "/api/backup/import", f);
+    if (items) f.append("items", items.join(","));
+    f.append("replace", replace ? "true" : "false");
+    return req<BackupImportResult>("POST", "/api/backup/import", f);
   },
   activeJobs: () => req<Job[]>("GET", "/api/jobs?state=active"),
   jobs: () => req<Job[]>("GET", "/api/jobs"),
@@ -192,3 +205,6 @@ export const mcpCsvUrl = (f: McpFilters) => `/api/mcp/calls.csv${mcpQuery(f)}`;
 export const fileUrl = (docId: number) => `/api/documents/${docId}/file`;
 
 export const logStreamUrl = (f: { after_id?: number; level?: string; source?: string; job_id?: number }) => `/api/logs/stream${qs(f)}`;
+
+export type BackupItem = { id: string; label: string; requires: string[]; dirs: string[]; mergeable: boolean };
+export type BackupImportResult = { ok: boolean; items: string[]; rows: Record<string, number>; files: number; warnings: string[]; from_version?: string };

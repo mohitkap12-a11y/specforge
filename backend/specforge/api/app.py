@@ -19,10 +19,11 @@ from urllib.parse import quote, urlsplit
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__, auth, catalog, cmddb, compare, compare_ai, convert, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
-from .. import mcp_metrics, mcp_server, specquery
+from .. import backup, mcp_metrics, mcp_server, specquery
 from ..crossgen import generate_cross_scenarios
 from ..convert import ENGINES, ConversionError, SUPPORTED, convert_file, output_name
 from ..core import config
@@ -60,7 +61,7 @@ PUBLIC = {("POST", "/api/auth/login"), ("POST", "/api/auth/register"), ("POST", 
 ADMIN_ONLY = {("PUT", "/api/settings"), ("PUT", "/api/features"), ("GET", "/api/reset"), ("POST", "/api/reset"), ("DELETE", "/api/logs"),
               ("GET", "/api/fs/browse"),     # lists the server's folders: other users type or drop a path instead
               ("GET", "/api/mcp/status"), ("PUT", "/api/mcp/settings"), ("POST", "/api/mcp/reindex"), ("POST", "/api/mcp/reset-stats"),
-              ("GET", "/api/backup/export"), ("POST", "/api/backup/import")}
+              ("GET", "/api/backup/options"), ("GET", "/api/backup/export"), ("POST", "/api/backup/import")}
 ADMIN_PREFIX = "/api/users"
 # Every /api/mcp/ route but the guide's (metrics, misses & errors, call log, settings) is for admins
 MCP_PREFIX, MCP_PUBLIC = "/api/mcp/", {"/api/mcp/info"}
@@ -2053,141 +2054,65 @@ def create_app() -> FastAPI:
         eventlog.emit("info", "system", f"Activity log cleared ({n} events)")
         return {"ok": True, "deleted": n}
 
-    # ------------------------------------------------------------------ backup / export-import
-    import io
-    import zipfile
+    # ------------------------------------------------------------------ backup / export-import (logic in backup.py)
+    MAX_BACKUP_BYTES = int(os.environ.get("SPECFORGE_BACKUP_UPLOAD_MB", "20480")) * 1024 * 1024
 
-    BACKUP_ITEMS = {
-        "converter": {"label": "To Markdown / Converter", "tables": set(), "dirs": ["conversions"]},
-        "compare": {"label": "Spec Compare", "tables": {"spec_compare", "compare_change"}, "dirs": []},
-        "coverage": {"label": "Coverage Tool", "tables": {"cmd_source", "cmd_signature", "decoded_command", "coverage_run", "coverage_result", "coverage_test", "item_result", "exec_analysis", "exec_test", "scenario", "scenario_item"}, "dirs": ["cmddb-uploads"]},
-        "mcp": {"label": "Spec MCP (call history)", "tables": {"mcp_call", "mcp_issue", "mcp_index", "mcp_lib_index", "mcp_fts"}, "dirs": []},
-        "specs": {"label": "Specs & parse runs", "tables": {"spec_document", "parse_run", "ir_node", "ir_ref", "parse_issue", "correction", "ref_choice"}, "dirs": ["specs", "uploads"]},
-        "sets_catalog": {"label": "Sets, Catalog, Scenarios", "tables": {"spec_set", "spec_set_member", "catalog_item", "item_override"}, "dirs": []},
-        "settings": {"label": "Settings", "tables": {"setting"}, "dirs": []},
-        "users": {"label": "Users & sessions", "tables": {"app_user", "user_session"}, "dirs": []},
-        "jobs_activity": {"label": "Jobs & Activity", "tables": {"job", "job_watcher", "event_log"}, "dirs": []},
-        "llm_cache": {"label": "LLM cache & enrichments", "tables": {"llm_cache", "enrichment"}, "dirs": []},
-    }
+    def _backup_guard() -> None:
+        """Like a reset: refused while any job is queued or running, so nothing writes to what is being replaced."""
+        if busy := jobs.active(conn()):
+            raise HTTPException(409, f"{len(busy)} job(s) are still queued or running ("
+                                     + ", ".join(j["label"] or j["type"] for j in busy[:3])
+                                     + "). Cancel them or wait for them to finish, then import.")
 
     @app.get("/api/backup/options")
     def backup_options():
-        return {"items": [{"id": k, **{kk: v for kk, v in val.items() if kk != "tables" and kk != "dirs"}} for k, val in BACKUP_ITEMS.items()]}
+        return {"items": backup.options()}
 
     @app.get("/api/backup/export")
-    def backup_export(items: str | None = Query(None)):
-        """Export selected data as a zip. items is comma-separated list of backup item keys."""
-        c = conn()
-        selected = set()
-        if items:
-            for x in items.split(","):
-                x = x.strip()
-                if x in BACKUP_ITEMS:
-                    selected.add(x)
-        else:
-            selected = set(BACKUP_ITEMS.keys())
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-            meta = {"version": 1, "items": sorted(list(selected))}
-            z.writestr("backup_meta.json", json.dumps(meta))
-            # export DB tables
-            for key in selected:
-                spec = BACKUP_ITEMS[key]
-                for table in spec["tables"]:
-                    try:
-                        rows_res = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
-                        data = [dict(r) for r in c.execute(f"SELECT * FROM {table}").fetchall()]
-                        z.writestr(f"db/{table}.json", json.dumps(data))
-                        if rows_res and rows_res[0]:
-                            z.writestr(f"db/{table}.schema.sql", rows_res[0])
-                    except Exception:
-                        continue
-            # export files
-            ws = config.workspace_dir()
-            for key in selected:
-                spec = BACKUP_ITEMS[key]
-                for dname in spec["dirs"]:
-                    dpath = ws / dname
-                    if dpath.exists() and dpath.is_dir():
-                        for root, dirs_, files_ in os.walk(dpath):
-                            for fn in files_:
-                                full = Path(root) / fn
-                                try:
-                                    arc = str(full.relative_to(ws))
-                                    z.write(full, arc)
-                                except Exception:
-                                    continue
-            z.writestr("README.txt", "SpecForge backup export")
-        buf.seek(0)
+    def backup_export(items: str | None = Query(None), include_secrets: bool = Query(False)):
+        """A zip of the selected items (comma-separated; default all) and everything they depend on."""
+        try:
+            selected = backup.parse_items(items)
+        except backup.BackupError as e:
+            raise HTTPException(e.status, str(e)) from None
+        eventlog.drain(1.0)
+        mcp_calls.drain(1.0)
+        fd, tmp = tempfile.mkstemp(prefix="specforge-backup-", suffix=".zip")
+        try:
+            with os.fdopen(fd, "wb") as out:
+                meta = backup.export(config.db_path(), out, selected, include_secrets=include_secrets)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+        audit(f"Backup exported ({', '.join(meta['items'])})", items=meta["items"], files=meta["files"],
+              secrets_included=include_secrets)
         name = f"specforge-backup-{time.strftime('%Y%m%d-%H%M%S')}.zip"
-        return Response(buf.read(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+        return FileResponse(tmp, media_type="application/zip", filename=name, background=BackgroundTask(os.unlink, tmp))
+
     @app.post("/api/backup/import")
-    async def backup_import(file: UploadFile = File(...), items: str | None = Form(None), clear_existing: bool = Form(False)):
-        """Import backup from zip."""
-        c = conn()
-        data = await file.read()
+    def backup_import(file: UploadFile = File(...), items: str | None = Form(None), replace: bool = Form(False)):
+        """Import a backup zip: the selected items (default: all it holds), merged into this workspace or replacing what it
+        has of them. Applied completely or not at all; see backup.py for the rules."""
+        if file.size is not None and file.size > MAX_BACKUP_BYTES:
+            raise HTTPException(413, f"Backup is larger than {MAX_BACKUP_BYTES // (1024 * 1024)} MB "
+                                     "(raise SPECFORGE_BACKUP_UPLOAD_MB to allow it).")
+        _backup_guard()
+        eventlog.drain(1.0)
+        mcp_calls.drain(1.0)
+        u = me()
         try:
-            z = zipfile.ZipFile(io.BytesIO(data))
-        except Exception as e:
-            raise HTTPException(400, f"Invalid zip: {e}")
-        selected = set()
-        if items:
-            for x in items.split(","):
-                x = x.strip()
-                if x in BACKUP_ITEMS:
-                    selected.add(x)
-        else:
-            selected = set(BACKUP_ITEMS.keys())
-        try:
-            _ = json.loads(z.read("backup_meta.json"))
-        except Exception:
-            pass
-        ws = config.workspace_dir()
-        # import tables
-        for key in selected:
-            spec = BACKUP_ITEMS[key]
-            for table in spec["tables"]:
-                try:
-                    content = z.read(f"db/{table}.json")
-                    data_rows = json.loads(content)
-                except Exception:
-                    continue
-                if not isinstance(data_rows, list):
-                    continue
-                if clear_existing:
-                    try:
-                        c.execute(f"DELETE FROM {table}")
-                    except Exception:
-                        pass
-                if not data_rows:
-                    continue
-                # get columns
-                cols = list(data_rows[0].keys())
-                placeholders = ",".join(["?"] * len(cols))
-                colnames = ",".join(cols)
-                sql = f"INSERT OR REPLACE INTO {table} ({colnames}) VALUES ({placeholders})"
-                for rowd in data_rows:
-                    try:
-                        c.execute(sql, tuple(rowd.get(col) for col in cols))
-                    except Exception:
-                        continue
-            # import dirs
-            for dname in spec["dirs"]:
-                for name in z.namelist():
-                    if name.startswith(dname + "/") or name == dname:
-                        try:
-                            info = z.getinfo(name)
-                            if info.is_dir():
-                                continue
-                            target = ws / name
-                            target.parent.mkdir(parents=True, exist_ok=True)
-                            target.write_bytes(z.read(name))
-                        except Exception:
-                            continue
-        c.commit()
-        eventlog.emit("info", "system", f"Backup imported (items: {', '.join(sorted(selected))})", user=me()["username"] if me() else None)
-        audit(f"Backup imported ({len(selected)} items)", items=sorted(list(selected)))
-        return {"ok": True, "imported_items": sorted(list(selected))}
+            selected = backup.parse_items(items) if items else None
+            result = backup.import_(conn(), file.file, selected, replace=replace, keep_user_id=u["id"] if u else None)
+        except backup.BackupError as e:
+            raise HTTPException(e.status, str(e)) from None
+        if {"specs", "converter"} & set(result["items"]):
+            threading.Thread(target=_mcp_warm_index, name="sf-mcp-index", daemon=True).start()
+        mcp.refresh()
+        eventlog.emit("warn" if replace else "info", "system",
+                      f"Backup imported ({'replace' if replace else 'merge'}): {', '.join(result['items'])}",
+                      user=u["username"] if u else None, rows=sum(result["rows"].values()), files=result["files"],
+                      from_version=result["from_version"], warnings=result["warnings"])
+        return result
 
     # ------------------------------------------------------------------ static UI
     for cand in (Path(__file__).resolve().parents[1] / "web", Path(__file__).resolve().parents[3] / "frontend" / "dist"):
