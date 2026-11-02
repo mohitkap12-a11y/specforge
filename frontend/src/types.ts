@@ -132,12 +132,13 @@ export interface ConversionEntry {
   user: string | null; mine: boolean;   // who converted it
   can_remove: boolean;   // a finished file only an admin deletes; its owner may cancel or dismiss one that is not finished
   has_source: boolean;   // the uploaded original can be downloaded (GET /api/convert/markdown/jobs/{job}/source)
+  outdated: boolean;     // made by an older version of its engine: not reused for the same file; an admin can re-convert it
   cancelling: boolean;   // cancel asked; a running Docling conversion stops only when the current file is done
   ahead: number; ahead_of: Job["ahead_of"];   // queued: its place in the conversion queue
   result: Omit<MarkdownConversion, "markdown"> | null;
 }
 export interface MarkdownConversion {
-  filename: string; title: string; format: "pdf" | "docx" | "doc"; engine: ConvertEngine; markdown: string;
+  filename: string; title: string; format: "pdf" | "docx" | "doc"; engine: ConvertEngine; markdown: string; converter_version?: string;
   stats: { words: number; headings: number; tables: number; list_items: number; code_blocks: number; characters: number; pages?: number };
   warnings: string[];
 }
