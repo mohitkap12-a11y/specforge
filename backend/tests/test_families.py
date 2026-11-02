@@ -61,5 +61,7 @@ def test_unqualified_base_specification_is_nvme_only_in_nvme_context():
 def test_non_nvme_opcode_tables_get_their_own_command_space():
     t = {"caption": "Figure 8-93. CXL Memory Device Command Opcodes"}
     assert _opcode_queue({"family": "cxl"}, t) == ("cxl", "cmd", "cxl")
+    assert _opcode_queue({"family": "cxl"}, {"caption": "Out-of-Band Management Opcodes"}) is None     # still not commands
+    assert _opcode_queue({"family": "cxl"}, {"caption": "Control Primitive Opcodes"}) is None
     assert _opcode_queue({"family": "nvme-base"}, {"caption": "Opcodes for Admin Commands"}) == ("pcie", "admin", "base")
     assert _opcode_queue({"family": "ocp-datacenter-nvme-ssd"}, {"caption": "Vendor Specific Admin Command Opcodes"}) == ("pcie", "admin", "base")

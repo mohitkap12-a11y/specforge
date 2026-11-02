@@ -108,11 +108,11 @@ def _opcode_cols(rows: list[list[str]], header: list[str] | None = None) -> tupl
 def _opcode_queue(ir: dict, t: dict) -> tuple[str, str, str] | None:
     """(interface, queue, command set) an opcode table belongs to, from its caption; None for tables that list no commands."""
     cap = norm_title(t["caption"])
+    if "control primitive" in cap or "out-of-band" in cap or "pcie" in cap:
+        return None
     proto = protocol_of(ir["family"])
     if proto is not None and proto not in NVME_CONTEXT:
         return proto, "cmd", ir["family"]          # CXL, PCIe, DMTF ...: their own command space, never NVMe's
-    if "control primitive" in cap or "out-of-band" in cap or "pcie" in cap:
-        return None
     if "admin" in cap:
         return "pcie", "admin", "base"
     if ir["family"] == "nvme-mi":
