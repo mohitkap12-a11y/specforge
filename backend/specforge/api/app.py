@@ -19,10 +19,11 @@ from urllib.parse import quote, urlsplit
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__, auth, catalog, cmddb, compare, compare_ai, convert, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
-from .. import mcp_metrics, mcp_server, specquery
+from .. import backup, mcp_metrics, mcp_server, specquery
 from ..crossgen import generate_cross_scenarios
 from ..convert import ENGINES, ConversionError, SUPPORTED, convert_file, output_name
 from ..core import config
@@ -59,7 +60,8 @@ PUBLIC = {("POST", "/api/auth/login"), ("POST", "/api/auth/register"), ("POST", 
 # Admin only: user management, global settings, wiping shared data.
 ADMIN_ONLY = {("PUT", "/api/settings"), ("PUT", "/api/features"), ("GET", "/api/reset"), ("POST", "/api/reset"), ("DELETE", "/api/logs"),
               ("GET", "/api/fs/browse"),     # lists the server's folders: other users type or drop a path instead
-              ("GET", "/api/mcp/status"), ("PUT", "/api/mcp/settings"), ("POST", "/api/mcp/reindex"), ("POST", "/api/mcp/reset-stats")}
+              ("GET", "/api/mcp/status"), ("PUT", "/api/mcp/settings"), ("POST", "/api/mcp/reindex"), ("POST", "/api/mcp/reset-stats"),
+              ("GET", "/api/backup/options"), ("GET", "/api/backup/export"), ("POST", "/api/backup/import")}
 ADMIN_PREFIX = "/api/users"
 # Every /api/mcp/ route but the guide's (metrics, misses & errors, call log, settings) is for admins
 MCP_PREFIX, MCP_PUBLIC = "/api/mcp/", {"/api/mcp/info"}
@@ -2051,6 +2053,66 @@ def create_app() -> FastAPI:
         conn().commit()
         eventlog.emit("info", "system", f"Activity log cleared ({n} events)")
         return {"ok": True, "deleted": n}
+
+    # ------------------------------------------------------------------ backup / export-import (logic in backup.py)
+    MAX_BACKUP_BYTES = int(os.environ.get("SPECFORGE_BACKUP_UPLOAD_MB", "20480")) * 1024 * 1024
+
+    def _backup_guard() -> None:
+        """Like a reset: refused while any job is queued or running, so nothing writes to what is being replaced."""
+        if busy := jobs.active(conn()):
+            raise HTTPException(409, f"{len(busy)} job(s) are still queued or running ("
+                                     + ", ".join(j["label"] or j["type"] for j in busy[:3])
+                                     + "). Cancel them or wait for them to finish, then import.")
+
+    @app.get("/api/backup/options")
+    def backup_options():
+        return {"items": backup.options()}
+
+    @app.get("/api/backup/export")
+    def backup_export(items: str | None = Query(None), include_secrets: bool = Query(False)):
+        """A zip of the selected items (comma-separated; default all) and everything they depend on."""
+        try:
+            selected = backup.parse_items(items)
+        except backup.BackupError as e:
+            raise HTTPException(e.status, str(e)) from None
+        eventlog.drain(1.0)
+        mcp_calls.drain(1.0)
+        fd, tmp = tempfile.mkstemp(prefix="specforge-backup-", suffix=".zip")
+        try:
+            with os.fdopen(fd, "wb") as out:
+                meta = backup.export(config.db_path(), out, selected, include_secrets=include_secrets)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+        audit(f"Backup exported ({', '.join(meta['items'])})", items=meta["items"], files=meta["files"],
+              secrets_included=include_secrets)
+        name = f"specforge-backup-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+        return FileResponse(tmp, media_type="application/zip", filename=name, background=BackgroundTask(os.unlink, tmp))
+
+    @app.post("/api/backup/import")
+    def backup_import(file: UploadFile = File(...), items: str | None = Form(None), replace: bool = Form(False)):
+        """Import a backup zip: the selected items (default: all it holds), merged into this workspace or replacing what it
+        has of them. Applied completely or not at all; see backup.py for the rules."""
+        if file.size is not None and file.size > MAX_BACKUP_BYTES:
+            raise HTTPException(413, f"Backup is larger than {MAX_BACKUP_BYTES // (1024 * 1024)} MB "
+                                     "(raise SPECFORGE_BACKUP_UPLOAD_MB to allow it).")
+        _backup_guard()
+        eventlog.drain(1.0)
+        mcp_calls.drain(1.0)
+        u = me()
+        try:
+            selected = backup.parse_items(items) if items else None
+            result = backup.import_(conn(), file.file, selected, replace=replace, keep_user_id=u["id"] if u else None)
+        except backup.BackupError as e:
+            raise HTTPException(e.status, str(e)) from None
+        if {"specs", "converter"} & set(result["items"]):
+            threading.Thread(target=_mcp_warm_index, name="sf-mcp-index", daemon=True).start()
+        mcp.refresh()
+        eventlog.emit("warn" if replace else "info", "system",
+                      f"Backup imported ({'replace' if replace else 'merge'}): {', '.join(result['items'])}",
+                      user=u["username"] if u else None, rows=sum(result["rows"].values()), files=result["files"],
+                      from_version=result["from_version"], warnings=result["warnings"])
+        return result
 
     # ------------------------------------------------------------------ static UI
     for cand in (Path(__file__).resolve().parents[1] / "web", Path(__file__).resolve().parents[3] / "frontend" / "dist"):
