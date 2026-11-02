@@ -103,7 +103,7 @@ def parse_docx(path: str, family: str | None = None, version: str | None = None,
     body = d.element.body
     paragraphs = [_text(p) for p in body.iter(W + "p")]
     first = "\n".join(paragraphs[:60])
-    f2, v2 = detect_identity(first, os.path.basename(path))
+    f2, v2 = detect_identity(first, os.path.basename(path), d.core_properties.title or "")
     family = family or f2 or "unknown"
     version = version or v2 or "0"
     title = clean(d.core_properties.title or os.path.basename(path))

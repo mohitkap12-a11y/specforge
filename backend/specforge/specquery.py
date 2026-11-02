@@ -37,21 +37,17 @@ from .compare_entities import _Version, _ck, _name_of, describe
 from .core.config import workspace_dir
 from .core.db import connect, jloads, row, rows
 from .ingest import store
-from .ingest.normalize import SPEC_ALIASES, _ALIAS_RE, clean, extract_references, norm_title, parse_byte_range
+from .ingest.families import family_name, family_names, short_aliases
+from .ingest.normalize import _ALIAS_RE, alias_family, clean, extract_references, norm_title, parse_byte_range
 
 PAGE_CHARS = 120_000            # about 30k tokens per answer: a whole Identify Controller structure fits in one page
 INDEX_VERSION = "4"             # bump when what the search index holds changes: every run is indexed again
 MAX_HITS = 25
 CELL_CHARS = 1500
 
-FAMILY_NAMES = {"nvme-base": "NVMe Base", "nvme-nvm-cs": "NVM Command Set", "nvme-zns-cs": "Zoned Namespace Command Set",
-                "nvme-kv-cs": "Key Value Command Set", "nvme-slm-cs": "Subsystem Local Memory Command Set", "nvme-mi": "NVMe-MI",
-                "nvme-pcie": "PCIe Transport", "nvme-tcp": "TCP Transport", "nvme-rdma": "RDMA Transport"}
-# short names an agent is likely to use for a family
-FAMILY_ALIASES = {"base": "nvme-base", "nvme": "nvme-base", "nvme base": "nvme-base", "mi": "nvme-mi", "nvme mi": "nvme-mi",
-                  "nvmemi": "nvme-mi", "management interface": "nvme-mi", "nvm": "nvme-nvm-cs", "nvm cs": "nvme-nvm-cs", "nvmcs": "nvme-nvm-cs",
-                  "nvm command set": "nvme-nvm-cs", "command set": "nvme-nvm-cs", "zns": "nvme-zns-cs", "kv": "nvme-kv-cs", "key value": "nvme-kv-cs",
-                  "slm": "nvme-slm-cs", "pcie": "nvme-pcie", "tcp": "nvme-tcp", "rdma": "nvme-rdma"}
+FAMILY_NAMES = family_names()                  # display names of the registered families (ingest/families.py)
+# short names an agent is likely to use for a family -> the families it may mean, most likely first
+FAMILY_ALIASES = short_aliases()
 # NVMe abbreviations: a query term also matches its spelled-out form
 ABBREVIATIONS = {
     "cdw": "command dword", "dw": "dword", "sqe": "submission queue entry", "cqe": "completion queue entry", "sq": "submission queue",
@@ -106,7 +102,7 @@ def _norm_version(v: str) -> str:
 
 
 def spec_name(d: dict) -> str:
-    return f"{FAMILY_NAMES.get(d['family'], d['family'])} {d['version']}"
+    return f"{family_name(d['family'])} {d['version']}"
 
 
 def _cell(s: Any) -> str:
@@ -724,16 +720,16 @@ class SpecLibrary:
         for cand in (s2, s2.replace("nvm express", "nvme").strip()):
             if cand.replace(" ", "-") in fams:
                 return cand.replace(" ", "-")
-            if FAMILY_ALIASES.get(cand) in fams:
-                return FAMILY_ALIASES[cand]
+            if hit := next((f for f in FAMILY_ALIASES.get(cand, ()) if f in fams), None):
+                return hit
         m = _ALIAS_RE.search(s)
-        if m and SPEC_ALIASES[m.group(0).lower()] in fams:
-            return SPEC_ALIASES[m.group(0).lower()]
+        if m and alias_family(m.group(0)) in fams:
+            return alias_family(m.group(0))
         # the words of the request against each family's id, name, document titles and file names
         want = _words(s2) - {"nvme", "nvm", "express", "specification"} or _words(s2)
         scored = []
         for f, docs in fams.items():
-            words = _words(f.replace("-", " ")) | _words(FAMILY_NAMES.get(f, "")) | set().union(*(_words(d["title"]) | _words(d["filename"]) for d in docs))
+            words = _words(f.replace("-", " ")) | _words(family_name(f)) | set().union(*(_words(d["title"]) | _words(d["filename"]) for d in docs))
             hit = len(want & words)
             if hit:
                 scored.append((hit, f))
@@ -876,7 +872,7 @@ class SpecLibrary:
         if not fams:
             lines.append("None yet: upload and parse specifications on the SpecForge Specs page.")
         for f, docs in sorted(fams.items()):
-            lines.append(f"## {FAMILY_NAMES.get(f, f)} (`{f}`)")
+            lines.append(f"## {family_name(f)} (`{f}`)")
             lines.append("| Version | Title | Pages | Parse warnings | Resource |")
             lines.append("|---|---|---|---|---|")
             for d in reversed(docs):
@@ -1612,7 +1608,7 @@ class SpecLibrary:
             else:
                 docs = self.families().get(r.family)
                 if not docs:
-                    parts.append(f"## {r.raw}\n\n{FAMILY_NAMES.get(r.family, r.family)} is not parsed on this server.")
+                    parts.append(f"## {r.raw}\n\n{family_name(r.family)} is not parsed on this server.")
                     continue
                 td = docs[-1]
                 tir = self.ir(td)

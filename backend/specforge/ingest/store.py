@@ -48,7 +48,7 @@ def detect_document(path: str | Path, filename: str | None = None) -> dict[str, 
         d = docx.Document(str(path))
         text = "\f".join(p.text for p in d.paragraphs[:80])
         pages, title = 0, d.core_properties.title or ""
-    fam, ver = detect_identity(text, filename or Path(path).name)
+    fam, ver = detect_identity(text, filename or Path(path).name, title)
     return {"family": fam, "version": ver, "pages": pages, "title": title, "format": fmt}
 
 

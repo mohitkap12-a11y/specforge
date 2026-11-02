@@ -4,6 +4,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .families import (  # noqa: F401  (detect_identity is re-exported)
+    CONTEXT_REFERENCE_ALIASES,
+    NVME_CONTEXT,
+    detect_identity,
+    protocol_of,
+    reference_aliases,
+)
+
 # ----------------------------------------------------------------------------- text helpers
 
 _WS = re.compile(r"\s+")
@@ -218,33 +226,25 @@ def normative_info(sentence: str) -> tuple[str, str] | None:
 
 # ----------------------------------------------------------------------------- references
 
-SPEC_ALIASES: dict[str, str] = {
-    # alias (lower-case)            -> family
-    "nvm express base specification": "nvme-base",
-    "nvme base specification": "nvme-base",
-    "base specification": "nvme-base",
-    "nvm express nvm command set specification": "nvme-nvm-cs",
-    "nvme nvm command set specification": "nvme-nvm-cs",
-    "nvm command set specification": "nvme-nvm-cs",
-    "nvm express zoned namespace command set specification": "nvme-zns-cs",
-    "zoned namespace command set specification": "nvme-zns-cs",
-    "nvm express key value command set specification": "nvme-kv-cs",
-    "key value command set specification": "nvme-kv-cs",
-    "nvm express subsystem local memory command set specification": "nvme-slm-cs",
-    "nvm express management interface specification": "nvme-mi",
-    "nvme management interface specification": "nvme-mi",
-    "nvme-mi specification": "nvme-mi",
-    "management interface specification": "nvme-mi",
-    "nvm express pcie transport specification": "nvme-pcie",
-    "pcie transport specification": "nvme-pcie",
-    "nvm express tcp transport specification": "nvme-tcp",
-    "tcp transport specification": "nvme-tcp",
-    "nvm express rdma transport specification": "nvme-rdma",
-    "rdma transport specification": "nvme-rdma",
-}
+# alias (lower-case) -> family, from the family registry; CONTEXT_REFERENCE_ALIASES ("the Base Specification") only count
+# in a document of an NVMe-context protocol: in a CXL or PCIe document "Base Specification" is not NVMe's
+SPEC_ALIASES: dict[str, str] = {**reference_aliases(), **CONTEXT_REFERENCE_ALIASES}
+
+
+def _alias_pattern(alias: str) -> str:
+    return r"[\s\u00ae\u2122\u00a9*]+".join(re.escape(w) for w in alias.split())
+
+
 _ALIAS_RE = re.compile(
-    "|".join(re.escape(a) for a in sorted(SPEC_ALIASES, key=len, reverse=True)), re.I
+    r"\b(?:" + "|".join(_alias_pattern(a) for a in sorted(SPEC_ALIASES, key=len, reverse=True)) + r")\b", re.I
 )
+
+
+def alias_family(matched: str) -> str:
+    """The family an _ALIAS_RE match names ("NVM Express® Base Specification" -> nvme-base)."""
+    return SPEC_ALIASES[" ".join(re.sub(r"[\u00ae\u2122\u00a9*]", " ", matched).lower().split())]
+
+
 _LIST_SEP = r"(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"      # "1, 2", "1 and 2", "1, 2, and 3", "1, 2, or 3"
 _SEC_REF = re.compile(rf"\b(?:sections?|clauses?|subclauses?)\s+(\d+(?:\.\d+)*)(?:{_LIST_SEP}(\d+(?:\.\d+)*))*", re.I)
 _SEC_NUM = re.compile(r"\d+(?:\.\d+)*")
@@ -263,8 +263,11 @@ class RawRef:
 def extract_references(text: str, own_family: str) -> list[RawRef]:
     """Extract section / figure / spec references; attach the nearest named spec in the same sentence."""
     out: list[RawRef] = []
+    own_protocol = protocol_of(own_family)
+    nvme_ctx = own_protocol in NVME_CONTEXT or own_family in ("", "unknown")
     for sent in split_sentences(text) or [clean(text)]:
-        specs = [(m.start(), m.end(), SPEC_ALIASES[m.group(0).lower()]) for m in _ALIAS_RE.finditer(sent)]
+        specs = [(m.start(), m.end(), alias_family(m.group(0))) for m in _ALIAS_RE.finditer(sent)
+                 if nvme_ctx or m.group(0).lower() not in CONTEXT_REFERENCE_ALIASES]
         refs: list[tuple[int, str, str, str]] = []  # (pos, kind, label, raw)
         for m in _SEC_REF.finditer(sent):
             for n in _SEC_NUM.findall(m.group(0)):
@@ -297,37 +300,4 @@ def extract_references(text: str, own_family: str) -> list[RawRef]:
 
 
 # ----------------------------------------------------------------------------- spec identity
-
-FAMILY_PATTERNS = [
-    (re.compile(r"management\s+interface", re.I), "nvme-mi"),
-    (re.compile(r"zoned\s+namespace", re.I), "nvme-zns-cs"),
-    (re.compile(r"key\s*value", re.I), "nvme-kv-cs"),
-    (re.compile(r"subsystem\s+local\s+memory", re.I), "nvme-slm-cs"),
-    (re.compile(r"nvm\s+command\s+set", re.I), "nvme-nvm-cs"),
-    (re.compile(r"pcie\s+transport", re.I), "nvme-pcie"),
-    (re.compile(r"tcp\s+transport", re.I), "nvme-tcp"),
-    (re.compile(r"rdma\s+transport", re.I), "nvme-rdma"),
-    (re.compile(r"\bbase\s+specification", re.I), "nvme-base"),
-]
-_VERSION_RE = re.compile(r"\bRevision\s+(\d+(?:\.\d+)*[a-z]?)\b", re.I)
-
-
-def _identity_from(text: str) -> str | None:
-    best = None
-    for rx, f in FAMILY_PATTERNS:
-        m = rx.search(text)
-        if m and (best is None or m.start() < best[0]):
-            best = (m.start(), f)
-    return best[1] if best else None
-
-
-def detect_identity(first_pages_text: str, filename: str = "") -> tuple[str | None, str | None]:
-    """first_pages_text: text of page 1, optionally followed by a form-feed and pages 2-3."""
-    parts = first_pages_text.split("\f")
-    title_page = clean(parts[0][:3000])
-    fam = _identity_from(title_page) or _identity_from(clean(first_pages_text[:6000]))
-    fname = filename.replace("-", " ").replace("_", " ")
-    if fam is None:
-        fam = _identity_from(fname)
-    m = _VERSION_RE.search(title_page) or _VERSION_RE.search(clean(first_pages_text[:6000])) or _VERSION_RE.search(fname)
-    return fam, (m.group(1) if m else None)
+# detect_identity lives in families.py (the protocol registry) and is re-exported here
