@@ -18,6 +18,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from . import nested
 from .ir import Excluded, ParsedSpec, Section, Table
 from .normalize import (
     clean,
@@ -74,12 +75,16 @@ def _extract_chunk(args: tuple[str, list[int], bool]) -> list[dict[str, Any]]:
             page = doc[pno]
             H, W = page.rect.height, page.rect.width
             tables: list[dict] = []
+            nested_facts = None
             try:
-                for t in page.find_tables().tables:
+                found = page.find_tables().tables
+                for t in found:
                     rows = _cells(t.extract())
                     if rows:
                         tables.append({"bbox": [float(v) for v in t.bbox], "rows": rows, "extractor": "pymupdf",
                                        "quality": _table_quality(rows)})
+                # read here, from PyMuPDF's own tables: pdfplumber below may replace an outer table and the one inside it
+                nested_facts = nested.page_facts(page, found, pno) if found else None
             except Exception:  # pragma: no cover - defensive
                 pass
             weak = any(t["quality"] < QUALITY_FALLBACK_THRESHOLD for t in tables)
@@ -128,7 +133,7 @@ def _extract_chunk(args: tuple[str, list[int], bool]) -> list[dict[str, Any]]:
                                   "size": max(s["size"] for s in spans),
                                   "bold": any((s["flags"] & 16) or "bold" in s["font"].lower() for s in spans)})
             lines.sort(key=lambda l: (round(l["y0"], 0), l["x0"]))
-            out.append({"page": pno + 1, "height": H, "width": W, "lines": lines, "tables": tables,
+            out.append({"page": pno + 1, "height": H, "width": W, "lines": lines, "tables": tables, "nested": nested_facts,
                         "raw_chars": nospace_len(page.get_text("text"))})
     finally:
         doc.close()
@@ -561,6 +566,12 @@ def assemble(path: str, pages: list[dict], family: str, version: str, title: str
         spec.notes.append({"severity": "warning", "kind": "table_text_loss", "node_key": None, "page": None,
                            "message": f"Table cells hold {acct['table_cells']} chars but {acct['table_lines']} chars "
                                       "lie inside table regions"})
+    if any(p.get("nested") for p in pages):
+        found = nested.assemble([p["nested"] for p in pages if p.get("nested")])
+        st = nested.attach(spec, found)
+        if st["unplaced"]:
+            spec.notes.append({"severity": "info", "kind": "nested_unplaced", "node_key": None, "page": None,
+                               "message": f"{st['unplaced']} nested table(s) found whose parent row is not in the parsed tables"})
     build_semantics(spec)
     return spec
 

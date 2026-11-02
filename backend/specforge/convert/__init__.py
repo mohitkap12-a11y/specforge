@@ -28,6 +28,14 @@ from .md import Code, Heading, Item, Table
 
 SUPPORTED = (".pdf", ".docx", ".doc")
 ENGINES = ("docling", "builtin")
+# bump an engine's version when its Markdown changes: older conversions show as outdated in the library, are not reused for
+# the same file, and an admin can re-convert them from their kept originals. builtin 2: nested tables (ingest/nested.py)
+CONVERTER_VERSION = {"builtin": "2", "docling": "1"}
+
+
+def outdated(result: dict) -> bool:
+    """A finished conversion made by an older version of its engine (conversions from before versions were kept are "1")."""
+    return str(result.get("converter_version") or "1") != CONVERTER_VERSION.get(result.get("engine") or "", "1")
 
 
 class ConversionError(Exception):

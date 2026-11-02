@@ -6,6 +6,7 @@ import { MarkdownPreview } from "../components/MarkdownPreview";
 import { Badge, Empty, ErrorNote, PageHeader, Segmented, Switch } from "../components/ui";
 import { useToast } from "../components/Toasts";
 import { queueText, useJobs } from "../components/jobs";
+import { useAuth } from "../components/auth";
 import { conversionSummary, jobErrorText } from "../util";
 import type { ConvertEngine, ConversionEntry } from "../types";
 
@@ -80,6 +81,7 @@ function Conversion({ c }: { c: ConversionEntry }) {
             {c.state === "failed" && <Badge value="failed" label="Failed" />}
             {c.state === "cancelled" && <Badge value="draft" label="Cancelled" />}
             {r && <Badge value={r.engine === "docling" ? "ok" : "info"} label={r.engine === "docling" ? "Docling" : "Built-in"} />}
+            {c.outdated && <span title="Made by an older version of this engine. Uploading the file again converts it again; an admin can re-convert every outdated file at once."><Badge value="warning" label="Outdated" /></span>}
           </div>
           <div className="muted small">
             {r && <>{conversionSummary(r.stats)} · </>}
@@ -124,6 +126,8 @@ export default function ConvertPage() {
   const [whose, setWhose] = useState<"all" | "mine">("all");
   const { track } = useJobs();
   const { push } = useToast();
+  const { isAdmin } = useAuth();
+  const [reconverting, setReconverting] = useState(false);
   // the list lives on the server, so conversions survive leaving the page, a refresh or another tab
   const list = useQuery({
     queryKey: ["conversions"], queryFn: api.conversions,
@@ -148,6 +152,17 @@ export default function ConvertPage() {
   const q = filter.trim().toLowerCase();
   const shown = useMemo(() => items.filter((c) => (whose === "all" || c.mine) && (!q || matches(c, q))), [items, whose, q]);
   const busy = uploads.some((u) => !u.error) || items.some((c) => c.state === "queued" || c.state === "running");
+  const outdated = items.filter((c) => c.outdated);
+  const reconvert = async () => {
+    setReconverting(true);
+    try {
+      const r = await api.reconvertOutdated();
+      if (r.job) track(r.job, `Re-convert ${r.count ?? ""} outdated Markdown file(s)`);
+      push(r.job ? { title: r.reused ? "Re-conversion already running" : `Re-converting ${r.count} file(s)`, description: r.no_source ? `${r.no_source} file(s) converted before originals were kept stay as they are: delete and upload them again.` : undefined, tone: "info" }
+        : { title: "Nothing to re-convert", description: r.no_source ? `${r.no_source} outdated file(s) have no kept original: delete and upload them again.` : undefined, tone: "ok" });
+    } catch (e) { push({ title: "Not started", description: errText(e), tone: "bad" }); }
+    finally { setReconverting(false); }
+  };
   return (
     <>
       <PageHeader title="To Markdown" description="Convert a PDF, DOC or DOCX specification into a clean Markdown file with Docling: its layout model and TableFormer keep headings, text and tables (merged cells, multi-row headers, tables split across pages) aligned. Large specs take a while. Converted files form a library every user can preview and download; a file already in it is not converted again." />
@@ -169,6 +184,15 @@ export default function ConvertPage() {
         <button className="primary" onClick={() => input.current?.click()}>Choose files</button>
       </div>
       <ErrorNote error={list.error} />
+      {isAdmin && outdated.length > 0 && (
+        <div className="card row">
+          <span className="grow">
+            <strong>{outdated.length} file{outdated.length === 1 ? " was" : "s were"} converted by an older version of its engine.</strong>{" "}
+            <span className="muted small">The built-in engine now prints nested tables (a field's bits, a bit's values) after their parent table. Re-converting runs again from each kept original, in the background, keeping its name and place in the library; users who downloaded the old file need to download it again.</span>
+          </span>
+          <button className="primary" disabled={reconverting} onClick={() => void reconvert()}>Re-convert outdated</button>
+        </div>
+      )}
       {uploads.map((u) => (
         <div key={u.id} className="card">
           <div className="card-head">

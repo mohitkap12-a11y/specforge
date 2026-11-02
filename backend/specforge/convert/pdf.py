@@ -14,7 +14,9 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, replace
+from typing import Any
 
+from ..ingest import nested
 from .md import Block, Code, Heading, Item, Para, Seg, Table, escape_text
 
 _BULLET = re.compile(r"^([•●▪■◦‣·–—\-])\s+(?=\S)")
@@ -50,6 +52,9 @@ class _Table:
     y0: float
     rows: list[list[str]]
     page: int
+    figure: str | None = None          # the figure caption above it, when it holds nested tables
+    keys: frozenset = frozenset()      # the keys of its rows (where a nested table belongs)
+    block: Any = None                  # the Table block it went into (its own, or the one it continues)
 
 
 def _norm(s: str) -> str:
@@ -71,16 +76,31 @@ def _clean_rows(rows) -> list[list[str]]:
     return [[r[i] if i < len(r) else "" for i in keep] for r in rows]
 
 
-def _read_page(page, pno: int, pymupdf) -> tuple[list[Line], list[_Table], int]:
+def _read_page(page, pno: int, pymupdf) -> tuple[list[Line], list[_Table], int, dict | None]:
     tables: list[tuple[tuple, _Table]] = []
     try:
         found = page.find_tables().tables
     except Exception:  # noqa: BLE001 - a page the table finder cannot read still has its text
         found = []
-    for t in found:
-        rows = [[escape_text(c) for c in r] for r in _clean_rows(t.extract())]   # cells are literal spec text, not Markdown
+    try:
+        facts = nested.page_facts(page, found, pno) if found else None
+    except Exception:  # noqa: BLE001 - nested tables are then printed as PyMuPDF found them
+        facts = None
+    consumed = set(facts["consumed"]) if facts else set()
+    tops = {top["index"]: top for top in facts["tops"]} if facts else {}
+    for i, t in enumerate(found):
+        if i in consumed:                 # a nested table: printed after its parent table instead
+            continue
+        top = tops.get(i)
+        has_nested = top is not None and (top["nested"] or top["inner"])
+        raw = nested.strip(top) if has_nested else t.extract()
+        rows = [[escape_text(c) for c in r] for r in _clean_rows(raw)]   # cells are literal spec text, not Markdown
+        if has_nested and not any(nested._worded(r) for r in rows[1:]):
+            continue                      # only its nested rows were on this page: they are printed with the nested table
         if len(rows) >= 2 and len(rows[0]) >= 2:
-            tables.append((tuple(t.bbox), _Table(t.bbox[1], rows, pno)))
+            fig = top["figure"][0] if has_nested and top["figure"] else None
+            keys = frozenset(nested._first(r) for r in top["rows"][1:]) if fig else frozenset()
+            tables.append((tuple(t.bbox), _Table(t.bbox[1], rows, pno, fig, keys)))
     links = [(pymupdf.Rect(lk["from"]), lk["uri"]) for lk in page.get_links() if lk.get("uri")]
 
     def in_table(cx: float, cy: float) -> bool:
@@ -114,7 +134,7 @@ def _read_page(page, pno: int, pymupdf) -> tuple[list[Line], list[_Table], int]:
             body = [s for s in segs if s.text.strip()]
             lines.append(Line(segs, plain, size, all(s.bold for s in body), all(s.code for s in body),
                               x0, y0, y1, pno))
-    return lines, [t for _, t in tables], len(page.get_images())
+    return lines, [t for _, t in tables], len(page.get_images()), facts
 
 
 def _drop_furniture(pages: list[list[Line]], heights: list[float]) -> int:
@@ -257,8 +277,10 @@ class _Builder:
         if (page_start and isinstance(prev, Table) and len(prev.rows[0]) == len(t.rows[0])
                 and [c.lower() for c in t.rows[0]] == [c.lower() for c in prev.rows[0]]):
             prev.rows.extend(t.rows[1:])   # same repeated header: one table continued on the next page
+            t.block = prev
         else:
             self.blocks.append(Table(t.rows))
+            t.block = self.blocks[-1]
 
 
 def _blank_lines(a: Line, b: Line) -> int:
@@ -316,6 +338,32 @@ def _drop_empty_toc(blocks: list[Block]) -> list[Block]:
     return out
 
 
+def _place_nested(blocks: list[Block], tables: list[_Table], found: list) -> list[Block]:
+    """Each nested table (ingest/nested.py) right after the table block its parent row is in, with a caption naming the
+    field (and bit) it belongs to; a bit's value table right after the bit table it is in."""
+    if not found:
+        return blocks
+    after: dict[int, list] = {}
+    for n in found:
+        if n.bit is not None:
+            continue
+        t = next((t for t in tables if t.figure == n.figure and n.field in t.keys and t.block is not None), None)
+        if t is not None:
+            after.setdefault(id(t.block), []).append(n)
+    inner = {}
+    for n in found:
+        if n.bit is not None:
+            inner.setdefault((n.figure, n.field), []).append(n)
+    out: list[Block] = []
+    for blk in blocks:
+        out.append(blk)
+        for n in after.get(id(blk), []):
+            for m in [n, *inner.get((n.figure, n.field), [])]:
+                out.append(Para([Seg(nested.caption(m), bold=True)]))
+                out.append(Table([[escape_text(c) for c in m.header]] + [[escape_text(c) for c in r] for r in m.rows]))
+    return out
+
+
 def convert(path: str) -> tuple[list[Block], dict]:
     import pymupdf
 
@@ -325,9 +373,11 @@ def convert(path: str) -> tuple[list[Block], dict]:
         raise PdfError(f"Cannot open the PDF: {e}") from e
     if doc.needs_pass:
         raise PdfError("The PDF is password protected.")
-    pages, tables, images, heights = [], [], 0, []
+    pages, tables, images, heights, facts = [], [], 0, [], []
     for pno, page in enumerate(doc):
-        lines, tbls, n_img = _read_page(page, pno, pymupdf)
+        lines, tbls, n_img, f = _read_page(page, pno, pymupdf)
+        if f:
+            facts.append(f)
         pages.append(lines)
         tables.append(tbls)
         heights.append(page.rect.height)
@@ -381,7 +431,8 @@ def convert(path: str) -> tuple[list[Block], dict]:
                 b.add(it, first)
             first = False
     b.flush()
-    blocks = _drop_empty_toc(b.blocks)
+    blocks = _place_nested(b.blocks, [t for ts in tables for t in ts], nested.assemble(facts) if facts else [])
+    blocks = _drop_empty_toc(blocks)
     meta = {"pages": len(doc), "title": (doc.metadata or {}).get("title") or "", "images_skipped": images,
             "furniture_removed": furniture, "toc_lines_removed": leaders}
     return blocks, meta

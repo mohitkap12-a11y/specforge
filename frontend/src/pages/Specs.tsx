@@ -15,7 +15,8 @@ function RunRow({ doc, run, prev }: { doc: SpecDoc; run: ParseRun; prev?: ParseR
   const qc = useQueryClient();
   const [diff, setDiff] = useState<Record<string, any> | null>(null);
   const act = useMutation({ mutationFn: () => api.activateRun(run.id), onSuccess: () => qc.invalidateQueries() });
-  const reparse = useMutation({ mutationFn: () => api.parse(doc.id, false, engineOf(run)), onSuccess: (r) => track(r.job, `Reparse ${doc.family} ${doc.version}`) });
+  const [engine, setEngine] = useState<"builtin" | "docling">(engineOf(run));
+  const reparse = useMutation({ mutationFn: () => api.parse(doc.id, false, engine), onSuccess: (r) => track(r.job, `Reparse ${doc.family} ${doc.version}`) });
   const cmp = useMutation({ mutationFn: () => api.runDiff(prev!.id, run.id), onSuccess: setDiff });
   const ready = run.audit?.coverage_ready;
   return (
@@ -32,7 +33,16 @@ function RunRow({ doc, run, prev }: { doc: SpecDoc; run: ParseRun; prev?: ParseR
           {run.status === "done" && <Link to={`/explorer?run=${run.id}`}>Open</Link>}
           {run.status === "done" && !run.active && <button disabled={act.isPending} onClick={() => act.mutate()}>Set active</button>}
           {prev && run.status === "done" && prev.status === "done" && <button disabled={cmp.isPending} onClick={() => cmp.mutate()}>Diff vs #{prev.id}</button>}
-          {run === doc.runs[0] && <button disabled={reparse.isPending} onClick={() => reparse.mutate()}>Reparse</button>}
+          {run === doc.runs[0] && (
+            <>
+              <select value={engine} onChange={(e) => setEngine(e.target.value as "builtin" | "docling")} aria-label="Engine to reparse with"
+                title="Built-in rebuilds nested tables (a field's bits, a bit's values) from the PDF; Docling uses the file's Docling conversion">
+                <option value="builtin">Built-in</option>
+                <option value="docling">Docling</option>
+              </select>
+              <button disabled={reparse.isPending} onClick={() => reparse.mutate()}>Reparse</button>
+            </>
+          )}
         </td>
       </tr>
       {(run.error || act.error || cmp.error || reparse.error || diff) && (
@@ -102,6 +112,14 @@ export default function SpecsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["specs"] }),
   });
   const onFiles = (list: FileList | null) => { if (list?.length) upload.mutate(Array.from(list)); if (input.current) input.current.value = ""; };
+  const { isAdmin } = useAuth();
+  const { track } = useJobs();
+  const [engine, setEngine] = useState<ParserEngine | "">("builtin");
+  const outdated = (specs.data ?? []).filter((d) => d.runs.some((r) => r.active && r.outdated));
+  const reparseAll = useMutation({
+    mutationFn: () => api.reparseOutdated(engine || undefined),
+    onSuccess: (r) => { r.jobs.forEach((j) => track(j.job, `Reparse spec #${j.document_id}`)); void qc.invalidateQueries({ queryKey: ["specs"] }); },
+  });
   return (
     <>
       <PageHeader title="Specs" description={<>Upload specification documents and parse them into sections, tables, bit fields and normative statements, with an audit of what was found. Parsing uses Docling (accurate tables) whenever the file has been converted on the <Link to="/convert">To Markdown</Link> page; a spec converted there can also be added here with one click, and is never converted twice.</>} />
@@ -117,6 +135,21 @@ export default function SpecsPage() {
         <button className="primary" disabled={upload.isPending} onClick={() => input.current?.click()}>Choose files</button>
       </div>
       <ErrorNote error={upload.error} />
+      {isAdmin && outdated.length > 0 && (
+        <div className="card row">
+          <span className="grow">
+            <strong>{outdated.length} spec{outdated.length === 1 ? " is" : "s are"} served from a run made by an older parser.</strong>{" "}
+            <span className="muted small">Reparsing rebuilds nested tables (a field's bits, a bit's values) with the built-in engine. The new runs are not activated: open each, compare it with the old run, then Set active. Rebuild the catalogs of their sets afterwards.</span>
+          </span>
+          <select value={engine} onChange={(e) => setEngine(e.target.value as ParserEngine | "")} aria-label="Engine to reparse with">
+            <option value="builtin">Built-in</option>
+            <option value="">Same engine as before</option>
+            <option value="docling">Docling</option>
+          </select>
+          <button className="primary" disabled={reparseAll.isPending} onClick={() => reparseAll.mutate()}>Reparse all {outdated.length}</button>
+        </div>
+      )}
+      <ErrorNote error={reparseAll.error} />
       <Loading q={specs} />
       {specs.data?.length === 0 && <Empty icon={FileUp} title="No specs yet">Upload the NVMe Base and NVM Command Set specifications to begin. PDF and DOCX are supported.</Empty>}
       {specs.data?.map((d) => <DocCard key={d.id} doc={d} />)}

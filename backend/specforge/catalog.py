@@ -198,6 +198,8 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
 
     for ir in irs:
         for t in ir["tables"].values():
+            if "/fig:" in (t.get("parent_key") or "") and t.get("parent_cell"):
+                continue            # a bit or value table nested in a row of another table: part of that row, not a field table
             if classify_table(t["header"], t["caption"]) != "cdw":
                 continue
             if _RESPONSE_TABLE.search(t["caption"]):

@@ -61,6 +61,7 @@ PUBLIC = {("POST", "/api/auth/login"), ("POST", "/api/auth/register"), ("POST", 
 ADMIN_ONLY = {("PUT", "/api/settings"), ("PUT", "/api/features"), ("GET", "/api/reset"), ("POST", "/api/reset"), ("DELETE", "/api/logs"),
               ("GET", "/api/fs/browse"),     # lists the server's folders: other users type or drop a path instead
               ("GET", "/api/mcp/status"), ("PUT", "/api/mcp/settings"), ("POST", "/api/mcp/reindex"), ("POST", "/api/mcp/reset-stats"),
+              ("POST", "/api/convert/markdown/reconvert-outdated"), ("POST", "/api/specs/reparse-outdated"),
               ("GET", "/api/backup/options"), ("GET", "/api/backup/export"), ("POST", "/api/backup/import")}
 ADMIN_PREFIX = "/api/users"
 # Every /api/mcp/ route but the guide's (metrics, misses & errors, call log, settings) is for admins
@@ -798,7 +799,7 @@ def create_app() -> FastAPI:
 
     def _conversion_json(name: str, res) -> dict:
         return {"filename": output_name(name), "title": res.title, "format": res.source_format, "engine": res.engine,
-                "stats": res.stats, "warnings": res.warnings}
+                "converter_version": convert.CONVERTER_VERSION.get(res.engine, "1"), "stats": res.stats, "warnings": res.warnings}
 
     def _conversions_dir() -> Path:
         d = config.workspace_dir() / "conversions"
@@ -828,12 +829,14 @@ def create_app() -> FastAPI:
         return sha256_file(path)
 
     def _converted_already(sha: str, front_matter: bool, engine: str) -> int | None:
-        """A finished conversion of the same file with the same options whose Markdown is still on disk, so it is not converted twice."""
+        """A finished conversion of the same file with the same options whose Markdown is still on disk, so it is not converted twice
+        (one made by an older version of the engine is converted again)."""
         for j in rows(conn(), "SELECT id, result_json FROM job WHERE type='convert-markdown' AND state='done' "
                               "AND json_extract(payload_json, '$.hidden') IS NULL AND json_extract(payload_json, '$.sha256') = ? "
                               "AND json_extract(payload_json, '$.front_matter') = ? ORDER BY id DESC", (sha, int(front_matter))):
             res = jloads(j["result_json"], None) or {}
-            if res.get("engine") == engine and safe_join(_conversions_dir(), f"{res.get('dir', '')}/out.md") is not None:
+            if res.get("engine") == engine and not convert.outdated(res) and \
+                    safe_join(_conversions_dir(), f"{res.get('dir', '')}/out.md") is not None:
                 return j["id"]
         return None
 
@@ -934,6 +937,7 @@ def create_app() -> FastAPI:
         return {"job": j["id"], "source": payload.get("filename"), "state": j["state"], "message": j["message"], "created": j["created"],
                 "updated": j["updated"], "user": payload.get("user"), "mine": payload.get("user") == me()["username"],
                 "can_remove": _may_remove(j, watched), "has_source": j["state"] == "done" and _source_file(res) is not None,
+                "outdated": j["state"] == "done" and convert.outdated(res),
                 "cancelling": active and jobs.cancel_requested(j["id"], DB), "error": j["error"],
                 "ahead": j["ahead"], "ahead_of": j["ahead_of"],     # its place in the conversion queue while it waits
                 "result": {k: v for k, v in res.items() if k != "dir"} if j["state"] == "done" else None}
@@ -958,6 +962,57 @@ def create_app() -> FastAPI:
                      (u, u, f"-{CONVERT_KEEP_SECONDS} seconds"))
         watched = watched_ids()
         return [e for j in jobs.with_progress_all(found, conn()) if (e := _conversion_entry(j, watched)) is not None]
+
+    @app.post("/api/convert/markdown/reconvert-outdated")
+    def convert_markdown_reconvert_outdated():
+        """Admin: convert again, in place, every finished file made by an older version of its engine, from its kept original
+        (same engine and options; its name, owner and place in the library stay). Files converted before originals were kept
+        are left as they are and counted. {job: null} when nothing is outdated."""
+        busy = row(conn(), "SELECT id FROM job WHERE type='reconvert-markdown' AND state IN ('queued','running') ORDER BY id DESC LIMIT 1")
+        if busy:
+            return {"job": busy["id"], "reused": True}
+        todo, no_source = [], 0
+        for j in rows(conn(), "SELECT id, payload_json, result_json FROM job WHERE type='convert-markdown' AND state='done' "
+                              "AND json_extract(payload_json, '$.hidden') IS NULL ORDER BY id"):
+            res = jloads(j["result_json"], None) or {}
+            if not convert.outdated(res) or safe_join(_conversions_dir(), f"{res.get('dir', '')}/out.md") is None:
+                continue
+            if _source_file(res) is None:
+                no_source += 1
+                continue
+            todo.append(j["id"])
+        if not todo:
+            return {"job": None, "count": 0, "no_source": no_source}
+
+        def work(c, prog):
+            done, failed = 0, []
+            for n, job_id in enumerate(todo):
+                j = row(c, "SELECT payload_json, result_json, state FROM job WHERE id=?", (job_id,))
+                p, res = jloads(j["payload_json"], {}) or {}, jloads(j["result_json"], None) or {}
+                src, folder = _source_file(res), _conversion_dir(res.get("dir"))
+                if j["state"] != "done" or p.get("hidden") or src is None or folder is None or not convert.outdated(res):
+                    continue            # removed or re-converted meanwhile
+                name = p.get("filename") or res.get("filename") or src.name
+                prog(f"Converting {name} again ({n + 1} of {len(todo)})", n, len(todo))
+                try:
+                    out = convert_file(str(src), filename=name, front_matter=p.get("front_matter", True), engine=res.get("engine"))
+                except Exception as e:  # noqa: BLE001  the old Markdown stays; the next file goes on
+                    failed.append(f"{name}: {e}")
+                    continue
+                tmp = folder / "out.md.new"
+                tmp.write_text(out.markdown, encoding="utf-8")
+                os.replace(tmp, folder / "out.md")
+                if out.docling is not None:
+                    (folder / "docling.json").write_text(json.dumps(out.docling), encoding="utf-8")
+                c.execute("UPDATE job SET result_json=? WHERE id=?", (json.dumps({**_conversion_json(name, out), "dir": folder.name}), job_id))
+                c.execute("DELETE FROM mcp_lib_index WHERE dir=?", (folder.name,))       # its search entries are built again
+                c.commit()
+                done += 1
+            prog(f"Converted {done} file(s) again", len(todo), len(todo))
+            return {"converted": done, "failed": failed, "no_source": no_source}
+        audit(f"Re-conversion of {len(todo)} outdated To Markdown file(s) requested", count=len(todo), no_source=no_source)
+        return {"job": submit_job("reconvert-markdown", work, {"count": len(todo)}, label=f"Re-convert {len(todo)} outdated Markdown file(s)",
+                                  pool=convert.serial_pool(), queue=convert.QUEUE), "count": len(todo), "no_source": no_source}
 
     @app.delete("/api/convert/markdown/jobs/{job_id}")
     def convert_markdown_remove(job_id: int):
@@ -1204,6 +1259,20 @@ def create_app() -> FastAPI:
         """engine: auto (Docling when the file has a Docling conversion, else built-in), docling (converts it first if
         needed) or builtin."""
         return _start_parse(doc_id, True if activate else None, engine)
+
+    @app.post("/api/specs/reparse-outdated")
+    def reparse_outdated(engine: str | None = Query(None)):
+        """Admin: reparse every spec whose active run was made by an older parser version. engine: builtin, docling, auto,
+        or none for the engine its active run used. The new runs are not activated: check each and set it active."""
+        if engine is not None and engine not in store.ENGINES:
+            raise HTTPException(400, f"Unknown parser engine '{engine}'; use one of: {', '.join(store.ENGINES)}.")
+        out = []
+        for doc_id in store.reparse_available(conn()):
+            r = row(conn(), "SELECT stats_json FROM parse_run WHERE document_id=? AND active=1", (doc_id,))
+            used = (jloads(r["stats_json"], {}) or {}).get("engine") if r else None
+            out.append({"document_id": doc_id, **_start_parse(doc_id, None, engine or ("docling" if used == "docling" else "builtin"))})
+        audit(f"Reparse of {len(out)} spec(s) made by an older parser requested", engine=engine or "same as before", count=len(out))
+        return {"count": len(out), "jobs": out}
 
     @app.post("/api/specs/from-conversion/{job_id}")
     def spec_from_conversion(job_id: int):
