@@ -674,7 +674,7 @@ def parse_pdf(path: str, family: str | None = None, version: str | None = None, 
     first_text = "\f".join(doc[i].get_text("text") for i in range(min(3, doc.page_count)))
     meta_title = (doc.metadata or {}).get("title") or ""
     doc.close()
-    f2, v2 = detect_identity(first_text, os.path.basename(path))
+    f2, v2 = detect_identity(first_text, os.path.basename(path), meta_title)
     family = family or f2 or "unknown"
     version = version or v2 or "0"
 

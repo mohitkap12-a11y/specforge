@@ -30,6 +30,7 @@ from .ingest.normalize import (
     parse_value_range,
     slug,
 )
+from .ingest.families import NVME_CONTEXT, protocol_of
 from .refs import load_set_irs
 
 CS_BY_FAMILY = {"nvme-nvm-cs": "nvm", "nvme-zns-cs": "zns", "nvme-kv-cs": "kv", "nvme-slm-cs": "slm", "nvme-base": "base"}
@@ -109,6 +110,9 @@ def _opcode_queue(ir: dict, t: dict) -> tuple[str, str, str] | None:
     cap = norm_title(t["caption"])
     if "control primitive" in cap or "out-of-band" in cap or "pcie" in cap:
         return None
+    proto = protocol_of(ir["family"])
+    if proto is not None and proto not in NVME_CONTEXT:
+        return proto, "cmd", ir["family"]          # CXL, PCIe, DMTF ...: their own command space, never NVMe's
     if "admin" in cap:
         return "pcie", "admin", "base"
     if ir["family"] == "nvme-mi":
@@ -154,7 +158,9 @@ def build_catalog(conn: sqlite3.Connection, set_id: int) -> dict[str, Any]:
                 if re.match(r"^(reserved|vendor)", norm_title(name)):
                     continue            # reserved / vendor-specific ranges are not catalogued commands (unknown opcodes are reported)
                 for opc in range(rg[0], min(rg[1], rg[0] + 255) + 1):
-                    if iface == "mi":
+                    if queue == "cmd":
+                        key = f"cmd:{cs}:{opc:02X}"
+                    elif iface == "mi":
                         key = f"cmd:mi:{opc:02X}"
                     elif queue == "admin":
                         key = f"cmd:admin:{opc:02X}"
