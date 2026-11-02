@@ -25,6 +25,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # version comparison it started, one Activity-log line per call, and the URL agents use (empty: the address the UI is reached at)
     "mcp": {"enabled": True, "rate_limit_per_min": 120, "compare_wait_s": 60, "log_calls": True, "public_url": "",
             "library_search": True},
+    # staged rollout: the Coverage Tool is an internal preview for admins until an admin releases it to every user
+    "features": {"coverage_released": False},
 }
 
 

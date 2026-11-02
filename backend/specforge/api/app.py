@@ -19,10 +19,11 @@ from urllib.parse import quote, urlsplit
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__, auth, catalog, cmddb, compare, compare_ai, convert, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
-from .. import mcp_metrics, mcp_server, specquery
+from .. import backup, mcp_metrics, mcp_server, specquery
 from ..crossgen import generate_cross_scenarios
 from ..convert import ENGINES, ConversionError, SUPPORTED, convert_file, output_name
 from ..core import config
@@ -57,13 +58,18 @@ def safe_join(root: Path, rel: str) -> Path | None:
 # Reachable without a session (the login page needs them). Everything else under /api/ needs an active account.
 PUBLIC = {("POST", "/api/auth/login"), ("POST", "/api/auth/register"), ("POST", "/api/auth/logout"), ("GET", "/api/auth/me")}
 # Admin only: user management, global settings, wiping shared data.
-ADMIN_ONLY = {("PUT", "/api/settings"), ("GET", "/api/reset"), ("POST", "/api/reset"), ("DELETE", "/api/logs"),
+ADMIN_ONLY = {("PUT", "/api/settings"), ("PUT", "/api/features"), ("GET", "/api/reset"), ("POST", "/api/reset"), ("DELETE", "/api/logs"),
               ("GET", "/api/fs/browse"),     # lists the server's folders: other users type or drop a path instead
               ("GET", "/api/mcp/status"), ("PUT", "/api/mcp/settings"), ("POST", "/api/mcp/reindex"), ("POST", "/api/mcp/reset-stats"),
-              ("POST", "/api/convert/markdown/reconvert-outdated"), ("POST", "/api/specs/reparse-outdated")}
+              ("POST", "/api/convert/markdown/reconvert-outdated"), ("POST", "/api/specs/reparse-outdated"),
+              ("GET", "/api/backup/options"), ("GET", "/api/backup/export"), ("POST", "/api/backup/import")}
 ADMIN_PREFIX = "/api/users"
 # Every /api/mcp/ route but the guide's (metrics, misses & errors, call log, settings) is for admins
 MCP_PREFIX, MCP_PUBLIC = "/api/mcp/", {"/api/mcp/info"}
+# The Coverage Tool's own routes: admins only until an admin releases the tool (settings.features.coverage_released).
+# Specs, parse runs and the explorer are not here: the converter, Compare and the MCP endpoint share them.
+COVERAGE_PREFIXES = ("/api/sets", "/api/cmddb", "/api/coverage", "/api/scenarios", "/api/cross")
+FEATURES = {"coverage_released": bool}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # With login turned off (`serve --no-auth`, localhost only) the single local user is the admin.
 LOCAL_USER = {"id": 0, "username": "local", "display_name": None, "role": "admin", "status": "active"}
@@ -96,6 +102,14 @@ def client_ip(req: Request) -> str:
 def admin_only(method: str, path: str) -> bool:
     return ((method, path) in ADMIN_ONLY or path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/")
             or (path.startswith(MCP_PREFIX) and path not in MCP_PUBLIC))
+
+
+def coverage_route(path: str) -> bool:
+    return any(path == p or path.startswith(p + "/") for p in COVERAGE_PREFIXES)
+
+
+def coverage_released(conn) -> bool:
+    return bool((config.load_settings(conn).get("features") or {}).get("coverage_released"))
 
 
 class McpDispatch:
@@ -142,6 +156,9 @@ class AuthGate:
             return await JSONResponse({"detail": "sign in required"}, 401)(scope, receive, send)
         if user is not None and user["role"] != "admin" and admin_only(method, path):
             return await JSONResponse({"detail": "only an admin can do this"}, 403)(scope, receive, send)
+        if (user is not None and user["role"] != "admin" and coverage_route(path)
+                and not await run_in_threadpool(lambda: coverage_released(get_conn()))):
+            return await JSONResponse({"detail": "the Coverage Tool is coming soon: an admin has not released it yet"}, 403)(scope, receive, send)
         if renewed:          # the server extended the session: extend the browser's cookie too
             cookie, inner = session_cookie(token, is_https(req)), send
 
@@ -179,6 +196,10 @@ def create_app() -> FastAPI:
 
     def settings() -> dict:
         return config.load_settings(conn())
+
+    def features() -> dict:
+        cur = settings().get("features") or {}
+        return {k: bool(cur.get(k)) for k in FEATURES}
 
     def audit(message: str, level: str = "info", **data) -> None:
         u = auth.current_user.get()
@@ -306,8 +327,9 @@ def create_app() -> FastAPI:
     @app.get("/api/auth/me")
     def auth_me():
         u = me()
-        return {"auth": AUTH, "user": public_user(u) if u else None,
-                "pending": auth.pending_count(conn()) if AUTH and u and u["role"] == "admin" else 0}
+        out = {"auth": AUTH, "user": public_user(u) if u else None,
+               "pending": auth.pending_count(conn()) if AUTH and u and u["role"] == "admin" else 0}
+        return {**out, "features": features()} if u else out
 
     @app.post("/api/auth/login")
     def auth_login(request: Request, response: Response, body: Any = Body(...)):
@@ -429,10 +451,28 @@ def create_app() -> FastAPI:
             pc = lg.get("preview_chars", 4000)
             if not (isinstance(pc, int) and not isinstance(pc, bool) and 200 <= pc <= 50_000):
                 raise HTTPException(422, "logging.preview_chars must be a whole number between 200 and 50000")
-        saved = config.save_settings(conn(), body)
+        # rollouts change only through PUT /api/features (audited): a settings form loaded before a rollout must not undo it
+        saved = config.save_settings(conn(), {**body, "features": settings().get("features") or {}})
         eventlog.configure(saved)
         audit("Settings saved", sections=sorted(body) if isinstance(body, dict) else [])
         return saved
+
+    @app.get("/api/features")
+    def get_features():
+        return features()
+
+    @app.put("/api/features")
+    def put_features(body: Any = Body(...)):
+        """An admin releases a feature to every user (or takes it back to an admin-only preview)."""
+        if not isinstance(body, dict) or not body or any(k not in FEATURES for k in body):
+            raise HTTPException(422, f"send one or more of: {', '.join(FEATURES)}")
+        if any(not isinstance(v, bool) for v in body.values()):
+            raise HTTPException(422, "feature flags must be true or false")
+        cur = settings()
+        config.save_settings(conn(), {**cur, "features": {**(cur.get("features") or {}), **body}})
+        for k, v in body.items():
+            audit(f"Feature rollout: {k}={v}" + (" (released to every user)" if v else " (admins only)"), **{k: v})
+        return features()
 
     # ------------------------------------------------------------------ MCP endpoint (/mcp): guide for everyone, status for admins
     MCP_SETTINGS = {"enabled": bool, "log_calls": bool, "rate_limit_per_min": (0, 100_000), "compare_wait_s": (1, 600), "public_url": str,
@@ -2082,6 +2122,66 @@ def create_app() -> FastAPI:
         conn().commit()
         eventlog.emit("info", "system", f"Activity log cleared ({n} events)")
         return {"ok": True, "deleted": n}
+
+    # ------------------------------------------------------------------ backup / export-import (logic in backup.py)
+    MAX_BACKUP_BYTES = int(os.environ.get("SPECFORGE_BACKUP_UPLOAD_MB", "20480")) * 1024 * 1024
+
+    def _backup_guard() -> None:
+        """Like a reset: refused while any job is queued or running, so nothing writes to what is being replaced."""
+        if busy := jobs.active(conn()):
+            raise HTTPException(409, f"{len(busy)} job(s) are still queued or running ("
+                                     + ", ".join(j["label"] or j["type"] for j in busy[:3])
+                                     + "). Cancel them or wait for them to finish, then import.")
+
+    @app.get("/api/backup/options")
+    def backup_options():
+        return {"items": backup.options()}
+
+    @app.get("/api/backup/export")
+    def backup_export(items: str | None = Query(None), include_secrets: bool = Query(False)):
+        """A zip of the selected items (comma-separated; default all) and everything they depend on."""
+        try:
+            selected = backup.parse_items(items)
+        except backup.BackupError as e:
+            raise HTTPException(e.status, str(e)) from None
+        eventlog.drain(1.0)
+        mcp_calls.drain(1.0)
+        fd, tmp = tempfile.mkstemp(prefix="specforge-backup-", suffix=".zip")
+        try:
+            with os.fdopen(fd, "wb") as out:
+                meta = backup.export(config.db_path(), out, selected, include_secrets=include_secrets)
+        except BaseException:
+            os.unlink(tmp)
+            raise
+        audit(f"Backup exported ({', '.join(meta['items'])})", items=meta["items"], files=meta["files"],
+              secrets_included=include_secrets)
+        name = f"specforge-backup-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+        return FileResponse(tmp, media_type="application/zip", filename=name, background=BackgroundTask(os.unlink, tmp))
+
+    @app.post("/api/backup/import")
+    def backup_import(file: UploadFile = File(...), items: str | None = Form(None), replace: bool = Form(False)):
+        """Import a backup zip: the selected items (default: all it holds), merged into this workspace or replacing what it
+        has of them. Applied completely or not at all; see backup.py for the rules."""
+        if file.size is not None and file.size > MAX_BACKUP_BYTES:
+            raise HTTPException(413, f"Backup is larger than {MAX_BACKUP_BYTES // (1024 * 1024)} MB "
+                                     "(raise SPECFORGE_BACKUP_UPLOAD_MB to allow it).")
+        _backup_guard()
+        eventlog.drain(1.0)
+        mcp_calls.drain(1.0)
+        u = me()
+        try:
+            selected = backup.parse_items(items) if items else None
+            result = backup.import_(conn(), file.file, selected, replace=replace, keep_user_id=u["id"] if u else None)
+        except backup.BackupError as e:
+            raise HTTPException(e.status, str(e)) from None
+        if {"specs", "converter"} & set(result["items"]):
+            threading.Thread(target=_mcp_warm_index, name="sf-mcp-index", daemon=True).start()
+        mcp.refresh()
+        eventlog.emit("warn" if replace else "info", "system",
+                      f"Backup imported ({'replace' if replace else 'merge'}): {', '.join(result['items'])}",
+                      user=u["username"] if u else None, rows=sum(result["rows"].values()), files=result["files"],
+                      from_version=result["from_version"], warnings=result["warnings"])
+        return result
 
     # ------------------------------------------------------------------ static UI
     for cand in (Path(__file__).resolve().parents[1] / "web", Path(__file__).resolve().parents[3] / "frontend" / "dist"):

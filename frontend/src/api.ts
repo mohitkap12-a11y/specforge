@@ -1,5 +1,5 @@
 import type { McpCallRow, McpFilters, McpInfo, McpIssue, McpIssueDetail, McpIssueStatus, McpMetrics, McpSettings, McpStatus } from "./types";
-import type { AppUser, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, ParserEngine, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, ResetPreview, ResetScope, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
+import type { AppUser, Features, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, ParserEngine, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, ResetPreview, ResetScope, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -93,6 +93,7 @@ export const api = {
   correctTable: (run: number, key: string, header: string[], rows: string[][]) => req<{ note: string }>("PUT", `/api/runs/${run}/tables/correction`, { key, header, rows }),
   settings: () => req<Record<string, any>>("GET", "/api/settings"),
   saveSettings: (b: Record<string, any>) => req<Record<string, any>>("PUT", "/api/settings", b),
+  setFeatures: (b: Partial<Features>) => req<Features>("PUT", "/api/features", b),
   providerModels: (name: string) => req<{ ok: boolean; error?: string; models: { id: string; provider?: string }[]; health?: unknown }>("GET", `/api/providers/${name}/models`),
   health: () => req<{ ok: boolean; version: string; workspace: string; parser_version: string; reparse_available: unknown[] }>("GET", "/api/health"),
   putMapping: (id: number, mapping: unknown) => req("PUT", `/api/cmddb/${id}/mapping`, mapping),
@@ -145,6 +146,31 @@ export const api = {
   resetPreview: (scope: ResetScope) => req<ResetPreview>("GET", `/api/reset${qs({ scope })}`),
   resetWorkspace: (scope: ResetScope) => req<{ ok: boolean; deleted: Record<string, number> }>("POST", "/api/reset", { scope }),
   clearLogs: () => req<{ deleted: number }>("DELETE", "/api/logs"),
+  backupOptions: () => req<{ items: BackupItem[] }>("GET", "/api/backup/options"),
+  /** Downloads the zip; errors (403, 409, ...) are thrown like any other call instead of opening a tab with raw JSON. */
+  exportBackup: async (items: string[], includeSecrets: boolean) => {
+    const r = await fetch(`/api/backup/export${qs({ items: items.join(","), include_secrets: includeSecrets ? "true" : undefined })}`);
+    if (r.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED));
+    if (!r.ok) {
+      let detail: unknown = r.statusText;
+      try { detail = (await r.json()).detail ?? detail; } catch { /* non-JSON error body */ }
+      throw new ApiError(r.status, errorText(detail));
+    }
+    const name = /filename="?([^";]+)"?/.exec(r.headers.get("content-disposition") ?? "")?.[1] ?? "specforge-backup.zip";
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(await r.blob());
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+  },
+  /** items undefined: everything the backup holds. replace: clear those items here first (otherwise merge). */
+  importBackup: (file: File, items: string[] | undefined, replace: boolean) => {
+    const f = new FormData();
+    f.append("file", file);
+    if (items) f.append("items", items.join(","));
+    f.append("replace", replace ? "true" : "false");
+    return req<BackupImportResult>("POST", "/api/backup/import", f);
+  },
   activeJobs: () => req<Job[]>("GET", "/api/jobs?state=active"),
   jobs: () => req<Job[]>("GET", "/api/jobs"),
   job: (id: number) => req<Job>("GET", `/api/jobs/${id}`),
@@ -181,3 +207,6 @@ export const mcpCsvUrl = (f: McpFilters) => `/api/mcp/calls.csv${mcpQuery(f)}`;
 export const fileUrl = (docId: number) => `/api/documents/${docId}/file`;
 
 export const logStreamUrl = (f: { after_id?: number; level?: string; source?: string; job_id?: number }) => `/api/logs/stream${qs(f)}`;
+
+export type BackupItem = { id: string; label: string; requires: string[]; dirs: string[]; mergeable: boolean };
+export type BackupImportResult = { ok: boolean; items: string[]; rows: Record<string, number>; files: number; warnings: string[]; from_version?: string };

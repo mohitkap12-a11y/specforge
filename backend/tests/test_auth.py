@@ -193,3 +193,42 @@ def test_sign_in_off_needs_a_localhost_host(ws, monkeypatch):
     monkeypatch.setenv("SPECFORGE_AUTH", "1")
     with pytest.raises(SystemExit, match="localhost"):
         cli.main(["serve", "--host", "0.0.0.0", "--no-auth"])
+
+
+def test_coverage_tool_is_admin_only_until_released(app):
+    from specforge import auth
+    from specforge.core.db import get_conn
+
+    auth.create_user(get_conn(), "erin", "erinpass1", status="active")
+    with client(app) as admin, client(app) as c:
+        login(admin, "root", "rootpass1"); login(c, "erin", "erinpass1")
+        assert c.get("/api/auth/me").json()["features"] == {"coverage_released": False}
+        for path in ("/api/sets", "/api/cmddb", "/api/coverage/runs", "/api/cross/angles"):
+            assert c.get(path).status_code == 403, path
+            assert admin.get(path).status_code == 200, path
+        assert c.post("/api/sets", json={"name": "x", "document_ids": []}).status_code == 403
+        # the converter, Compare and the spec library stay open to everyone
+        assert c.get("/api/specs").status_code == 200
+        assert c.get("/api/compare").status_code == 200
+        # only an admin releases it
+        assert c.put("/api/features", json={"coverage_released": True}).status_code == 403
+        assert admin.put("/api/features", json={"coverage_released": "yes"}).status_code == 422
+        assert admin.put("/api/features", json={"other": True}).status_code == 422
+        assert admin.put("/api/features", json={"coverage_released": True}).json() == {"coverage_released": True}
+        assert c.get("/api/auth/me").json()["features"] == {"coverage_released": True}
+        assert c.get("/api/sets").status_code == 200
+        # saving the settings form (loaded before the rollout) does not undo it
+        stale = admin.get("/api/settings").json()
+        stale["features"] = {"coverage_released": False}
+        assert admin.put("/api/settings", json=stale).status_code == 200
+        assert c.get("/api/sets").status_code == 200
+        # and it can be taken back to an admin-only preview
+        assert admin.put("/api/features", json={"coverage_released": False}).status_code == 200
+        assert c.get("/api/sets").status_code == 403
+
+
+def test_no_auth_local_admin_always_has_coverage(ws):
+    from specforge.api.app import create_app
+
+    with TestClient(create_app()) as c:
+        assert c.get("/api/sets").status_code == 200
