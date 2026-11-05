@@ -297,7 +297,9 @@ table.t { width: 100%; border-collapse: collapse; }
 @media (prefers-reduced-motion: reduce) { * { animation-duration: .01ms !important; transition-duration: .01ms !important; } }
 
 /* ---------- home: the three tools ---------- */
-.tools { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
+.tools { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }    /* four tools: 2 × 2, one column on narrow screens, 4 across on wide ones */
+@media (max-width: 760px) { .tools { grid-template-columns: 1fr; } }
+@media (min-width: 1700px) { .tools { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 .tool { display: flex; flex-direction: column; gap: 10px; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); min-width: 0; }
 .tool h2 { margin: 2px 0 0; font-size: 18px; } .tool-tag { margin: 0; color: var(--text-2); }
 .tool ul { margin: 4px 0 14px; padding-left: 18px; color: var(--text-2); font-size: 13px; display: grid; gap: 5px; }
@@ -477,3 +479,26 @@ a.btn-link.sm { height: 28px; padding: 0 9px; font-size: 12px; } a.btn-link:hove
 @media (max-width: 900px) { .mcpa-detail-grid { grid-template-columns: minmax(0, 1fr); } }
 .mcpa-note { font-family: var(--font); width: 100%; height: auto; padding: 8px 10px; margin: 8px 0; resize: vertical; }
 .mcpa-pre { max-height: 240px; margin: 4px 0 8px; font-size: 12px; }
+
+/* Specs: a parse run's error behind a chip (hover for the message, click to keep it open) and the show-all-parses toggle */
+.err-chip-wrap { position: relative; display: inline-flex; }
+button.err-chip { height: 22px; padding: 0 7px; gap: 4px; color: var(--bad); background: var(--bad-bg); border-color: transparent; }
+.err-pop { position: absolute; z-index: 30; top: calc(100% + 4px); left: 0; width: min(460px, 80vw); padding: 10px; border-radius: 8px;
+  background: var(--surface); border: 1px solid var(--border-strong); box-shadow: var(--shadow-lg); }
+.err-pop pre { margin: 6px 0 0; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: var(--bad); font-size: 12px; }
+button.link-btn { margin-top: 6px; background: none; border-color: transparent; color: var(--text-2); gap: 4px; }
+button.link-btn:hover { color: var(--text); background: var(--hover); }
+/* Copy buttons on code blocks: "Copy" turns into "Copied" for a moment */
+button.copy-btn { gap: 4px; background: var(--surface); border-color: var(--border); }
+button.copy-btn.copied { color: var(--ok); background: var(--ok-bg); border-color: transparent; }
+button.copy-btn.failed { color: var(--bad); background: var(--bad-bg); border-color: transparent; }
+/* Collapsible sections (Compare: AI summary, commands and data structures); collapsed by default */
+details.fold > summary { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; padding: 2px 0; flex-wrap: wrap; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary .fold-title { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+details.fold.card > summary .fold-title { font-size: 15px; }
+details.fold > summary .fold-chev { transition: transform .15s; color: var(--muted); flex: none; }
+details.fold[open] > summary .fold-chev { transform: rotate(90deg); }
+details.fold > .fold-body { margin-top: 10px; }
+details.fold:not(.card) { border-top: 1px solid var(--border); padding: 8px 0 2px; }
+details.fold:not(.card):first-of-type { border-top: 0; }

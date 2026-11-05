@@ -47,6 +47,8 @@ describe("tool separation", () => {
     expect(of("coverage")).toEqual(expect.arrayContaining(["/workflow", "/specs", "/catalog", "/cmddb", "/coverage", "/reports"]));
     expect(of("coverage")).not.toContain("/compare");
   });
+  it("lists the Coverage Tool fourth, after the converter, compare and MCP", () =>
+    expect(GROUPS.filter((g) => g.key !== "home").map((g) => g.key)).toEqual(["convert", "compare", "agents", "coverage"]));
   it("titles every tool group", () => expect(GROUPS.filter((g) => g.key !== "home").every((g) => g.title)).toBe(true));
 });
 
@@ -68,15 +70,17 @@ describe("coverage tool rollout", () => {
     expect(pages.filter((n) => n.group === "coverage")).toEqual([COMING_SOON]);
     for (const p of COVERAGE_PAGES) expect(pages.some((n) => n.to === p && !n.soon)).toBe(false);
   });
-  it("keeps the spec library Compare needs, next to Spec Compare", () => {
+  it("keeps the spec library (Specs, Explorer) inside the Coverage Tool", () => {
+    expect(COVERAGE_PAGES).toEqual(expect.arrayContaining(["/specs", "/explorer"]));
     const pages = navFor(false, "soon");
-    expect(pages.filter((n) => n.group === "compare").map((n) => n.to)).toEqual(["/compare", "/specs", "/explorer"]);
-    expect(COVERAGE_PAGES).not.toContain("/specs");
+    expect(pages.filter((n) => n.group === "compare").map((n) => n.to)).toEqual(["/compare"]);
+    expect(pages.some((n) => n.to === "/specs" || n.to === "/explorer")).toBe(false);
   });
   it("recognises coverage pages by path", () => {
     expect(isCoveragePage("/coverage")).toBe(true);
     expect(isCoveragePage("/sets/3")).toBe(true);
-    expect(isCoveragePage("/specs")).toBe(false);
+    expect(isCoveragePage("/specs")).toBe(true);
+    expect(isCoveragePage("/explorer")).toBe(true);
     expect(isCoveragePage("/compare")).toBe(false);
   });
 });

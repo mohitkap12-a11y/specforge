@@ -10,6 +10,7 @@ import { useDebounced } from "../hooks";
 import { bufferPaused, trimRows } from "../util";
 import type { Job, LogEvent, LogLevel } from "../types";
 import { queueText } from "../components/jobs";
+import { copyText } from "../clipboard";
 
 const MAX_ROWS = 4000;       // kept while following the live tail
 const HARD_MAX_ROWS = 20000; // ceiling while the user is reading history
@@ -31,7 +32,7 @@ const SKIP = new Set(["prompt", "response", "traceback"]);
 function Detail({ e }: { e: LogEvent }) {
   const toast = useToast();
   const d = e.data;
-  const copy = () => navigator.clipboard?.writeText(JSON.stringify(e, null, 2)).then(() => toast.push({ title: "Copied event JSON", tone: "ok" }), () => {});
+  const copy = () => copyText(JSON.stringify(e, null, 2)).then(() => toast.push({ title: "Copied event JSON", tone: "ok" }), () => {});
   const entries = Object.entries(d).filter(([k]) => !SKIP.has(k));
   return (
     <div className="logdetail">

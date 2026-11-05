@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, PlugZap, RefreshCw } from "lucide-react";
@@ -8,6 +8,7 @@ import { useAuth } from "../components/auth";
 import { useToast } from "../components/Toasts";
 import { Field, Loading, PageHeader, Segmented, Switch } from "../components/ui";
 import { CallLogTab, IssuesTab, MetricsTab } from "./McpAdmin";
+import { copyText } from "../clipboard";
 
 type Client = "opencode" | "roo" | "claude" | "other";
 
@@ -35,15 +36,21 @@ const AGENT_RULE = `When you need details from the NVMe / NVMe-MI specifications
 status values, or what changed between versions), use the specforge MCP tools instead of answering from memory.
 Prefer get_command_field / get_structure / diff over search_spec, and cite the figure or section and the spec version you used.`;
 
-function CopyBlock({ code }: { code: string }) {
-  const [done, setDone] = useState(false);
+/** A command or prompt with a Copy button that turns into "Copied" (or says it failed) for a moment. */
+export function CopyBlock({ code }: { code: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const timer = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const flash = (s: "copied" | "failed") => { setState(s); clearTimeout(timer.current); timer.current = setTimeout(() => setState("idle"), 2000); };
   return (
     <div style={{ position: "relative" }}>
-      <pre style={{ paddingRight: 44 }}>{code}</pre>
-      <button className="sm ghost" aria-label="Copy" title="Copy" style={{ position: "absolute", top: 4, right: 4 }}
-        onClick={() => navigator.clipboard.writeText(code).then(() => { setDone(true); setTimeout(() => setDone(false), 1500); })}>
-        {done ? <Check size={14} /> : <Copy size={14} />}
+      <pre style={{ paddingRight: 96 }}>{code}</pre>
+      <button className={`sm ghost copy-btn ${state}`} aria-label={state === "copied" ? "Copied" : "Copy"} title={state === "failed" ? "Copy failed: select the text and copy it by hand" : "Copy"}
+        style={{ position: "absolute", top: 4, right: 4 }}
+        onClick={() => copyText(code).then(() => flash("copied"), () => flash("failed"))}>
+        {state === "copied" ? <><Check size={14} /> Copied</> : state === "failed" ? <>Copy failed</> : <><Copy size={14} /> Copy</>}
       </button>
+      <span className="sr-only" aria-live="polite">{state === "copied" ? "Copied to the clipboard" : ""}</span>
     </div>
   );
 }

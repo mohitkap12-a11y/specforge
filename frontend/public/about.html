@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>About SpecForge</title>
-<meta name="description" content="SpecForge: three offline tools for NVMe / NVMe-MI specifications. Convert a spec to Markdown, compare two versions, and measure test coverage." />
+<meta name="description" content="SpecForge: four offline tools for NVMe / NVMe-MI specifications. Convert a spec to Markdown, compare two versions, serve the specs to coding agents over MCP, and measure test coverage." />
 <style>
   :root {
     --bg: #05060d; --bg2: #0b0d1a; --card: rgba(255,255,255,.04); --line: rgba(255,255,255,.10);
@@ -144,27 +144,28 @@
 
 <section id="top" data-title="Intro">
   <div class="eyebrow rv">NVMe · NVMe-MI · fully offline</div>
-  <h1 class="rv" style="--d:.1s">Three tools for<br /><span class="grad">NVMe specifications.</span></h1>
-  <p class="lead rv" style="--d:.2s">Turn a spec into <b>Markdown</b>, see exactly what a new revision <b>changed</b>, and prove what your tests <b>cover</b>. Each tool stands on its own; compare and coverage share the library of specs you upload once.</p>
+  <h1 class="rv" style="--d:.1s">Four tools for<br /><span class="grad">NVMe specifications.</span></h1>
+  <p class="lead rv" style="--d:.2s">Turn a spec into <b>Markdown</b>, see exactly what a new revision <b>changed</b>, let your coding agent <b>look the specs up</b> over MCP, and prove what your tests <b>cover</b>. Each tool stands on its own; they share the library of specs you upload once.</p>
   <div class="cta rv" style="--d:.3s">
-    <a class="btn primary" href="#tools">See the three tools ↓</a>
+    <a class="btn primary" href="#tools">See the four tools ↓</a>
     <a class="btn" href="/">Open the workbench</a>
   </div>
   <div class="hint rv" style="--d:.5s"><i></i> Scroll, or use ↑ ↓ / Space / PageUp / PageDown</div>
 </section>
 
-<section id="tools" data-title="Three tools">
-  <div class="eyebrow rv">One workbench, three separate tools</div>
+<section id="tools" data-title="Four tools">
+  <div class="eyebrow rv">One workbench, four separate tools</div>
   <h2 class="rv">Pick the job. Each tool has its own place in the app.</h2>
-  <div class="grid g3">
-    <a class="card rv" href="#convert" style="text-decoration:none"><div class="ic">📄</div><h3>Spec Converter</h3><p>Any PDF, DOC or DOCX into one clean Markdown file. Headings, lists, tables, code, links and footnotes kept; page furniture dropped. Nothing is stored.</p></a>
-    <a class="card rv" href="#compare" style="--d:.08s;text-decoration:none"><div class="ic">🔀</div><h3>Spec Compare</h3><p>Choose two versions from your library, say NVMe 2.3 and 2.4, and get every new, removed and modified section, table and requirement, ranked by impact, with an optional AI summary.</p></a>
-    <a class="card rv" href="#why" style="--d:.16s;text-decoration:none"><div class="ic">🎯</div><h3>Coverage Tool</h3><p>Build the list of everything that can be covered, derive scenarios from what your tests executed, and report covered / partial / not covered with evidence.</p></a>
+  <div class="grid g4">
+    <a class="card rv" href="#convert" style="text-decoration:none"><div class="ic">📄</div><h3>Markdown conversion</h3><p>Any PDF, DOC or DOCX into one clean Markdown file. Headings, lists, tables, code, links and footnotes kept; page furniture dropped. Converted files stay in a shared library to preview, copy or download.</p></a>
+    <a class="card rv" href="#compare" style="--d:.08s;text-decoration:none"><div class="ic">🔀</div><h3>Comparison tool</h3><p>Choose two versions from your library, say NVMe 2.3 and 2.4, and get every new, removed and modified section, table and requirement, ranked by impact, with an optional AI summary.</p></a>
+    <a class="card rv" href="#mcp" style="--d:.16s;text-decoration:none"><div class="ic">🤖</div><h3>MCP for agents</h3><p>One MCP endpoint for OpenCode, Roo Code and Claude Code: commands, fields, data structures, sections and what changed between versions, with page citations, instead of answers from memory.</p></a>
+    <a class="card rv" href="#why" style="--d:.24s;text-decoration:none"><div class="ic">🎯</div><h3>Coverage Tool</h3><p>Build the list of everything that can be covered, derive scenarios from what your tests executed, and report covered / partial / not covered with evidence.</p></a>
   </div>
 </section>
 
-<section id="convert" data-title="Spec Converter">
-  <div class="eyebrow rv">Tool 1 · Spec Converter</div>
+<section id="convert" data-title="Markdown conversion">
+  <div class="eyebrow rv">Tool 1 · Markdown conversion</div>
   <h2 class="rv">Any spec document to a clean, functional Markdown file.</h2>
   <div class="vs">
     <div class="card good rv" style="--d:.1s"><h3>Kept</h3>
@@ -172,11 +173,11 @@
     <div class="card rv" style="--d:.2s"><h3>Dropped</h3>
       <ul><li>Running page headers, footers and page numbers</li><li>Table-of-contents dot leaders</li><li>Layout noise such as hyphenated line breaks</li><li>Markdown-looking text is escaped, so a spec value stays literal</li></ul></div>
   </div>
-  <p class="note rv">Upload in the web UI (preview, copy, download), call <code>POST /api/convert/markdown</code>, or run <code>specforge to-md spec.pdf</code>. Scanned PDFs need OCR first; legacy .doc needs LibreOffice on the machine.</p>
+  <p class="note rv">Upload in the web UI (preview, copy, download; files converted with Docling are also ready for parsing), call <code>POST /api/convert/markdown</code>, or run <code>specforge to-md spec.pdf</code>. Scanned PDFs need OCR first; legacy .doc needs LibreOffice on the machine.</p>
 </section>
 
-<section id="compare" data-title="Spec Compare">
-  <div class="eyebrow rv">Tool 2 · Spec Compare</div>
+<section id="compare" data-title="Comparison tool">
+  <div class="eyebrow rv">Tool 2 · Comparison tool</div>
   <h2 class="rv">What does the new revision actually change?</h2>
   <div class="pipe">
     <div class="node rv" style="--d:.05s"><span class="n">01</span><h3>Pick</h3><p>Choose a spec and two versions from the library in drop-downs.</p></div>
@@ -188,8 +189,20 @@
   <p class="note rv">Code finds and classifies every change; AI only describes them, and the full change list stays the authoritative record. Export the comparison as a Markdown report, or run <code>specforge compare nvme-base 2.3 2.4</code>.</p>
 </section>
 
+<section id="mcp" data-title="MCP for agents">
+  <div class="eyebrow rv">Tool 3 · MCP for agents</div>
+  <h2 class="rv">Your coding agent asks the specs instead of guessing.</h2>
+  <div class="pipe">
+    <div class="node rv" style="--d:.05s"><span class="n">01</span><h3>Connect</h3><p>Point OpenCode, Roo Code or Claude Code at the server's <code>/mcp</code> endpoint. No account or key; copy-ready setup in the app.</p></div>
+    <div class="node rv" style="--d:.15s"><span class="n">02</span><h3>Look up</h3><p>Commands and their Command Dwords, fields and value tables, data structures and log pages, sections and figures.</p></div>
+    <div class="node rv" style="--d:.25s"><span class="n">03</span><h3>Cite</h3><p>Every answer names the spec version, figure or section and page, built from the parsed model, not flat text.</p></div>
+    <div class="node rv" style="--d:.35s"><span class="n">04</span><h3>What changed</h3><p>Differences between versions, computed once on the server and shared by every agent that asks.</p></div>
+  </div>
+  <p class="note rv">Read-only and open to the network; admins can turn it off, rate-limit it, and see which tools agents call, what they miss and what fails. Also available over stdio with <code>specforge mcp</code>.</p>
+</section>
+
 <section id="why" data-title="Coverage Tool">
-  <div class="eyebrow rv">Tool 3 · Coverage Tool · the problem</div>
+  <div class="eyebrow rv">Tool 4 · Coverage Tool · the problem</div>
   <h2 class="rv">Coverage of a 1,000-page standard is judged by hand today.</h2>
   <div class="vs">
     <div class="card bad rv" style="--d:.1s"><h3>Without SpecForge</h3>
@@ -214,7 +227,7 @@
 </section>
 
 <section id="trust" data-title="Trust">
-  <div class="eyebrow rv">All three tools · the design rule</div>
+  <div class="eyebrow rv">All four tools · the design rule</div>
   <h2 class="rv">Code decides. <span class="grad">AI only drafts.</span></h2>
   <p class="lead rv" style="--d:.1s">A coverage number or a change list you cannot reproduce is worthless. Changes, scenarios and verdicts come from deterministic code. AI only describes: it summarises a version comparison, describes executed flows, proposes the requirements they exercise and suggests scenarios for gaps; nothing it writes counts until a person approves it.</p>
   <div class="rule rv" style="--d:.2s">
@@ -267,7 +280,8 @@
 "<span class=p>$</span> specforge make-demo ./demo",
 "<span class=p>$</span> specforge ingest demo/*.pdf --set demo",
 "<span class=p>$</span> specforge compare nvme-base 2.3 2.4 --out diff.md  <span class=cm># tool 2: needs two ingested versions</span>",
-"<span class=p>$</span> specforge catalog 1",
+"<span class=p>$</span> specforge mcp      <span class=cm># tool 3: MCP over stdio (the server also serves /mcp)</span>",
+"<span class=p>$</span> specforge catalog 1                              <span class=cm># tool 4: coverage</span>",
 "<span class=p>$</span> specforge coverage 1 demo/demo-commands.db --out ./reports",
 "<span class=p>$</span> specforge serve   <span class=cm># UI + API on http://127.0.0.1:8000</span>"
 ]'></pre>
@@ -278,7 +292,7 @@
   <div class="eyebrow rv">At a glance</div>
   <h2 class="rv">Engineered like a product.</h2>
   <div class="grid g4">
-    <div class="card rv"><div class="stat"><span data-count="3">0</span></div><div class="statlbl">tools: convert, compare, coverage</div></div>
+    <div class="card rv"><div class="stat"><span data-count="4">0</span></div><div class="statlbl">tools: convert, compare, MCP, coverage</div></div>
     <div class="card rv" style="--d:.1s"><div class="stat"><span data-count="4">0</span></div><div class="statlbl">report formats: xlsx · html · csv · json</div></div>
     <div class="card rv" style="--d:.2s"><div class="stat"><span data-count="2">0</span></div><div class="statlbl">AI providers: Ollama, OpenCode</div></div>
     <div class="card rv" style="--d:.3s"><div class="stat"><span data-count="0">0</span></div><div class="statlbl">downloads at run time: everything runs locally</div></div>
@@ -292,6 +306,7 @@
   <div class="tl">
     <div class="it done rv"><h3>Parsing, catalog, scenarios, coverage, reports</h3><p>Implemented and tested against synthetic NVMe-style specifications.</p></div>
     <div class="it done rv" style="--d:.05s"><h3>Spec Converter and Spec Compare</h3><p>PDF / DOC / DOCX to Markdown, and version-to-version comparison with an AI summary. Tested on synthetic specifications; real-spec runs come next.</p></div>
+    <div class="it done rv" style="--d:.08s"><h3>MCP for agents</h3><p>One endpoint (Streamable HTTP, SSE and stdio) serving the parsed specs to coding agents, with a setup guide for OpenCode, Roo Code and Claude Code, and call metrics for admins.</p></div>
     <div class="it done rv" style="--d:.1s"><h3>Web workbench, REST API, CLI, live activity log</h3><p>Complete UI checked in a browser against the demo data.</p></div>
     <div class="it next rv" style="--d:.2s"><h3>Run on the real NVMe Base, NVM CS and MI specifications</h3><p>Next milestone: verify parsing against the ratified PDFs and confirm the NVMe-MI header layout.</p></div>
     <div class="it rv" style="--d:.3s"><h3>Roll out against production command logs</h3><p>Produce the first measured coverage baseline and track it release over release.</p></div>

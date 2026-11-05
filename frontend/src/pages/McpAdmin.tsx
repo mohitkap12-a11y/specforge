@@ -7,6 +7,7 @@ import type { McpCallRow, McpFilters, McpIssue, McpIssueDetail, McpIssueStatus, 
 import { useToast } from "../components/Toasts";
 import { Loading, Segmented } from "../components/ui";
 import { CellBar, DayBars, LatencyLines, OutcomeBars, OutcomeMix, WeekHeatmap } from "../components/McpCharts";
+import { copyText } from "../clipboard";
 import {
   ago, approxTokens, callText, delta, fmtChars, fmtDuration, fmtInt, fmtMs, fmtPct, OUTCOME_LABEL, OUTCOME_TONE, STATUS_TONE, when,
 } from "../mcpFormat";
@@ -269,7 +270,7 @@ function IssueDetail({ fp, range }: { fp: string; range: McpRange }) {
             value={note ?? d.note ?? ""} onChange={(e) => setNote(e.target.value)} />
           <div className="row">
             <button className="primary sm" disabled={note === null || save.isPending} onClick={() => save.mutate({ note: note ?? "" })}>Save note</button>
-            <button className="sm" onClick={() => navigator.clipboard.writeText(issueReport(d)).then(() => toast.push({ title: "Report copied as Markdown", tone: "ok" }))}><Copy size={13} /> Copy report</button>
+            <button className="sm" onClick={() => copyText(issueReport(d)).then(() => toast.push({ title: "Report copied as Markdown", tone: "ok" }), (e) => toast.push({ title: "Copy failed", description: String(e?.message ?? e), tone: "bad" }))}><Copy size={13} /> Copy report</button>
             <button className="sm" onClick={() => set({ fingerprint: fp, outcome: undefined, reason: undefined }, "calls")}>All {d.count} calls</button>
             <a className="btn-link sm" href={mcpCsvUrl({ range, fingerprint: fp })} download><Download size={13} /> CSV</a>
           </div>
@@ -351,6 +352,7 @@ export function IssuesTab() {
 // ---------------------------------------------------------------------------------------------------------------- Call log
 
 function CallRow({ c, open, onToggle }: { c: McpCallRow; open: boolean; onToggle: () => void }) {
+  const toast = useToast();
   const [, set] = useMcpFilters();
   return (
     <>
@@ -379,7 +381,7 @@ function CallRow({ c, open, onToggle }: { c: McpCallRow; open: boolean; onToggle
               <div className="row" style={{ marginTop: 8 }}>
                 {c.fingerprint && <button className="sm" onClick={() => set({ fingerprint: undefined, outcome: undefined, issue: c.fingerprint!, status: "all" }, "issues")}>Open its group</button>}
                 <button className="sm" onClick={() => set({ ip: c.ip })}>Only this client</button>
-                <button className="sm" onClick={() => navigator.clipboard.writeText(callText(c.tool, c.args))}><Copy size={13} /> Copy call</button>
+                <button className="sm" onClick={() => copyText(callText(c.tool, c.args)).then(() => toast.push({ title: "Call copied", tone: "ok" }), (e) => toast.push({ title: "Copy failed", description: String(e?.message ?? e), tone: "bad" }))}><Copy size={13} /> Copy call</button>
               </div>
             </div>
           </div>

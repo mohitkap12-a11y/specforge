@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, Download, GitCompareArrows, Trash2 } from "lucide-react";
+import { Bot, ChevronRight, Download, GitCompareArrows, Trash2 } from "lucide-react";
 import { api } from "../api";
 import { Empty, ErrorNote, Loading, PageHeader, Pager, Switch } from "../components/ui";
 import { isActive, useJobs } from "../components/jobs";
@@ -99,11 +99,24 @@ function ChangeRow({ c }: { c: CompareChange }) {
   );
 }
 
+/** A section that starts collapsed: its title (and a short summary of what is inside) stays visible. `open`/`onOpen` make it controlled. */
+function Fold({ title, meta, children, card, open, onOpen }: {
+  title: ReactNode; meta?: ReactNode; children: ReactNode; card?: boolean; open?: boolean; onOpen?: (open: boolean) => void;
+}) {
+  return (
+    <details className={`fold ${card ? "card" : ""}`} open={open} onToggle={(e) => onOpen?.((e.currentTarget as HTMLDetailsElement).open)}>
+      <summary><ChevronRight size={15} className="fold-chev" /><span className="fold-title">{title}</span>{meta && <span className="muted small">{meta}</span>}</summary>
+      <div className="fold-body">{children}</div>
+    </details>
+  );
+}
+
 function Points({ items }: { items: AIPoint[] }) {
   return <ul>{items.map((p, i) => <li key={i}><ImpactBadge impact={p.impact} /> <strong>{p.title}</strong>. {p.detail}</li>)}</ul>;
 }
 
-function Summary({ comp }: { comp: Comparison }) {
+/** The top card: the overview, Export, and the button that writes the AI summary (shown below in its own collapsed section). */
+function Summary({ comp, onAiReady }: { comp: Comparison; onAiReady: () => void }) {
   const qc = useQueryClient();
   const { track, jobs } = useJobs();
   const [waiting, setWaiting] = useState(false);     // the submitted summary job has not finished yet
@@ -111,7 +124,10 @@ function Summary({ comp }: { comp: Comparison }) {
     mutationFn: (redo: boolean) => api.compareSummarize(comp.id, redo),
     onSuccess: (r) => {
       setWaiting(true);
-      track(r.job, `AI summary of comparison #${comp.id}`, () => { setWaiting(false); qc.invalidateQueries({ queryKey: ["comparison", comp.id] }); });
+      track(r.job, `AI summary of comparison #${comp.id}`, () => {
+        setWaiting(false);
+        void qc.invalidateQueries({ queryKey: ["comparison", comp.id] }).then(onAiReady);    // show what was just asked for
+      });
     },
   });
   const writing = waiting || run.isPending || jobs.some((j) => j.type === "compare-summary" && isActive(j) && j.payload?.compare_id === comp.id);   // also covers a job started before a page reload
@@ -125,20 +141,28 @@ function Summary({ comp }: { comp: Comparison }) {
       </div>
       <p style={{ margin: "0 0 8px" }}>{comp.overview}</p>
       <ErrorNote error={run.error} />
-      {writing && !ai && <div className="muted small">The AI summary is being written; follow it in <Link to="/activity?lens=ai">Activity</Link>. It appears here when ready.</div>}
-      {ai && (
-        <div className="ai-box">
-          <div className="muted small" style={{ marginBottom: 6 }}>AI summary · {ai.meta.provider}/{ai.meta.model}. It describes the detected changes below; the list is the authoritative record.</div>
-          <p style={{ margin: 0 }}>{ai.overview}</p>
-          {ai.breaking.length > 0 && <><h3>May break existing implementations or tests</h3><ul>{ai.breaking.map((b, i) => <li key={i}>{b}</li>)}</ul></>}
-          {ai.highlights.length > 0 && <><h3>Highlights</h3><Points items={ai.highlights} /></>}
-          {ai.upgrade_notes.length > 0 && <><h3>What to review next</h3><ul>{ai.upgrade_notes.map((u, i) => <li key={i}>{u}</li>)}</ul></>}
-          {ai.chapters.length > 0 && <details style={{ marginTop: 10 }}><summary className="small">By chapter</summary>
-            {ai.chapters.map((c) => <div key={c.chapter}><h3>{c.chapter} {c.title}</h3><p style={{ margin: "0 0 4px" }}>{c.headline}</p><Points items={c.points} /></div>)}
-          </details>}
-        </div>
-      )}
+      {writing && !ai && <div className="muted small">The AI summary is being written; follow it in <Link to="/activity?lens=ai">Activity</Link>. It appears below when ready.</div>}
     </div>
+  );
+}
+
+function AiSummary({ comp, open, onOpen }: { comp: Comparison; open: boolean; onOpen: (open: boolean) => void }) {
+  const ai = comp.ai;
+  if (!ai) return null;
+  return (
+    <Fold card open={open} onOpen={onOpen} title={<><Bot size={15} /> AI summary</>}
+      meta={`${ai.meta.provider}/${ai.meta.model}${ai.breaking.length ? ` · ${ai.breaking.length} possibly breaking` : ""}`}>
+      <div className="ai-box" style={{ marginBottom: 0 }}>
+        <div className="muted small" style={{ marginBottom: 6 }}>It describes the detected changes; the change list is the authoritative record.</div>
+        <p style={{ margin: 0 }}>{ai.overview}</p>
+        {ai.breaking.length > 0 && <><h3>May break existing implementations or tests</h3><ul>{ai.breaking.map((b, i) => <li key={i}>{b}</li>)}</ul></>}
+        {ai.highlights.length > 0 && <><h3>Highlights</h3><Points items={ai.highlights} /></>}
+        {ai.upgrade_notes.length > 0 && <><h3>What to review next</h3><ul>{ai.upgrade_notes.map((u, i) => <li key={i}>{u}</li>)}</ul></>}
+        {ai.chapters.length > 0 && <details style={{ marginTop: 10 }}><summary className="small">By chapter</summary>
+          {ai.chapters.map((c) => <div key={c.chapter}><h3>{c.chapter} {c.title}</h3><p style={{ margin: "0 0 4px" }}>{c.headline}</p><Points items={c.points} /></div>)}
+        </details>}
+      </div>
+    </Fold>
   );
 }
 
@@ -154,15 +178,14 @@ const ENTITY_TABLES: { group: EntityGroup; title: string; empty: string }[] = [
 function EntityTables({ comp, selected, onSelect }: { comp: Comparison; selected: string; onSelect: (key: string, e: CompareEntity | null) => void }) {
   const ent = comp.summary.entities;
   if (!ent) {
-    return <div className="card"><div className="card-head"><h2 style={{ margin: 0 }}>Commands and data structures</h2></div>
-      <div className="muted small">Not available: one of the compared parse runs no longer exists. Compare the versions again to get these tables.</div></div>;
+    return <Fold card title="Commands and data structures" meta="not available">
+      <div className="muted small">Not available: one of the compared parse runs no longer exists. Compare the versions again to get these tables.</div></Fold>;
   }
   const ai = comp.ai?.entities ?? {};
+  const n = (g: EntityGroup) => ent[g]?.total ?? 0;
+  const meta = `${n("commands_added")} new, ${n("commands_modified")} modified commands · ${n("structures_added")} new, ${n("structures_modified")} modified data structures`;
   return (
-    <div className="card">
-      <div className="card-head">
-        <h2 style={{ margin: 0 }}>Commands and data structures</h2>
-      </div>
+    <Fold card title="Commands and data structures" meta={meta}>
       <p className="muted small" style={{ margin: "0 0 10px" }}>
         {comp.ai?.entities ? "Descriptions written by AI from the changes they list. " : "Generate the AI summary to get a written description of each row. "}
         Select a row to list its changes below.</p>
@@ -171,8 +194,8 @@ function EntityTables({ comp, selected, onSelect }: { comp: Comparison; selected
         if (!empty && !g.total) return null;
         const cmd = group.startsWith("commands");
         return (
-          <div key={group} className="entity-table">
-            <h3>{title} <span className="muted">({g.total})</span></h3>
+          <Fold key={group} title={title} meta={`(${g.total})`}>
+            <div className="entity-table">
             {g.items.length === 0 ? <div className="muted small">{empty}</div> : (
               <div className="table-scroll">
                 <table className="t">
@@ -196,10 +219,11 @@ function EntityTables({ comp, selected, onSelect }: { comp: Comparison; selected
               </div>
             )}
             {g.total > g.items.length && <div className="muted small">Showing the first {g.items.length} of {g.total}.</div>}
-          </div>
+            </div>
+          </Fold>
         );
       })}
-    </div>
+    </Fold>
   );
 }
 
@@ -213,6 +237,8 @@ function Result({ id }: { id: number }) {
   const [flat, setFlat] = useState(false);       // include changes that are part of an added/removed parent
   const [offset, setOffset] = useState(0);
   const [entity, setEntity] = useState<{ key: string; name: string; ids: number[] } | null>(null);   // changes of one table row
+  const [aiOpen, setAiOpen] = useState(false);       // the AI summary starts collapsed (opened once one the user asked for is ready)
+  useEffect(() => { setAiOpen(false); }, [id]);
   useEffect(() => { setOffset(0); }, [impact, kind, chapter, q, sort, flat, id, entity]);
   useEffect(() => { setEntity(null); }, [id, impact, chapter]);     // the impact cards and chapter rows filter the full list
   const params = entity ? { ids: entity.ids.join(","), sort, offset, limit: PAGE } : { impact: impact || undefined, kind: kind || undefined, chapter: chapter || undefined, q: q || undefined, sort, nested: flat ? "true" : "false", offset, limit: PAGE };
@@ -223,11 +249,7 @@ function Result({ id }: { id: number }) {
   return (
     <>
       <h2 style={{ margin: "20px 0 10px" }}>{s.to.family}: {s.from.version} → {s.to.version}</h2>
-      <Summary comp={comp.data} />
-      <EntityTables comp={comp.data} selected={entity?.key ?? ""} onSelect={(key, e) => {
-        setEntity(e ? { key, name: e.name, ids: e.change_ids ?? e.changes.map((c) => c.id) } : null);
-        if (e) setTimeout(() => document.getElementById("cmp-changes")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
-      }} />
+      <Summary comp={comp.data} onAiReady={() => setAiOpen(true)} />
       <div className="impacts">
         {IMPACTS.map((i) => (
           <button key={i.key} className={`impact-card ${i.key} ${impact === i.key ? "on" : ""}`} title={i.hint} aria-pressed={impact === i.key}
@@ -244,6 +266,11 @@ function Result({ id }: { id: number }) {
             </tr>))}</tbody>
         </table>
       </div>
+      <AiSummary comp={comp.data} open={aiOpen} onOpen={setAiOpen} />
+      <EntityTables comp={comp.data} selected={entity?.key ?? ""} onSelect={(key, e) => {
+        setEntity(e ? { key, name: e.name, ids: e.change_ids ?? e.changes.map((c) => c.id) } : null);
+        if (e) setTimeout(() => document.getElementById("cmp-changes")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+      }} />
       {entity && (
         <div className="cmp-filters" id="cmp-changes">
           <span>Changes behind <strong>{entity.name}</strong></span><span className="grow" />
@@ -294,7 +321,8 @@ export default function ComparePage() {
     },
     onSuccess: (c) => { setSp({ id: String(c.id) }); qc.setQueryData(["comparison", c.id], c); qc.invalidateQueries({ queryKey: ["comparisons"] }); },
   });
-  const { isAdmin } = useAuth();
+  const { isAdmin, coverage } = useAuth();
+  const libraryOpen = coverage !== "soon";      // the Specs page is part of the Coverage Tool
   const del = useMutation({ mutationFn: (id: number) => api.deleteComparison(id), onSuccess: (_r, id) => { if (open === id) setSp({}); qc.invalidateQueries({ queryKey: ["comparisons"] }); } });
   const parsedCount = versions.filter((v) => v.parsed).length;
   const same = from !== "" && from === to;
@@ -306,8 +334,9 @@ export default function ComparePage() {
       <Loading q={opts} />
       {opts.data && parsedCount < 2 && (
         <Empty icon={GitCompareArrows} title={families.length ? "Parse at least two versions of the same spec" : "No specs in the library yet"}
-          action={<Link to="/specs"><button className="primary">Go to Specs</button></Link>}>
-          Upload and parse the older and the newer version on the Specs page; they then appear in the lists here.
+          action={libraryOpen ? <Link to="/specs"><button className="primary">Go to Specs</button></Link> : undefined}>
+          {libraryOpen ? "Upload and parse the older and the newer version on the Specs page; they then appear in the lists here."
+            : "Specs are uploaded and parsed in the Coverage Tool. Ask an admin to add the older and the newer version; they then appear in the lists here."}
         </Empty>
       )}
       {opts.data && opts.data.length > 0 && (
