@@ -58,6 +58,7 @@ function RunRow({ doc, run, prev }: { doc: SpecDoc; run: ParseRun; prev?: ParseR
 
 function DocCard({ doc }: { doc: SpecDoc }) {
   const { track } = useJobs();
+  const { isAdmin } = useAuth();
   const qc = useQueryClient();
   const [fam, setFam] = useState(doc.family);
   const [ver, setVer] = useState(doc.version);
@@ -88,7 +89,7 @@ function DocCard({ doc }: { doc: SpecDoc }) {
           <option value="builtin">Built-in (fast)</option>
         </select>
         <button className="primary" disabled={parse.isPending} onClick={() => parse.mutate()}>{doc.runs.length ? "Parse again" : "Parse"}</button>
-        <button className="danger" disabled={del.isPending} onClick={() => { if (confirm(`Delete ${doc.filename ?? doc.family} and all its parse runs?`)) del.mutate(); }}>Delete</button>
+        {isAdmin && <button className="danger" disabled={del.isPending} onClick={() => { if (confirm(`Delete ${doc.filename ?? doc.family} and all its parse runs?`)) del.mutate(); }}>Delete</button>}
       </div>
       <ErrorNote error={save.error ?? parse.error ?? del.error} />
       {doc.runs.length === 0 ? <div className="muted">Not parsed yet.</div> : (

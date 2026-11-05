@@ -70,6 +70,43 @@ def test_admin_only_routes(app):
         assert c.patch("/api/users/1", json={"role": "user"}).status_code == 403
 
 
+
+def test_only_an_admin_deletes_specs_and_comparisons(app, tmp_path):
+    """Every user uploads, parses and compares specs; deleting a spec or a saved comparison is for admins."""
+    from specforge import auth
+    from specforge.core.db import get_conn
+    from specforge.devtools.synth import base_spec, write_docx
+    from specforge.ingest import store
+
+    auth.create_user(get_conn(), "dave", "davepass1", status="active")
+    with client(app) as admin, client(app) as c:
+        login(admin, "root", "rootpass1"); login(c, "dave", "davepass1")
+        docs = []
+        for ver in ("2.3", "2.4"):
+            blocks = base_spec() + ([("p", "The controller shall support this new revision.")] if ver == "2.4" else [])
+            p = write_docx(tmp_path / f"b{ver}.docx", blocks)
+            with open(p, "rb") as f:
+                r = c.post("/api/specs/upload", files=[("files", (p.name, f))])
+            assert r.status_code == 200, r.text
+            d = r.json()[0]
+            assert c.patch(f"/api/specs/{d['id']}", json={"family": "nvme-base", "version": ver}).status_code == 200
+            store.run_parse(get_conn(), d["id"], workers=1)
+            docs.append(d["id"])
+        opts = c.get("/api/compare/options").json()
+        r = c.post("/api/compare", json={"from_run": opts[0]["run_id"], "to_run": opts[1]["run_id"]})
+        assert r.status_code == 200, r.text
+        cid = r.json()["id"]
+
+        assert c.delete(f"/api/compare/{cid}").status_code == 403
+        assert c.delete(f"/api/specs/{docs[0]}").status_code == 403
+        assert c.delete("/api/specs/999/").status_code == 403         # whatever the id or a trailing slash
+        assert len(c.get("/api/specs").json()) == 2
+        assert c.get(f"/api/compare/{cid}").status_code == 200
+
+        assert admin.delete(f"/api/compare/{cid}").json() == {"ok": True}
+        assert admin.delete(f"/api/specs/{docs[0]}").json() == {"ok": True}
+        assert [d["id"] for d in c.get("/api/specs").json()] == [docs[1]]
+
 def test_disable_and_password_reset_end_sessions(app):
     with client(app) as admin, client(app) as c:
         login(admin, "root", "rootpass1")

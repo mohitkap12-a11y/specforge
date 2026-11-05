@@ -5,6 +5,7 @@ import { Bot, Download, GitCompareArrows, Trash2 } from "lucide-react";
 import { api } from "../api";
 import { Empty, ErrorNote, Loading, PageHeader, Pager, Switch } from "../components/ui";
 import { isActive, useJobs } from "../components/jobs";
+import { useAuth } from "../components/auth";
 import { compareVersions, splitMarks } from "../util";
 import type { AIPoint, CompareChange, CompareEntity, CompareOption, Comparison, EntityGroup, Impact } from "../types";
 
@@ -293,6 +294,7 @@ export default function ComparePage() {
     },
     onSuccess: (c) => { setSp({ id: String(c.id) }); qc.setQueryData(["comparison", c.id], c); qc.invalidateQueries({ queryKey: ["comparisons"] }); },
   });
+  const { isAdmin } = useAuth();
   const del = useMutation({ mutationFn: (id: number) => api.deleteComparison(id), onSuccess: (_r, id) => { if (open === id) setSp({}); qc.invalidateQueries({ queryKey: ["comparisons"] }); } });
   const parsedCount = versions.filter((v) => v.parsed).length;
   const same = from !== "" && from === to;
@@ -334,7 +336,7 @@ export default function ComparePage() {
               <tbody>{past.data!.map((c) => (
                 <tr key={c.id} className="click" onClick={() => setSp({ id: String(c.id) })}>
                   <td>{c.to.family}</td><td>{c.from.version} → {c.to.version}</td><td>{c.total}</td><td>{c.by_impact.breaking || ""}</td><td>{c.has_ai ? "✓" : ""}</td>
-                  <td><button className="sm" aria-label="Delete comparison" onClick={(e) => { e.stopPropagation(); del.mutate(c.id); }}><Trash2 size={13} /></button></td>
+                  <td>{isAdmin && <button className="sm" aria-label="Delete comparison" onClick={(e) => { e.stopPropagation(); del.mutate(c.id); }}><Trash2 size={13} /></button>}</td>
                 </tr>))}</tbody>
             </table>
           </div>
