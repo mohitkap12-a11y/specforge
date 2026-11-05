@@ -40,6 +40,7 @@ async function copyLater(text: Promise<string>): Promise<void> {
 function Conversion({ c }: { c: ConversionEntry }) {
   const { push } = useToast();
   const { track } = useJobs();
+  const { coverage } = useAuth();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const r = c.result;
@@ -98,7 +99,7 @@ function Conversion({ c }: { c: ConversionEntry }) {
             <>
               <button onClick={() => setOpen(true)}><Eye size={14} /> Preview</button>
               <button onClick={copy}><Copy size={14} /> Copy</button>
-              {c.has_source && !/\.doc$/i.test(c.source ?? "") && <button onClick={() => void addToSpecs()} title="Parse this spec for Explorer, Compare and Coverage from this conversion"><FilePlus2 size={14} /> Add to Specs</button>}
+              {c.has_source && coverage !== "soon" && !/\.doc$/i.test(c.source ?? "") && <button onClick={() => void addToSpecs()} title="Parse this spec for Explorer, Compare and Coverage from this conversion"><FilePlus2 size={14} /> Add to Specs</button>}
               <button className="primary" onClick={() => void download()}><Download size={14} /> Download .md</button>
             </>
           )}
