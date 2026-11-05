@@ -161,20 +161,19 @@ def cmd_to_md(a):
 
 
 def cmd_prefetch_models(a):
-    """Download Docling's model weights once, for machines that convert offline afterwards."""
+    """Download Docling's model weights once, for converting offline afterwards (Settings -> Offline models does the same)."""
+    from .convert import models
+
+    with _conn() as c:
+        settings = config.load_settings(c)
+    out = Path(a.out).expanduser().resolve() if a.out else models.folder(settings)
     try:
-        import docling
-    except Exception as e:  # noqa: BLE001 - a broken torch install fails with OSError / RuntimeError too
-        raise SystemExit(f"Docling cannot be loaded ({e.__class__.__name__}: {e}); install it with: pip install 'docling>=2.19'")
-    try:
-        from docling.utils.model_downloader import download_models
-    except ImportError:
-        raise SystemExit(f"Docling {getattr(docling, '__version__', '')} is too old to download models; upgrade: pip install -U 'docling>=2.19'")
-    out = Path(a.out).resolve() if a.out else None
-    path = download_models(output_dir=out, progress=True)
-    print(f"Docling models are in {path or out or 'the default cache'}")
-    if out:
-        print(f"On the offline machine set DOCLING_ARTIFACTS_PATH={path}")
+        r = models.download(settings, lambda msg, *_: print(msg, flush=True), out=out, explicit=True)
+    except models.ModelsError as e:
+        raise SystemExit(str(e))
+    print(f"Docling models are in {r['folder']} ({r['bytes'] / 1e6:.0f} MB, {r['files']} files)")
+    if a.out and out != models.folder(settings):
+        print(f"Set this folder in Settings -> Offline models, or set DOCLING_ARTIFACTS_PATH={out}")
 
 
 def _run_of(conn, family: str, version: str) -> int:
@@ -320,7 +319,7 @@ def main(argv=None):
     s.add_argument("--out", help="output directory (default: next to each source file)"); s.add_argument("--no-front-matter", action="store_true", help="omit the YAML header")
     s.add_argument("--engine", choices=ENGINES, help="docling (default: layout model, best tables) or builtin (fast, no models)"); s.set_defaults(fn=cmd_to_md)
     s = sub.add_parser("prefetch-models", help="download Docling's model weights for offline conversion")
-    s.add_argument("--out", help="folder for the weights (default: Docling's cache)"); s.set_defaults(fn=cmd_prefetch_models)
+    s.add_argument("--out", help="folder for the weights (default: the models folder in Settings -> Offline models)"); s.set_defaults(fn=cmd_prefetch_models)
     s = sub.add_parser("compare", help="compare two parsed versions of a spec and list what changed"); s.add_argument("family"); s.add_argument("old"); s.add_argument("new")
     s.add_argument("--out", help="write the full report as Markdown"); s.add_argument("--ai", action="store_true", help="also write an AI summary (needs a configured model)"); s.set_defaults(fn=cmd_compare)
     s = sub.add_parser("reparse", help="parse a registered document again"); s.add_argument("document_id", type=int); s.add_argument("--activate", action="store_true")
@@ -337,7 +336,17 @@ def main(argv=None):
     s = sub.add_parser("mcp", help="serve the MCP spec tools over stdio (local testing; agents normally use http://<server>/mcp)")
     s.set_defaults(fn=cmd_mcp)
     a = p.parse_args(argv)
+    if a.cmd not in ("serve", "prefetch-models", "user"):   # serve applies it at startup; prefetch-models is an explicit download
+        _apply_offline()
     a.fn(a)
+
+
+def _apply_offline():
+    """Offline mode and the models folder from Settings, for commands that may convert or call a model."""
+    from .convert import models
+
+    with _conn() as c:
+        models.apply(config.load_settings(c))
 
 
 if __name__ == "__main__":

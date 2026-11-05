@@ -4,9 +4,10 @@ Docling reads the page layout with its layout model and rebuilds tables with Tab
 merged cells and tables split across pages come out aligned. The converter loads its models once per process and is
 reused; conversions are serialised because a DocumentConverter is not safe to share between threads.
 
-Offline machines: download the model weights once with `specforge prefetch-models --out DIR` (or `docling-tools
-models download`) and point `DOCLING_ARTIFACTS_PATH` at the folder if it is not the default cache. When the models
-cannot be loaded the caller falls back to the built-in engine (see `ready`).
+Offline machines: download the model weights once from Settings -> Offline models (or `specforge prefetch-models`);
+the folder is passed in with `configure` (convert/models.py). `DOCLING_ARTIFACTS_PATH` still overrides it. With a models
+folder Docling loads everything from disk and never contacts Hugging Face. When the models cannot be loaded the caller
+falls back to the built-in engine (see `ready`).
 """
 from __future__ import annotations
 
@@ -19,6 +20,34 @@ _converter = None
 _ready: dict[str, float] = {}          # format -> time its pipeline was loaded
 _broken: dict[str, tuple[float, str]] = {}   # format -> (time, reason) the pipeline failed to load
 RETRY_AFTER = 600                      # seconds before a failed model load is tried again (network may be back)
+_artifacts: str | None = os.environ.get("DOCLING_ARTIFACTS_PATH") or None   # the models folder (None: Hugging Face cache)
+
+
+def configure(artifacts_path: str | None) -> bool:
+    """Use this models folder from now on; the loaded pipelines are dropped when it changes. True if it changed."""
+    global _converter, _artifacts
+    artifacts_path = artifacts_path or None
+    with _lock:
+        if artifacts_path == _artifacts:
+            return False
+        _artifacts = artifacts_path
+        _converter = None
+        _ready.clear()
+        _broken.clear()
+    return True
+
+
+def reset() -> None:
+    """Forget loaded and failed pipelines (e.g. after new model files were downloaded or offline mode changed)."""
+    global _converter
+    with _lock:
+        _converter = None
+        _ready.clear()
+        _broken.clear()
+
+
+def artifacts_path() -> str | None:
+    return _artifacts
 
 
 class DoclingError(Exception):
@@ -43,8 +72,8 @@ def _make_converter():
     from docling.document_converter import DocumentConverter, PdfFormatOption
 
     opts = PdfPipelineOptions()
-    if os.environ.get("DOCLING_ARTIFACTS_PATH"):
-        opts.artifacts_path = os.environ["DOCLING_ARTIFACTS_PATH"]
+    if _artifacts:
+        opts.artifacts_path = _artifacts
     if os.environ.get("SPECFORGE_DOCLING_OCR", "").lower() in ("0", "false", "no", "off"):
         opts.do_ocr = False   # born-digital specs do not need OCR; turning it off is faster
     return DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)})

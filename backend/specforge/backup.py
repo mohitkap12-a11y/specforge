@@ -4,7 +4,8 @@ another workspace, e.g. to move a SpecForge server to a new machine.
 Zip layout (format 2):
   backup_meta.json          {"format", "app_version", "parser_version", "created", "workspace", "items", "tables": {name: rows}}
   db/<table>.jsonl          one JSON object per row (bytes as {"$b64": "..."})
-  files/<dir>/...           the workspace folders of the exported items (specs/, uploads/, cmddb-uploads/, conversions/)
+  files/<dir>/...           the workspace folders of the exported items (specs/, uploads/, cmddb-uploads/, conversions/;
+                            models/ holds the Docling models folder, wherever Settings -> Offline models puts it)
 
 Import rules:
   * the whole database part runs in one transaction with foreign keys deferred, and is checked with PRAGMA foreign_key_check
@@ -64,7 +65,16 @@ ITEMS: dict[str, dict[str, Any]] = {
     "jobs_activity": {"label": "Jobs & activity log", "requires": [], "dirs": [],
                       "tables": {"job": "insert", "job_watcher": "insert", "event_log": "append"}},
     "llm_cache": {"label": "LLM response cache", "requires": [], "dirs": [], "tables": {"llm_cache": "ignore"}},
+    # several hundred MB: not ticked by default in the UI, and left out of "all" unless asked for by name
+    "models": {"label": "Docling models (offline conversion, large)", "requires": [], "dirs": ["models"], "tables": {},
+               "default": False},
 }
+# Folders that are not <workspace>/<name>: name -> a function giving the folder on this server (set by the API app)
+DIR_ROOTS: dict[str, Callable[[], Path]] = {}
+
+
+def dir_root(ws: Path, dname: str) -> Path:
+    return DIR_ROOTS[dname]() if dname in DIR_ROOTS else ws / dname
 # Absolute paths stored in the database that usually point into the workspace
 PATH_COLUMNS = {"spec_document": "path", "cmd_source": "path"}
 # Derived search indexes: dropped after importing what they index, then rebuilt
@@ -79,7 +89,8 @@ class BackupError(Exception):
 
 def options() -> list[dict]:
     return [{"id": k, "label": v["label"], "requires": v["requires"], "dirs": v["dirs"],
-             "mergeable": all(p != "insert" for p in v["tables"].values())} for k, v in ITEMS.items()]
+             "mergeable": all(p != "insert" for p in v["tables"].values()), "default": v.get("default", True)}
+            for k, v in ITEMS.items()]
 
 
 def with_requirements(items: set[str]) -> set[str]:
@@ -108,7 +119,7 @@ def dependents(items: set[str]) -> set[str]:
 
 def parse_items(raw: str | None) -> set[str]:
     if not raw:
-        return set(ITEMS)
+        return {k for k, v in ITEMS.items() if v.get("default", True)}
     picked = {x.strip() for x in raw.split(",") if x.strip()}
     if unknown := picked - set(ITEMS):
         raise BackupError(f"Unknown backup item(s): {', '.join(sorted(unknown))}; use: {', '.join(ITEMS)}")
@@ -178,7 +189,7 @@ def export(db_path: Path, out: IO[bytes], items: set[str], include_secrets: bool
             files = 0
             for key in ordered(items):
                 for dname in ITEMS[key]["dirs"]:
-                    root = ws / dname
+                    root = dir_root(ws, dname)
                     if not root.is_dir():
                         continue
                     for dirpath, _dirs, names in os.walk(root):
@@ -186,7 +197,7 @@ def export(db_path: Path, out: IO[bytes], items: set[str], include_secrets: bool
                             full = Path(dirpath) / fn
                             if full.is_symlink() or not full.is_file():
                                 continue
-                            z.write(full, "files/" + full.relative_to(ws).as_posix())
+                            z.write(full, f"files/{dname}/" + full.relative_to(root).as_posix())
                             files += 1
             meta = {"format": FORMAT_VERSION, "app_version": __version__, "parser_version": config.PARSER_VERSION,
                     "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "workspace": str(ws), "items": ordered(items),
@@ -344,7 +355,7 @@ def import_(conn: sqlite3.Connection, zf: IO[bytes], items: set[str] | None, rep
         files = 0
         try:
             for dname in sorted(dirs):
-                root = ws / dname
+                root = dir_root(ws, dname)
                 if replace and root.is_dir():
                     for f in root.iterdir():
                         if f.is_dir() and not f.is_symlink():
@@ -357,7 +368,7 @@ def import_(conn: sqlite3.Connection, zf: IO[bytes], items: set[str] | None, rep
                 for dirpath, _d, names in os.walk(sroot):
                     for fn in names:
                         s = Path(dirpath) / fn
-                        t = ws / s.relative_to(staging)
+                        t = root / s.relative_to(sroot)
                         t.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(s, t)
                         files += 1

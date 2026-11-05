@@ -27,6 +27,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "library_search": True},
     # staged rollout: the Coverage Tool is an internal preview for admins until an admin releases it to every user
     "features": {"coverage_released": False},
+    # offline mode (on by default): no Hugging Face downloads or checks, Docling loads its models from models_path (empty:
+    # <workspace>/models/docling), and the server refuses connections to public internet addresses; see convert/models.py
+    "offline": {"enabled": True, "models_path": ""},
 }
 
 

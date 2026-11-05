@@ -94,6 +94,9 @@ export const api = {
   settings: () => req<Record<string, any>>("GET", "/api/settings"),
   saveSettings: (b: Record<string, any>) => req<Record<string, any>>("PUT", "/api/settings", b),
   setFeatures: (b: Partial<Features>) => req<Features>("PUT", "/api/features", b),
+  offline: () => req<OfflineStatus>("GET", "/api/offline"),
+  setOffline: (b: { enabled?: boolean; models_path?: string }) => req<OfflineStatus>("PUT", "/api/offline", b),
+  downloadModels: () => req<{ job: number; reused?: boolean }>("POST", "/api/offline/download"),
   providerModels: (name: string) => req<{ ok: boolean; error?: string; models: { id: string; provider?: string }[]; health?: unknown }>("GET", `/api/providers/${name}/models`),
   health: () => req<{ ok: boolean; version: string; workspace: string; parser_version: string; reparse_available: unknown[] }>("GET", "/api/health"),
   putMapping: (id: number, mapping: unknown) => req("PUT", `/api/cmddb/${id}/mapping`, mapping),
@@ -208,5 +211,12 @@ export const fileUrl = (docId: number) => `/api/documents/${docId}/file`;
 
 export const logStreamUrl = (f: { after_id?: number; level?: string; source?: string; job_id?: number }) => `/api/logs/stream${qs(f)}`;
 
-export type BackupItem = { id: string; label: string; requires: string[]; dirs: string[]; mergeable: boolean };
+export type BackupItem = { id: string; label: string; requires: string[]; dirs: string[]; mergeable: boolean; default?: boolean };
+export type OfflineStatus = {
+  offline: boolean; models_path: string; folder: string; default_folder: string;
+  downloaded: { downloaded?: string; docling_version?: string | null; files?: number; bytes?: number } | null;
+  files: number; bytes: number; env_override: string | null; loading_from: string | null;
+  docling_available: boolean; docling_version: string | null; downloading: boolean;
+  guard: { active: boolean; blocked_total: number; recent: { time: number; target: string }[] };
+};
 export type BackupImportResult = { ok: boolean; items: string[]; rows: Record<string, number>; files: number; warnings: string[]; from_version?: string };
