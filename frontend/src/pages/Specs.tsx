@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { FileUp, UploadCloud } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronUp, FileUp, UploadCloud, X } from "lucide-react";
 import { Badge, Empty, ErrorNote, Loading, PageHeader } from "../components/ui";
 import { useJobs } from "../components/jobs";
 import { useAuth } from "../components/auth";
@@ -10,7 +10,34 @@ import type { ParseRun, ParserEngine, SpecDoc } from "../types";
 
 const engineOf = (run: ParseRun) => (run.stats?.engine === "docling" ? "docling" : "builtin");
 
-function RunRow({ doc, run, prev }: { doc: SpecDoc; run: ParseRun; prev?: ParseRun }) {
+/** A run's number within its own spec: 1 for the first parse of that file, the highest for the latest (runs come newest first). */
+export const runNumber = (doc: SpecDoc, run: ParseRun) => doc.runs.length - doc.runs.findIndex((r) => r.id === run.id);
+/** The run the spec is served from (the active one), else the latest. */
+export const currentRun = (doc: SpecDoc): ParseRun | undefined => doc.runs.find((r) => r.active) ?? doc.runs[0];
+
+/** Errors of a run (its parse error, a failed action) behind a small chip: hover for the message, click to keep it open. */
+function ErrorChip({ messages }: { messages: string[] }) {
+  const [open, setOpen] = useState(false);
+  if (!messages.length) return null;
+  const text = messages.join("\n\n");
+  return (
+    <span className="err-chip-wrap">
+      <button className="sm err-chip" aria-expanded={open} title={text} onClick={() => setOpen((o) => !o)}>
+        <AlertTriangle size={12} /> Error
+      </button>
+      {open && (
+        <div className="err-pop" role="dialog" aria-label="Error details">
+          <div className="row"><strong className="grow">Error</strong><button className="sm" aria-label="Close" onClick={() => setOpen(false)}><X size={12} /></button></div>
+          <pre>{text}</pre>
+        </div>
+      )}
+    </span>
+  );
+}
+
+const errText = (e: unknown) => (e instanceof Error ? e.message : e ? String(e) : "");
+
+function RunRow({ doc, run, prev, reparseHere }: { doc: SpecDoc; run: ParseRun; prev?: ParseRun; reparseHere: boolean }) {
   const { track } = useJobs();
   const qc = useQueryClient();
   const [diff, setDiff] = useState<Record<string, any> | null>(null);
@@ -19,11 +46,12 @@ function RunRow({ doc, run, prev }: { doc: SpecDoc; run: ParseRun; prev?: ParseR
   const reparse = useMutation({ mutationFn: () => api.parse(doc.id, false, engine), onSuccess: (r) => track(r.job, `Reparse ${doc.family} ${doc.version}`) });
   const cmp = useMutation({ mutationFn: () => api.runDiff(prev!.id, run.id), onSuccess: setDiff });
   const ready = run.audit?.coverage_ready;
+  const errors = [run.error ?? "", errText(act.error), errText(cmp.error), errText(reparse.error)].filter(Boolean);
   return (
     <>
       <tr>
-        <td>#{run.id} {run.active ? <Badge value="active" label="active" /> : null}</td>
-        <td><Badge value={run.status} /></td>
+        <td title={`Parse run id ${run.id}`}>#{runNumber(doc, run)} {run.active ? <Badge value="active" label="active" /> : null}</td>
+        <td><span className="row" style={{ gap: 6, flexWrap: "nowrap" }}><Badge value={run.status} /><ErrorChip messages={errors} /></span></td>
         <td>{run.audit?.score !== undefined ? <>{Math.round(run.audit.score * 100)}% <Badge value={ready ? "ok" : "warning"} label={ready ? "coverage-ready" : "not ready"} /></> : "–"}</td>
         <td className="muted small">
           {run.status === "done" && <Badge value={engineOf(run) === "docling" ? "ok" : "info"} label={engineOf(run) === "docling" ? "Docling" : "Built-in"} />}{" "}
@@ -32,8 +60,8 @@ function RunRow({ doc, run, prev }: { doc: SpecDoc; run: ParseRun; prev?: ParseR
         <td className="row">
           {run.status === "done" && <Link to={`/explorer?run=${run.id}`}>Open</Link>}
           {run.status === "done" && !run.active && <button disabled={act.isPending} onClick={() => act.mutate()}>Set active</button>}
-          {prev && run.status === "done" && prev.status === "done" && <button disabled={cmp.isPending} onClick={() => cmp.mutate()}>Diff vs #{prev.id}</button>}
-          {run === doc.runs[0] && (
+          {prev && run.status === "done" && prev.status === "done" && <button disabled={cmp.isPending} onClick={() => cmp.mutate()}>Diff vs #{runNumber(doc, prev)}</button>}
+          {reparseHere && (
             <>
               <select value={engine} onChange={(e) => setEngine(e.target.value as "builtin" | "docling")} aria-label="Engine to reparse with"
                 title="Built-in rebuilds nested tables (a field's bits, a bit's values) from the PDF; Docling uses the file's Docling conversion">
@@ -45,11 +73,10 @@ function RunRow({ doc, run, prev }: { doc: SpecDoc; run: ParseRun; prev?: ParseR
           )}
         </td>
       </tr>
-      {(run.error || act.error || cmp.error || reparse.error || diff) && (
+      {diff && (
         <tr><td colSpan={5}>
-          {run.error && <div className="toast bad">{run.error}</div>}
-          <ErrorNote error={act.error ?? cmp.error ?? reparse.error} />
-          {diff && <pre>{JSON.stringify(diff.summary ?? diff, null, 1)}</pre>}
+          <div className="row"><strong className="grow small">Diff vs #{prev ? runNumber(doc, prev) : "?"}</strong><button className="sm" onClick={() => setDiff(null)}>Hide</button></div>
+          <pre>{JSON.stringify(diff.summary ?? diff, null, 1)}</pre>
         </td></tr>
       )}
     </>
@@ -58,6 +85,7 @@ function RunRow({ doc, run, prev }: { doc: SpecDoc; run: ParseRun; prev?: ParseR
 
 function DocCard({ doc }: { doc: SpecDoc }) {
   const { track } = useJobs();
+  const { isAdmin } = useAuth();
   const qc = useQueryClient();
   const [fam, setFam] = useState(doc.family);
   const [ver, setVer] = useState(doc.version);
@@ -68,6 +96,10 @@ function DocCard({ doc }: { doc: SpecDoc }) {
     onSuccess: (r) => { track(r.job, `Parse ${doc.family} ${doc.version}`); qc.invalidateQueries({ queryKey: ["specs"] }); },
   });
   const del = useMutation({ mutationFn: () => api.deleteSpec(doc.id), onSuccess: () => qc.invalidateQueries() });
+  // collapsed by default: one row for the run the spec is served from; the rest on demand
+  const [expanded, setExpanded] = useState(false);
+  const current = currentRun(doc), latest = doc.runs[0];
+  const shown = expanded ? doc.runs : current ? [current] : [];
   const dirty = fam !== doc.family || ver !== doc.version;
   return (
     <div className="card">
@@ -88,14 +120,26 @@ function DocCard({ doc }: { doc: SpecDoc }) {
           <option value="builtin">Built-in (fast)</option>
         </select>
         <button className="primary" disabled={parse.isPending} onClick={() => parse.mutate()}>{doc.runs.length ? "Parse again" : "Parse"}</button>
-        <button className="danger" disabled={del.isPending} onClick={() => { if (confirm(`Delete ${doc.filename ?? doc.family} and all its parse runs?`)) del.mutate(); }}>Delete</button>
+        {isAdmin && <button className="danger" disabled={del.isPending} onClick={() => { if (confirm(`Delete ${doc.filename ?? doc.family} and all its parse runs?`)) del.mutate(); }}>Delete</button>}
       </div>
       <ErrorNote error={save.error ?? parse.error ?? del.error} />
       {doc.runs.length === 0 ? <div className="muted">Not parsed yet.</div> : (
-        <table className="t">
-          <thead><tr><th>Run</th><th>Status</th><th>Audit</th><th>Parser</th><th /></tr></thead>
-          <tbody>{doc.runs.map((r, i) => <RunRow key={r.id} doc={doc} run={r} prev={doc.runs[i + 1]} />)}</tbody>
-        </table>
+        <>
+          <table className="t">
+            <thead><tr><th>Run</th><th>Status</th><th>Audit</th><th>Parser</th><th /></tr></thead>
+            <tbody>{shown.map((r) => {
+              const i = doc.runs.indexOf(r);
+              return <RunRow key={r.id} doc={doc} run={r} prev={doc.runs[i + 1]} reparseHere={expanded ? i === 0 : r === current} />;
+            })}</tbody>
+          </table>
+          {doc.runs.length > 1 && (
+            <button className="sm link-btn" aria-expanded={expanded} onClick={() => setExpanded((x) => !x)}>
+              {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}{" "}
+              {expanded ? "Show only the current parse" : `Show all ${doc.runs.length} parses`}
+              {!expanded && latest !== current && <span className="muted"> · latest #{runNumber(doc, latest)}: {latest.status}</span>}
+            </button>
+          )}
+        </>
       )}
     </div>
   );

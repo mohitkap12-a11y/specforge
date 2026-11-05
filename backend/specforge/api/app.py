@@ -64,6 +64,10 @@ ADMIN_ONLY = {("PUT", "/api/settings"), ("PUT", "/api/features"), ("GET", "/api/
               ("POST", "/api/convert/markdown/reconvert-outdated"), ("POST", "/api/specs/reparse-outdated"),
               ("GET", "/api/backup/options"), ("GET", "/api/backup/export"), ("POST", "/api/backup/import")}
 ADMIN_PREFIX = "/api/users"
+# Deleting shared library items (any id): saved spec comparisons and uploaded specs with their parse runs. Every user may
+# still upload, parse and compare. (A finished To Markdown file is admin-only too, checked in convert_markdown_remove,
+# because its owner may still cancel or dismiss one that has not finished.)
+ADMIN_ONLY_DELETE = re.compile(r"^/api/(compare|specs)/[^/]+/?$")
 # Every /api/mcp/ route but the guide's (metrics, misses & errors, call log, settings) is for admins
 MCP_PREFIX, MCP_PUBLIC = "/api/mcp/", {"/api/mcp/info"}
 # The Coverage Tool's own routes: admins only until an admin releases the tool (settings.features.coverage_released).
@@ -100,7 +104,8 @@ def client_ip(req: Request) -> str:
 
 
 def admin_only(method: str, path: str) -> bool:
-    return ((method, path) in ADMIN_ONLY or path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/")
+    return ((method, path) in ADMIN_ONLY or (method == "DELETE" and ADMIN_ONLY_DELETE.match(path) is not None)
+            or path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/")
             or (path.startswith(MCP_PREFIX) and path not in MCP_PUBLIC))
 
 

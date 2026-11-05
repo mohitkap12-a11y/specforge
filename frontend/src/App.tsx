@@ -36,9 +36,9 @@ export default function App() {
         <Route path="/workflow" element={cov(<OverviewPage />)} />
         <Route path="/compare" element={<ComparePage />} />
         <Route path="/dashboard" element={<Navigate to="/" replace />} />
-        <Route path="/specs" element={<SpecsPage />} />
+        <Route path="/specs" element={cov(<SpecsPage />)} />
         <Route path="/convert" element={<ConvertPage />} />
-        <Route path="/explorer" element={<ExplorerPage />} />
+        <Route path="/explorer" element={cov(<ExplorerPage />)} />
         <Route path="/sets" element={cov(<SetsPage />)} />
         <Route path="/catalog" element={cov(<CatalogPage />)} />
         <Route path="/scenarios" element={cov(<ScenariosPage />)} />

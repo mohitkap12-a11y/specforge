@@ -9,6 +9,7 @@ import { queueText, useJobs } from "../components/jobs";
 import { useAuth } from "../components/auth";
 import { conversionSummary, jobErrorText } from "../util";
 import type { ConvertEngine, ConversionEntry } from "../types";
+import { copyText } from "../clipboard";
 
 /** A file still being uploaded, or whose upload was refused (too large, wrong type): not on the server's list yet. */
 type Upload = { id: number; name: string; error?: string };
@@ -33,12 +34,13 @@ async function copyLater(text: Promise<string>): Promise<void> {
     const blob = text.then((t) => new Blob([t], { type: "text/plain" }));
     return navigator.clipboard.write([new ClipboardItem({ "text/plain": blob })]);
   }
-  return navigator.clipboard.writeText(await text);
+  return copyText(await text);
 }
 
 function Conversion({ c }: { c: ConversionEntry }) {
   const { push } = useToast();
   const { track } = useJobs();
+  const { coverage } = useAuth();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const r = c.result;
@@ -48,7 +50,7 @@ function Conversion({ c }: { c: ConversionEntry }) {
   const working = c.state === "queued" || c.state === "running";
   const copy = () => {
     const cached = md.data?.markdown;
-    (cached !== undefined ? navigator.clipboard.writeText(cached) : copyLater(fetchMd().then((x) => x.markdown)))
+    (cached !== undefined ? copyText(cached) : copyLater(fetchMd().then((x) => x.markdown)))
       .then(() => push({ title: "Markdown copied", tone: "ok" }), (e) => push({ title: "Copy failed", description: errText(e), tone: "bad" }));
   };
   const download = () => fetchMd().then((x) => saveFile(x.filename, x.markdown), (e) => push({ title: "Download failed", description: errText(e), tone: "bad" }));
@@ -97,7 +99,7 @@ function Conversion({ c }: { c: ConversionEntry }) {
             <>
               <button onClick={() => setOpen(true)}><Eye size={14} /> Preview</button>
               <button onClick={copy}><Copy size={14} /> Copy</button>
-              {c.has_source && !/\.doc$/i.test(c.source ?? "") && <button onClick={() => void addToSpecs()} title="Parse this spec for Explorer, Compare and Coverage from this conversion"><FilePlus2 size={14} /> Add to Specs</button>}
+              {c.has_source && coverage !== "soon" && !/\.doc$/i.test(c.source ?? "") && <button onClick={() => void addToSpecs()} title="Parse this spec for Explorer, Compare and Coverage from this conversion"><FilePlus2 size={14} /> Add to Specs</button>}
               <button className="primary" onClick={() => void download()}><Download size={14} /> Download .md</button>
             </>
           )}
