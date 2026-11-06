@@ -26,6 +26,7 @@ from .. import __version__, auth, catalog, cmddb, compare, compare_ai, convert, 
 from .. import backup, mcp_metrics, mcp_server, specquery
 from ..crossgen import generate_cross_scenarios
 from ..convert import ENGINES, ConversionError, SUPPORTED, convert_file, output_name
+from ..convert import models as docling_models
 from ..core import config
 from ..core.db import get_conn, jloads, row, rows
 from ..ingest import store
@@ -62,7 +63,8 @@ ADMIN_ONLY = {("PUT", "/api/settings"), ("PUT", "/api/features"), ("GET", "/api/
               ("GET", "/api/fs/browse"),     # lists the server's folders: other users type or drop a path instead
               ("GET", "/api/mcp/status"), ("PUT", "/api/mcp/settings"), ("POST", "/api/mcp/reindex"), ("POST", "/api/mcp/reset-stats"),
               ("POST", "/api/convert/markdown/reconvert-outdated"), ("POST", "/api/specs/reparse-outdated"),
-              ("GET", "/api/backup/options"), ("GET", "/api/backup/export"), ("POST", "/api/backup/import")}
+              ("GET", "/api/backup/options"), ("GET", "/api/backup/export"), ("POST", "/api/backup/import"),
+              ("GET", "/api/offline"), ("PUT", "/api/offline"), ("POST", "/api/offline/download")}
 ADMIN_PREFIX = "/api/users"
 # Deleting shared library items (any id): saved spec comparisons and uploaded specs with their parse runs. Every user may
 # still upload, parse and compare. (A finished To Markdown file is admin-only too, checked in convert_markdown_remove,
@@ -298,6 +300,7 @@ def create_app() -> FastAPI:
     def _startup():
         n, again = jobs.recover_interrupted(conn(), resumable=("convert-markdown", "parse"))
         eventlog.configure(settings())
+        docling_models.apply(settings())      # offline mode and the models folder, before any job can load Docling
         eventlog.emit("info", "system", f"SpecForge {__version__} started", workspace=str(config.workspace_dir()), parser_version=config.PARSER_VERSION)
         resumed = sum(resume(j) for j in again)
         if failed := n + len(again) - resumed:
@@ -309,6 +312,15 @@ def create_app() -> FastAPI:
             eventlog.emit("warn", "system", "Sign-in is on but there is no admin account yet: run `specforge user create <name> --admin` on the server")
         elif not AUTH:
             eventlog.emit("warn", "system", "Sign-in is turned off (--no-auth): everyone who can reach this server is an admin")
+        off = docling_models.status(settings())
+        if off["offline"]:
+            eventlog.emit("info", "system", "Offline mode is on: no Hugging Face downloads, connections to public internet addresses are refused",
+                          models_folder=off["loading_from"], models_downloaded=off["downloaded"] is not None)
+            if off["downloaded"] is None and not off["env_override"]:
+                eventlog.emit("warn", "system", "Offline mode is on but the Docling models are not downloaded: To Markdown uses the built-in "
+                              "engine. An admin can download them in Settings -> Offline models (turn Offline off for the download).")
+        else:
+            eventlog.emit("warn", "system", "Offline mode is off: this server may contact the internet (e.g. Hugging Face for Docling models)")
 
     # ------------------------------------------------------------------ sign-in and users
     login_throttle, ip_throttle, register_throttle = auth.Throttle(10, 600), auth.Throttle(50, 600), auth.Throttle(10, 3600)
@@ -456,8 +468,10 @@ def create_app() -> FastAPI:
             pc = lg.get("preview_chars", 4000)
             if not (isinstance(pc, int) and not isinstance(pc, bool) and 200 <= pc <= 50_000):
                 raise HTTPException(422, "logging.preview_chars must be a whole number between 200 and 50000")
-        # rollouts change only through PUT /api/features (audited): a settings form loaded before a rollout must not undo it
-        saved = config.save_settings(conn(), {**body, "features": settings().get("features") or {}})
+        # rollouts change only through PUT /api/features and offline mode through PUT /api/offline (both audited): a settings
+        # form loaded before such a change must not undo it
+        cur = settings()
+        saved = config.save_settings(conn(), {**body, "features": cur.get("features") or {}, "offline": cur.get("offline") or {}})
         eventlog.configure(saved)
         audit("Settings saved", sections=sorted(body) if isinstance(body, dict) else [])
         return saved
@@ -2128,6 +2142,56 @@ def create_app() -> FastAPI:
         eventlog.emit("info", "system", f"Activity log cleared ({n} events)")
         return {"ok": True, "deleted": n}
 
+    # ------------------------------------------------------------------ offline mode and Docling models (logic in convert/models.py)
+    backup.DIR_ROOTS["models"] = lambda: docling_models.folder(settings())
+
+    @app.get("/api/offline")
+    def offline_status():
+        return docling_models.status(settings())
+
+    @app.put("/api/offline")
+    def offline_update(body: Any = Body(...)):
+        """{"enabled": bool} and/or {"models_path": str}; applied at once."""
+        if not isinstance(body, dict) or not body or set(body) - {"enabled", "models_path"}:
+            raise HTTPException(422, "send enabled (true/false) and/or models_path")
+        if "enabled" in body and not isinstance(body["enabled"], bool):
+            raise HTTPException(422, "enabled must be true or false")
+        if "models_path" in body:
+            if not isinstance(body["models_path"], str):
+                raise HTTPException(422, "models_path must be a string")
+            try:
+                body["models_path"] = docling_models.validate_path(body["models_path"])
+            except docling_models.ModelsError as e:
+                raise HTTPException(e.status, str(e)) from None
+        if docling_models.status(settings())["downloading"]:
+            raise HTTPException(409, "The models are being downloaded: wait for the download to finish")
+        cur = settings()
+        saved = config.save_settings(conn(), {**cur, "offline": {**(cur.get("offline") or {}), **body}})
+        docling_models.apply(saved)
+        c = docling_models.cfg(saved)
+        audit(("Offline mode turned " + ("on" if c["enabled"] else "off")) if "enabled" in body else "Offline models folder changed",
+              "warn" if body.get("enabled") is False else "info", **body)
+        return docling_models.status(saved)
+
+    @app.post("/api/offline/download")
+    def offline_download():
+        cur = settings()
+        if docling_models.cfg(cur)["enabled"]:
+            raise HTTPException(409, "Offline mode is on: turn it off to download the models, then turn it on again")
+        busy = row(conn(), "SELECT id FROM job WHERE type='docling-models' AND state IN ('queued','running') ORDER BY id DESC LIMIT 1")
+        if busy:
+            return {"job": busy["id"], "reused": True}
+
+        def work(c, prog):
+            try:
+                return docling_models.download(config.load_settings(c), prog)
+            except docling_models.ModelsError as e:
+                raise RuntimeError(str(e)) from None
+        audit("Docling models download requested", folder=str(docling_models.folder(cur)))
+        # the conversion line: a download never runs while Docling converts (or the reverse)
+        return {"job": submit_job("docling-models", work, {}, label="Download the Docling models",
+                                  pool=convert.serial_pool(), queue=convert.QUEUE)}
+
     # ------------------------------------------------------------------ backup / export-import (logic in backup.py)
     MAX_BACKUP_BYTES = int(os.environ.get("SPECFORGE_BACKUP_UPLOAD_MB", "20480")) * 1024 * 1024
 
@@ -2181,6 +2245,8 @@ def create_app() -> FastAPI:
             raise HTTPException(e.status, str(e)) from None
         if {"specs", "converter"} & set(result["items"]):
             threading.Thread(target=_mcp_warm_index, name="sf-mcp-index", daemon=True).start()
+        if {"models", "settings"} & set(result["items"]):
+            docling_models.apply(settings())      # imported model files or offline settings take effect now
         mcp.refresh()
         eventlog.emit("warn" if replace else "info", "system",
                       f"Backup imported ({'replace' if replace else 'merge'}): {', '.join(result['items'])}",

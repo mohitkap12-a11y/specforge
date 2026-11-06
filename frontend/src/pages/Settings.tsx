@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Link, useLocation } from "react-router-dom";
 import { api, type BackupItem } from "../api";
+import { useJobs } from "../components/jobs";
 import type { ResetScope } from "../types";
 import { ErrorNote, Field, Loading, PageHeader, Segmented, Switch } from "../components/ui";
 import { useToast } from "../components/Toasts";
@@ -11,7 +12,7 @@ import { setIn } from "../util";
 
 type S = Record<string, any>;
 const TASKS = [["classify", "Classify", "Labels items (reserved for future use)"], ["generate", "Draft scenarios", "Reads each normative statement and proposes test scenarios"], ["embed", "Embeddings", "Semantic search (reserved for future use)"]] as const;
-const SECTIONS = [["ai", "AI providers"], ["models", "Models"], ["parser", "Parser"], ["logging", "Logging"], ["mi", "NVMe-MI layout"], ["rollout", "Feature rollout"], ["backup", "Backup / Export-Import"], ["appearance", "Appearance"], ["reset", "Reset"], ["about", "About"]] as const;
+const SECTIONS = [["ai", "AI providers"], ["models", "Models"], ["offline", "Offline models"], ["parser", "Parser"], ["logging", "Logging"], ["mi", "NVMe-MI layout"], ["rollout", "Feature rollout"], ["backup", "Backup / Export-Import"], ["appearance", "Appearance"], ["reset", "Reset"], ["about", "About"]] as const;
 /** What a non-admin sees: the rest are server-wide and only an admin can change them. */
 const PERSONAL_SECTIONS = SECTIONS.filter(([id]) => id === "appearance" || id === "about");
 
@@ -102,7 +103,8 @@ function BackupPanel() {
   const items = opts.data?.items ?? [];
   const [exportSel, setExportSel] = useState<Set<string>>(new Set());
   const [includeSecrets, setIncludeSecrets] = useState(false);
-  useEffect(() => { if (opts.data) setExportSel(new Set(opts.data.items.map((o) => o.id))); }, [opts.data]);
+  // large items (the Docling models) are offered but not ticked
+  useEffect(() => { if (opts.data) setExportSel(new Set(opts.data.items.filter((o) => o.default !== false).map((o) => o.id))); }, [opts.data]);
 
   const [file, setFile] = useState<File | null>(null);
   const [fileKey, setFileKey] = useState(0);          // bumping it remounts the file input, which clears it
@@ -180,6 +182,86 @@ function BackupPanel() {
         <ErrorNote error={imp.error} />
       </div>
     </div>
+  );
+}
+
+const mb = (b: number) => (b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${(b / 1e6).toFixed(0)} MB`);
+
+/** Offline mode and the Docling model files; applies at once, not with the save bar. */
+function OfflinePanel() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const { track } = useJobs();
+  const q = useQuery({ queryKey: ["offline"], queryFn: api.offline, refetchInterval: (r) => (r.state.data?.downloading ? 3000 : 15000) });
+  const [path, setPath] = useState<string | null>(null);
+  const st = q.data;
+  const set = useMutation({
+    mutationFn: api.setOffline,
+    onSuccess: (r, b) => {
+      qc.setQueryData(["offline"], r);
+      if (b.models_path !== undefined) setPath(null);
+      toast.push({ title: b.enabled === undefined ? "Models folder saved" : b.enabled ? "Offline mode is on" : "Offline mode is off: this server may reach the internet", tone: b.enabled === false ? "info" : "ok" });
+    },
+  });
+  const dl = useMutation({
+    mutationFn: api.downloadModels,
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["offline"] });
+      track(r.job, "Download the Docling models", (j) => {
+        qc.invalidateQueries({ queryKey: ["offline"] });
+        if (j.state === "done") toast.push({ title: "Docling models downloaded", description: "Turn Offline on again to block internet access.", tone: "ok" });
+      });
+    },
+  });
+  if (q.isLoading || q.error || !st) return <Section id="offline" title="Offline models"><Loading q={q} /></Section>;
+  const change = (v: boolean) => {
+    if (!v && !window.confirm("Turn Offline off? Until you turn it on again this server may contact the internet, e.g. Hugging Face to download or check Docling models.")) return;
+    if (v && !st.downloaded && !st.env_override && !window.confirm("The Docling models are not downloaded yet. With Offline on, To Markdown uses the built-in engine (tables may be less accurate). Turn Offline on anyway?")) return;
+    set.mutate({ enabled: v });
+  };
+  const editing = path ?? st.models_path;
+  return (
+    <Section id="offline" title="Offline models" description={<>Keeps this server off the internet. To Markdown's Docling engine needs model files
+      (layout, tables, OCR). Download them once into a folder here and Docling then loads them only from that folder. Your documents are never uploaded,
+      even while Offline is off.</>}>
+      <div className="row" style={{ flexWrap: "nowrap", alignItems: "flex-start" }}>
+        <Switch label="Offline mode" checked={st.offline} onChange={(v) => !set.isPending && change(v)} />
+        <div>
+          <strong>Offline</strong> <span className={`badge ${st.offline ? "ok" : "warn"}`}>{st.offline ? "On" : "Off: internet allowed"}</span>
+          <div className="muted small">{st.offline
+            ? "No Hugging Face downloads or update checks, and the server refuses connections to public internet addresses. Local and LAN addresses (e.g. Ollama) still work."
+            : "Docling may download or check models on Hugging Face. Download the models below, then turn Offline on again."}</div>
+          {st.guard.blocked_total > 0 && <div className="small" style={{ marginTop: 4 }}>
+            Blocked {st.guard.blocked_total} connection attempt(s) since the server started{st.guard.recent[0] ? `, latest to ${st.guard.recent[0].target}` : ""}.</div>}
+        </div>
+      </div>
+      <div className="divider" />
+      <div className="fields" style={{ alignItems: "flex-end" }}>
+        <Field label="Models folder" hint={`Absolute path on the server; empty: ${st.default_folder}`}>
+          <input value={editing} placeholder={st.default_folder} onChange={(e) => setPath(e.target.value)} />
+        </Field>
+        {path !== null && path !== st.models_path && <div className="row">
+          <button className="sm primary" disabled={set.isPending} onClick={() => set.mutate({ models_path: path })}>Save folder</button>
+          <button className="sm ghost" onClick={() => setPath(null)}>Cancel</button>
+        </div>}
+      </div>
+      <dl className="logdetail kv" style={{ margin: "12px 0 0", border: 0, padding: 0, background: "none" }}>
+        <dt>Folder</dt><dd className="mono">{st.folder}</dd>
+        <dt>Models</dt><dd>{st.downloaded
+          ? <><span className="badge ok">Downloaded</span> {st.downloaded.downloaded ?? ""} · {st.files} files · {mb(st.bytes)}{st.downloaded.docling_version ? ` · Docling ${st.downloaded.docling_version}` : ""}</>
+          : <span className="badge warn">Not downloaded{st.files ? ` (incomplete: ${st.files} files, ${mb(st.bytes)})` : ""}</span>}</dd>
+        <dt>Docling loads from</dt><dd className="mono">{st.loading_from ?? (st.offline ? "Hugging Face cache (offline: only files already on this machine)" : "Hugging Face (downloads when needed)")}</dd>
+        {st.env_override && <><dt>Override</dt><dd className="small">DOCLING_ARTIFACTS_PATH is set on the server ({st.env_override}) and is used instead of the folder above.</dd></>}
+        <dt>Docling</dt><dd>{st.docling_available ? `installed${st.docling_version ? ` (${st.docling_version})` : ""}` : <span className="badge bad">not installed: To Markdown uses the built-in engine</span>}</dd>
+      </dl>
+      <div className="row" style={{ marginTop: 12 }}>
+        <button className="primary" disabled={st.offline || !st.docling_available || st.downloading || dl.isPending || (path !== null && path !== st.models_path)}
+          onClick={() => dl.mutate()}>{(st.downloading || dl.isPending) && <span className="spinner" />}{st.downloaded ? "Download again" : "Download models"}</button>
+        <span className="muted small">{st.offline ? "Turn Offline off to download." : "Fetches every model To Markdown uses (several hundred MB), then checks they load from the folder."}</span>
+      </div>
+      <p className="muted small" style={{ marginTop: 8 }}>To move the models to another server, export a backup with <em>Docling models</em> ticked and import it there.</p>
+      <ErrorNote error={set.error ?? dl.error} />
+    </Section>
   );
 }
 
@@ -316,6 +398,8 @@ export default function SettingsPage() {
               <Field label="Retries on invalid output" hint="Whole number ≥ 0; the model is asked to repair its answer"><input type="number" value={s.llm?.max_retries ?? ""} onChange={(e) => num(["llm", "max_retries"])(e.target.value)} /></Field>
             </div>
           </Section>
+
+          <OfflinePanel />
 
           <Section id="parser" title="Parser" description="Changing parser options affects the next parse. Existing runs are kept.">
             <div className="fields">
