@@ -86,8 +86,9 @@ def apply(settings: dict) -> None:
     on = cfg(settings)["enabled"]
     _set_hf_offline(on)
     netguard.enable() if on else netguard.disable()
-    if not docling_engine.configure(effective_artifacts(settings)):
-        docling_engine.reset()       # same folder, but a model load that failed while offline may work now (or the reverse)
+    docling_engine.configure(effective_artifacts(settings))
+    # a model load that failed while offline may work now: forget failures (loaded pipelines stay, they need no network)
+    docling_engine.forget_failures()
 
 
 def _folder_stats(path: Path) -> tuple[int, int]:

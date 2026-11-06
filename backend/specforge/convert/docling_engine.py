@@ -46,6 +46,11 @@ def reset() -> None:
         _broken.clear()
 
 
+def forget_failures() -> None:
+    """Try loading a pipeline that failed again at the next conversion, without waiting RETRY_AFTER."""
+    _broken.clear()
+
+
 def artifacts_path() -> str | None:
     return _artifacts
 
