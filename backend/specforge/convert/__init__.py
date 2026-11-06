@@ -169,7 +169,7 @@ def convert_file(path: str | Path, filename: str | None = None, front_matter: bo
                 docling_engine.ready("pdf" if fmt == "pdf" else "docx")
             except docling_engine.DoclingUnavailable as e:
                 warnings.append(f"{e}; the built-in converter was used, tables may be less accurate. "
-                                "An admin can download the models in Settings -> Offline models.")
+                                "An admin can download the models in Settings -> Offline models (or run `specforge prefetch-models`).")
             else:
                 return _convert_docling(path, filename, fmt, front_matter)
     res = _convert_builtin(path, filename, fmt, front_matter)
