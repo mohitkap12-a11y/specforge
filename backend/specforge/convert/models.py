@@ -168,15 +168,19 @@ def download(settings: dict, prog: Callable[..., None], out: Path | None = None,
             raise ModelsError(f"Download failed ({err.__class__.__name__}: {str(err)[:300]})")
         prog(f"Checking that the models load from {out}")
         docling_engine.configure(str(out)) or docling_engine.reset()
-        for fmt in ("pdf", "docx"):
-            try:
-                docling_engine.ready(fmt)
-            except docling_engine.DoclingUnavailable as e:
-                raise ModelsError(f"The models were downloaded but do not load: {e}") from None
-        files, size = _folder_stats(out)
-        marker = {"downloaded": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "docling_version": status(settings)["docling_version"],
-                  "files": files, "bytes": size, "seconds": round(time.monotonic() - t0)}
-        (out / MARKER).write_text(json.dumps(marker, indent=1))
+        try:
+            for fmt in ("pdf", "docx"):
+                try:
+                    docling_engine.ready(fmt)
+                except docling_engine.DoclingUnavailable as e:
+                    raise ModelsError(f"The models were downloaded but do not load: {e}") from None
+            files, size = _folder_stats(out)
+            marker = {"downloaded": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "docling_version": status(settings)["docling_version"],
+                      "files": files, "bytes": size, "seconds": round(time.monotonic() - t0)}
+            (out / MARKER).write_text(json.dumps(marker, indent=1))
+        finally:
+            # back to the folder conversions should use: DOCLING_ARTIFACTS_PATH still wins over the one just downloaded
+            docling_engine.configure(effective_artifacts(settings))
         return {"folder": str(out), **marker}
     finally:
         _download_lock.release()

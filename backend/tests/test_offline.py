@@ -134,6 +134,17 @@ def test_download_into_the_folder_then_docling_loads_from_it(client, fake_doclin
     assert docling_engine.artifacts_path() == str(folder)      # offline: loads only from the folder
 
 
+def test_a_download_keeps_the_env_override_in_use(client, fake_docling, monkeypatch, tmp_path):
+    from specforge.convert import docling_engine
+
+    _calls, loaded = fake_docling
+    monkeypatch.setenv("DOCLING_ARTIFACTS_PATH", str(tmp_path / "override"))
+    client.put("/api/offline", json={"enabled": False, "models_path": str(tmp_path / "settings-folder")})
+    assert _wait(client, client.post("/api/offline/download").json()["job"])["state"] == "done"
+    assert ("pdf", str(tmp_path / "settings-folder")) in loaded          # verified where it was downloaded
+    assert docling_engine.artifacts_path() == str(tmp_path / "override")  # but conversions keep the override
+
+
 def test_env_override_wins(client, monkeypatch, tmp_path):
     from specforge.convert import models
 
