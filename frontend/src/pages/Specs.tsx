@@ -145,8 +145,7 @@ function DocCard({ doc }: { doc: SpecDoc }) {
   );
 }
 
-/** `embedded`: shown as a tab of the Knowledge base page, which has its own header. */
-export default function SpecsPage({ embedded }: { embedded?: boolean } = {}) {
+export default function SpecsPage() {
   const qc = useQueryClient();
   const { coverage } = useAuth();
   const specs = useQuery({ queryKey: ["specs"], queryFn: api.specs });
@@ -167,7 +166,7 @@ export default function SpecsPage({ embedded }: { embedded?: boolean } = {}) {
   });
   return (
     <>
-      {!embedded && <PageHeader title="Specs" description={<>Upload specification documents and parse them into sections, tables, bit fields and normative statements, with an audit of what was found. Parsing uses Docling (accurate tables) whenever the file has been converted on the <Link to="/convert">To Markdown</Link> page; a spec converted there can also be added here with one click, and is never converted twice.</>} />}
+      <PageHeader title="Specs" description={<>Upload specification documents and parse them into sections, tables, bit fields and normative statements, with an audit of what was found. Parsing uses Docling (accurate tables) whenever the file has been converted on the <Link to="/convert">To Markdown</Link> page; a spec converted there can also be added here with one click, and is never converted twice.</>} />
       <div className={`dropzone ${over ? "over" : ""}`}
         onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
         onDrop={(e) => { e.preventDefault(); setOver(false); onFiles(e.dataTransfer.files); }}>

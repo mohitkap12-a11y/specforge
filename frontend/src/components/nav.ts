@@ -1,17 +1,16 @@
 import type { LucideIcon } from "lucide-react";
-import { Activity, Bot, BookOpen, Users, Database, FileBarChart, FileDown, FlaskConical, Gauge, GitCompareArrows, Home, Layers, Library, MessagesSquare, ListChecks, ListTree, Settings as Cog } from "lucide-react";
+import { Activity, Bot, BookOpen, Users, Database, FileBarChart, FileDown, FlaskConical, Gauge, GitCompareArrows, Home, Layers, ListChecks, ListTree, Settings as Cog, FileText } from "lucide-react";
 
 /** SpecForge's tools share one library of parsed specs: converter, compare, coverage, and the MCP endpoint that serves the specs to coding agents. */
-export type NavGroup = "home" | "convert" | "compare" | "knowledge" | "coverage" | "agents" | "system";
+export type NavGroup = "home" | "convert" | "compare" | "coverage" | "agents" | "system";
 /** `soon`: the placeholder shown instead of the Coverage Tool's pages to users who cannot use it yet. */
 export interface NavItem { to: string; label: string; icon: LucideIcon; desc: string; group: NavGroup; adminOnly?: boolean; soon?: boolean }
 export const NAV: NavItem[] = [
   { to: "/", label: "Home", icon: Home, desc: "The tools: convert, compare, MCP for agents and coverage", group: "home" },
   { to: "/convert", label: "To Markdown", icon: FileDown, desc: "Convert a PDF, DOC or DOCX into a clean Markdown file", group: "convert" },
   { to: "/compare", label: "Compare versions", icon: GitCompareArrows, desc: "Compare two spec versions and see what changed, with an AI summary", group: "compare" },
-  { to: "/knowledge", label: "Knowledge base", icon: Library, desc: "The documents the chatbot answers from: add converted specs or upload any document (also holds the parsed specs the compare and coverage tools use)", group: "knowledge" },
-  { to: "/chat", label: "Chatbot", icon: MessagesSquare, desc: "Ask questions about the knowledge base; chat history, follow-up suggestions, code and JSON answers", group: "knowledge" },
   { to: "/workflow", label: "Workflow", icon: ListChecks, desc: "Coverage tool: where things stand and what to do next", group: "coverage" },
+  { to: "/specs", label: "Specs", icon: FileText, desc: "Upload and parse specification documents (the library the compare and coverage tools use)", group: "coverage" },
   { to: "/explorer", label: "Explorer", icon: BookOpen, desc: "Browse parsed sections, tables and requirements", group: "coverage" },
   { to: "/sets", label: "Sets", icon: Layers, desc: "Group spec versions, resolve cross-references", group: "coverage" },
   { to: "/catalog", label: "Catalog", icon: ListTree, desc: "Everything that can be covered", group: "coverage" },
@@ -29,7 +28,7 @@ export const NAV: NavItem[] = [
  *  others see it as coming soon. */
 export type CoverageAccess = "released" | "preview" | "soon";
 export const coverageAccess = (isAdmin: boolean, released: boolean): CoverageAccess => (released ? "released" : isAdmin ? "preview" : "soon");
-/** The Coverage Tool's pages, the spec library's Explorer included: what "coming soon" stands in for. */
+/** The Coverage Tool's pages, the spec library (Specs, Explorer) included: what "coming soon" stands in for. */
 export const COVERAGE_PAGES = NAV.filter((n) => n.group === "coverage").map((n) => n.to);
 export const isCoveragePage = (path: string) => COVERAGE_PAGES.some((p) => path === p || path.startsWith(p + "/"));
 export const COMING_SOON: NavItem = { to: "/workflow", label: "Coverage Tool", icon: Gauge, desc: "Measure which commands, fields and requirements your tests cover. Coming soon.", group: "coverage", soon: true };
@@ -45,7 +44,6 @@ export const GROUPS: { key: NavGroup; title: string | null; blurb?: string }[] =
   { key: "home", title: null },
   { key: "convert", title: "Spec Converter", blurb: "PDF / DOC / DOCX to Markdown" },
   { key: "compare", title: "Spec Compare", blurb: "What changed between two versions" },
-  { key: "knowledge", title: "Knowledge & Chat", blurb: "Ask questions about your documents" },
   { key: "agents", title: "Spec MCP", blurb: "Spec lookups for coding agents" },
   { key: "coverage", title: "Coverage Tool", blurb: "Measure test coverage of the specs" },
 ];
