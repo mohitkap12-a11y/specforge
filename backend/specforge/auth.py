@@ -181,6 +181,7 @@ def delete_user(conn: sqlite3.Connection, user_id: int, *, actor: dict | None = 
         raise AuthError("you cannot delete your own account", 409)
     if u["role"] == "admin" and u["status"] == "active" and count_admins(conn) <= 1:
         raise AuthError("this is the last active admin and cannot be deleted", 409)
+    conn.execute("DELETE FROM chat_session WHERE user=? COLLATE NOCASE", (u["username"],))   # private chats must not pass to a later account of the same name
     conn.execute("DELETE FROM app_user WHERE id=?", (user_id,))      # sessions go with it (ON DELETE CASCADE)
     conn.commit()
     return u

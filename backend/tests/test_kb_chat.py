@@ -267,3 +267,21 @@ def test_settings_hide_the_server_api_key_from_non_admins(ws, monkeypatch):
         admin.put("/api/settings", json={"openai": {"api_key": "sk-secret"}})
         assert admin.get("/api/settings").json()["openai"]["api_key"] == "sk-secret"
         assert user.get("/api/settings").json()["openai"]["api_key"] == ""
+
+
+def test_long_spec_sections_keep_the_matching_passage():
+    body = "intro " * 600 + "the Format NVM opcode is 0x80 here" + " tail" * 600
+    got = chat._passage(body, ["opcode"])
+    assert "opcode is 0x80" in got and len(got) <= chat.CONTEXT_CHARS + 2
+
+
+def test_deleting_an_account_deletes_its_chats(ws):
+    from specforge import auth
+    from specforge.core.db import get_conn
+
+    c = get_conn()
+    auth.create_user(c, "root", "rootpass1", role="admin", status="active")
+    u = auth.create_user(c, "dave", "davepass1", status="active")
+    chat.create_session(c, "dave")
+    auth.delete_user(c, u["id"])
+    assert chat.list_sessions(c, "dave") == []

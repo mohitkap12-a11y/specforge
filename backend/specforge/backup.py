@@ -423,6 +423,8 @@ def _import_db(conn: sqlite3.Connection, z: zipfile.ZipFile, items: set[str], re
             conn.execute("DELETE FROM kb_fts")
             conn.execute("INSERT INTO kb_fts(heading, text, doc_id, chunk_id) SELECT trim(d.title || ' ' || coalesce(c.heading, '')), c.text, c.doc_id, c.id "
                          "FROM kb_chunk c JOIN kb_doc d ON d.id = c.doc_id")
+            if "jobs_activity" not in items:     # the conversion jobs the documents came from are not restored: their numbers mean other jobs here
+                conn.execute("UPDATE kb_doc SET job_id=NULL")
         if "jobs_activity" in items:
             conn.execute("UPDATE job SET state='failed', error='interrupted: imported from a backup' WHERE state IN ('queued','running')")
         bad = conn.execute("PRAGMA foreign_key_check").fetchall()

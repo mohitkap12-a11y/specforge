@@ -207,6 +207,16 @@ def sse(ev: dict) -> bytes:
     return (json.dumps(ev, ensure_ascii=False) + "\n").encode()
 
 
+def _passage(body: str, terms: list[str], size: int = CONTEXT_CHARS) -> str:
+    """At most `size` characters of a long section or table, starting just before the first place a query word occurs."""
+    if len(body) <= size:
+        return body
+    low = body.lower()
+    at = min((i for t in terms if (i := low.find(t.lower())) >= 0), default=0)
+    start = max(0, at - size // 4)
+    return ("… " if start else "") + body[start:start + size]
+
+
 def spec_hits(speclib, query: str, limit: int) -> list[dict]:
     """Passages of the parsed specs (latest version of each; the Knowledge base's "Parsed specs" tab), as the chat reads them."""
     ts = knowledge.terms(query)
@@ -232,7 +242,7 @@ def spec_hits(speclib, query: str, limit: int) -> list[dict]:
         d = by_run[h["run_id"]]
         head = (f"Figure {h['number']}" if h["kind"] == "table" else f"§{h['number']}") + (f" {h['title']}" if h["title"] else "")
         out.append({"doc_id": None, "title": f"{d['family']} {d['version']}", "heading": head + (f" (p. {h['page']})" if h.get("page") else ""),
-                    "text": h["body"]})
+                    "text": _passage(h["body"], ts)})
     return out
 
 
