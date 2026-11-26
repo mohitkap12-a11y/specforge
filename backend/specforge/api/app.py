@@ -454,7 +454,10 @@ def create_app() -> FastAPI:
 
     @app.get("/api/settings")
     def get_settings():
-        return settings()
+        s = settings()
+        if me()["role"] != "admin":       # the settings are readable by every user: server credentials are not
+            s = {**s, "openai": {**(s.get("openai") or {}), "api_key": ""}}
+        return s
 
     @app.put("/api/settings")
     def put_settings(body: Any = Body(...)):

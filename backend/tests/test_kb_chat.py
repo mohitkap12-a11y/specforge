@@ -243,3 +243,27 @@ def test_chat_also_reads_parsed_specs(conn, demo_dir):
     hits = chat.spec_hits(lib, "Identify controller", 4)
     assert hits and hits[0]["doc_id"] is None and hits[0]["title"].startswith("nvme-base") and hits[0]["text"]
     assert chat.spec_hits(lib, "zzzz", 4) == []
+
+
+def test_disabled_documents_do_not_crowd_out_enabled_ones(conn):
+    for i in range(6):
+        d = knowledge.add_markdown(conn, "# T\n\n" + ("widget " * 30) + f"copy {i}", filename=f"d{i}.md", source="upload", user="u")
+        knowledge.set_enabled(conn, d["id"], False)
+    knowledge.add_markdown(conn, "# On\n\nwidget enabled", filename="on.md", source="upload", user="u")
+    assert [h["title"] for h in knowledge.search(conn, "widget", 6)] == ["On"]
+
+
+def test_settings_hide_the_server_api_key_from_non_admins(ws, monkeypatch):
+    monkeypatch.setenv("SPECFORGE_AUTH", "1")
+    from specforge import auth
+    from specforge.api.app import create_app
+    from specforge.core.db import get_conn
+
+    auth.create_user(get_conn(), "root", "rootpass1", role="admin", status="active")
+    auth.create_user(get_conn(), "carol", "carolpass", status="active")
+    with TestClient(create_app(), base_url="http://sf.test") as admin, TestClient(create_app(), base_url="http://sf.test") as user:
+        admin.post("/api/auth/login", json={"username": "root", "password": "rootpass1"})
+        user.post("/api/auth/login", json={"username": "carol", "password": "carolpass"})
+        admin.put("/api/settings", json={"openai": {"api_key": "sk-secret"}})
+        assert admin.get("/api/settings").json()["openai"]["api_key"] == "sk-secret"
+        assert user.get("/api/settings").json()["openai"]["api_key"] == ""

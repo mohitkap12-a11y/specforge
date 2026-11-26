@@ -14,7 +14,11 @@ export function useChat(sessionId: number | null, onSession?: (id: number) => vo
   const abort = useRef<AbortController | null>(null);
   const sid = useRef(sessionId);
   sid.current = sessionId;
-  useEffect(() => { setError(null); }, [sessionId]);
+  const created = useRef<number | null>(null);      // the chat this hook made for its first question: not a switch
+  useEffect(() => {
+    setError(null);
+    if (sessionId !== created.current) { abort.current?.abort(); abort.current = null; setLive(null); }   // another conversation: drop the old stream
+  }, [sessionId]);
   useEffect(() => () => abort.current?.abort(), []);
 
   const run = useCallback(async (body: { text?: string; regenerate?: boolean }, question: string) => {
@@ -28,6 +32,7 @@ export function useChat(sessionId: number | null, onSession?: (id: number) => vo
       if (id === null) {
         id = (await api.chatNew()).id;
         sid.current = id;
+        created.current = id;
         qc.setQueryData(["chat", id], { id, title: "New chat", pinned: 0, created: "", updated: "", messages: [] });
         onSession?.(id);
       }

@@ -301,7 +301,7 @@ def search(conn: sqlite3.Connection, query: str, limit: int = 6) -> list[dict]:
     match = " OR ".join('"' + t.replace('"', "") + '"' for t in ts)
     try:
         found = rows(conn, "SELECT chunk_id, doc_id, bm25(kb_fts, 4.0, 1.0) AS score FROM kb_fts WHERE kb_fts MATCH ? "
-                           "ORDER BY score LIMIT ?", (match, limit * 4))
+                           "AND doc_id IN (SELECT id FROM kb_doc WHERE enabled=1) ORDER BY score LIMIT ?", (match, limit * 4))
     except sqlite3.OperationalError:
         return []
     out = []
