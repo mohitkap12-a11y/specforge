@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, Bot, FileDown, Gauge, GitCompareArrows, Sparkles } from "lucide-react";
+import { ArrowRight, Bot, FileDown, MessagesSquare, Gauge, GitCompareArrows, Sparkles } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { api } from "../api";
 import { useAuth } from "../components/auth";
@@ -45,14 +45,17 @@ export default function HomePage() {
           to="/convert" cta="Convert a document" links={[{ to: "/convert", label: "Also available as `specforge to-md`" }]} />
         <Tool icon={GitCompareArrows} tone="compare" name="Spec Compare" tagline="Pick two versions, for example 2.3 and 2.4, and see what changed."
           points={["Finds new, removed and modified sections, tables and requirements, even when sections are renumbered", "Flags changes that can break implementations: a shall becoming a should, a field removed, a reserved bit defined", "Optional AI summary of what the new version brings"]}
-          to="/compare" cta="Compare two versions" links={coverage === "soon" ? undefined : [{ to: "/specs", label: "Manage spec versions" }]}
+          to="/compare" cta="Compare two versions" links={coverage === "soon" ? undefined : [{ to: "/knowledge?tab=specs", label: "Manage spec versions" }]}
           foot={<>{parsed} parsed spec(s) in the library · {(comps.data ?? []).length >= 100 ? "100+" : (comps.data ?? []).length} saved comparison(s)</>} />
+        <Tool icon={MessagesSquare} tone="chat" name="Knowledge & Chat" tagline="Ask your documents. Answers come with sources."
+          points={["Upload specs and project documents once; an admin adds them to the knowledge base", "A chatbot in the corner of every page, or full screen with your chat history", "Code, JSON and HTML answers you can copy, download and preview"]}
+          to="/chat" cta="Open the chatbot" links={[{ to: "/knowledge", label: "Knowledge base" }]} />
         <Tool icon={Bot} tone="agents" name="Spec MCP" tagline="Your coding agent asks the parsed specs instead of guessing."
           points={["One MCP endpoint for OpenCode, Roo Code and Claude Code; no account or key", "Command Dwords and fields, data structures, sections and figures, with page citations", "What changed between versions, computed once on the server"]}
           to="/agents" cta="Connect your agent" foot={<>{parsed} parsed spec(s) served</>} />
         <Tool icon={Gauge} tone="coverage" name="Coverage Tool" tagline="Which commands, fields and requirements do your tests actually cover?"
           points={["Builds the list of everything that can be covered from the specs", "Derives one scenario per executed test from your command log", "Covered / partial / not covered with evidence; Excel, HTML, CSV, JSON reports"]}
-          to="/workflow" cta="Open the coverage workflow" links={[{ to: "/specs", label: "Specs" }, { to: "/coverage", label: "Coverage" }, { to: "/reports", label: "Reports" }]}
+          to="/workflow" cta="Open the coverage workflow" links={[{ to: "/knowledge?tab=specs", label: "Specs" }, { to: "/coverage", label: "Coverage" }, { to: "/reports", label: "Reports" }]}
           soon={coverage === "soon"}
           badge={coverage === "preview" && <Link to="/settings#rollout" className="badge warn" title="Only admins can use it until it is released in Settings">Admin preview</Link>}
           foot={coverage === "soon" ? <>Being tried out internally; it appears here once it is released.</> : undefined} />

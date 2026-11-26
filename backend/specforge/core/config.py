@@ -11,12 +11,18 @@ CATALOG_VERSION = "2"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "ollama": {"base_url": "http://127.0.0.1:11434", "num_ctx": 16384, "timeout": 600},
+    # any OpenAI-compatible server on your own GPUs: vLLM, llama.cpp server, LM Studio, SGLang, TGI ...
+    "openai": {"base_url": "http://127.0.0.1:8000/v1", "api_key": "", "timeout": 600},
     "opencode": {"binary": "opencode", "timeout": 600, "mode": "run"},
     "tasks": {
         "classify": {"provider": "ollama", "model": "", "temperature": 0.0},
         "generate": {"provider": "ollama", "model": "", "temperature": 0.1},
         "embed": {"provider": "ollama", "model": "nomic-embed-text"},
     },
+    # the chatbot (chat.py): provider "ollama" or "openai" (an OpenAI-compatible server), retrieval depth, answers only from the
+    # knowledge base (strict), no hidden "thinking" for speed, follow-up question suggestions
+    "chat": {"enabled": True, "provider": "ollama", "model": "", "temperature": 0.2, "top_k": 6, "history_messages": 8,
+             "max_tokens": 1500, "strict": True, "disable_thinking": True, "suggestions": True, "system_prompt": ""},
     "parser": {"workers": 0, "table_strategy": "auto"},  # workers=0 -> cpu_count-1
     "llm": {"max_concurrency": 2, "max_retries": 2},
     "logging": {"min_level": "info", "capture_prompts": True, "preview_chars": 4000},  # capture_prompts: keep LLM prompts/replies in the activity log

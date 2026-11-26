@@ -6,10 +6,11 @@
 |---|---|---|
 | **Spec Converter** | Any PDF / DOC / DOCX into one clean Markdown file | UI *To Markdown*, `specforge to-md`, `POST /api/convert/markdown` |
 | **Spec Compare** | Pick two versions of a spec from your library (e.g. NVMe 2.3 and 2.4): every new / removed / modified section, table and requirement, ranked by impact, plus an optional AI summary | UI *Compare versions*, `specforge compare`, `/api/compare` |
+| **Knowledge base & chatbot** | Upload any document (Markdown, Word, PDF, text, HTML, JSON ...); an admin adds it to the knowledge base; a chatbot (floating window + full page with per-user history) answers from it with sources, code/JSON/HTML blocks and follow-up suggestions, on your own GPU | UI *Knowledge base*, *Chatbot*, `/api/kb`, `/api/chat` |
 | **Coverage Tool** | Which commands, fields and requirements your tests cover (everything below) | UI *Coverage Tool* group (Workflow, Specs, Explorer, ... Reports) |
 | **Spec MCP** | Coding agents (OpenCode, Roo Code, Claude Code ...) look up the parsed specs: Command Dword fields, data structures, sections, figures, and what changed between versions | `http://<server>/mcp`, UI *MCP for agents*, `specforge mcp` |
 
-Compare, Coverage and the MCP endpoint share the library of specs uploaded and parsed on the **Specs** page; the Converter is stateless.
+Compare, Coverage and the MCP endpoint share the library of specs uploaded and parsed on the **Knowledge base → Parsed specs** tab; the Converter is stateless.
 
 ## Coverage tool
 
@@ -105,6 +106,25 @@ The result is stored (filter, search and page it in the UI) and exports to a Mar
 
   API (admins): `GET /api/mcp/metrics`, `GET /api/mcp/issues`, `GET|PUT /api/mcp/issues/{fingerprint}`, `GET /api/mcp/calls`, `GET /api/mcp/calls.csv`, `DELETE /api/mcp/calls`.
 * **Local / testing:** `specforge mcp` serves the same tools over stdio against this machine's workspace.
+
+## Knowledge base and chatbot
+
+**Knowledge base** (sidebar *Knowledge base*; the old *Specs* page is its *Parsed specs* tab). Admins add documents; everyone can read and search them.
+- *To Markdown* marks every converted file **In knowledge base / Not in knowledge base**; one button adds all not-yet-added files in one go (also on the Knowledge base page).
+- Drop any file on the Knowledge base page: Markdown, text, HTML, JSON, YAML, CSV and XML are added at once; PDF, DOCX and DOC are converted first (To Markdown queue) and added when done.
+- Documents are cut along their headings (tables and code blocks stay whole) and indexed with SQLite FTS5 (BM25 + stemming): instant, offline, no embedding model, nothing extra on the GPU. *Test search* shows what the chatbot would find. A document can be switched off without deleting it.
+
+**Chatbot** (floating button bottom right; *Expand* opens the full page with your chat history: search, rename, pin, delete, export, delete all; chats are private to each user). Answers stream, cite their sources ([1], [2] with the passage one click away), render tables and code (copy, download, JSON formatting, sandboxed HTML preview), end with three follow-up questions, and show tokens/second. *Stop* and *Regenerate* work as in any chat app.
+
+**Models (Settings → Chatbot).** Any local server: **Ollama** or an **OpenAI-compatible** one (vLLM, llama.cpp `llama-server`, LM Studio, SGLang). The answer is grounded in ~6 retrieved passages (~2.5k tokens), so a small instruct model is enough. Suggestions, 4-bit (Q4_K_M / AWQ) builds:
+
+| GPU memory | Model | Why |
+|---|---|---|
+| 6-8 GB | `qwen3:4b-instruct` (≈2.5 GB), `qwen2.5-coder:7b` | fastest; good at following "answer from the context" |
+| 12-16 GB | **`qwen3:8b`** (≈5 GB) – recommended default, `llama3.1:8b`, `gemma3:12b` | best speed / quality / code balance; 60-100+ tok/s on a single modern GPU |
+| 24 GB+ | `qwen3:14b`, `qwen2.5-coder:14b`, `mistral-small3.2:24b` | better on long tables and register layouts |
+
+Tips: keep *Skip hidden reasoning* on (Qwen3 otherwise "thinks" first); set the context window to 8-16k; for several simultaneous users prefer vLLM (continuous batching) over Ollama.
 
 ## Install
 

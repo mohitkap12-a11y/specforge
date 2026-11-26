@@ -13,6 +13,7 @@ from .. import eventlog
 from ..core.hashing import sha256_text
 from .base import LLMError, LLMProvider
 from .ollama import OllamaProvider
+from .openai_compat import OpenAICompatProvider
 from .opencode import OpenCodeProvider
 
 T = TypeVar("T", bound=BaseModel)
@@ -22,6 +23,9 @@ def make_provider(name: str, settings: dict) -> LLMProvider:
     if name == "ollama":
         o = settings["ollama"]
         return OllamaProvider(o["base_url"], o.get("num_ctx", 16384), o.get("timeout", 600))
+    if name == "openai":
+        o = settings["openai"]
+        return OpenAICompatProvider(o["base_url"], o.get("api_key", ""), o.get("timeout", 600))
     if name == "opencode":
         o = settings["opencode"]
         return OpenCodeProvider(o.get("binary", "opencode"), o.get("timeout", 600))

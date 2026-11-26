@@ -1,3 +1,4 @@
+import type { ChatConfig, ChatEvent, ChatSessionFull, ChatSessionRow, KbAddResult, KbDoc, KbHit, KbList } from "./types";
 import type { McpCallRow, McpFilters, McpInfo, McpIssue, McpIssueDetail, McpIssueStatus, McpMetrics, McpSettings, McpStatus } from "./types";
 import type { AppUser, Features, Me, CompareChange, CompareOption, Comparison, ComparisonRow, ConversionEntry, ConvertEngine, MarkdownConversion, LogEvent, ParserEngine, CatalogItem, CmdKind, CmdSource, DbScan, DecodedCommand, FsListing, TestCov, ExecAnalysis, LinkState, RefResult, CovItem, CovRun, CovSummary, CrossSelection, CrossUnit, SectionRow, SpecInSet, Evidence, Issue, Job, ResetPreview, ResetScope, Scenario, ScenarioLink, SectionData, SpecDoc, SpecSet, TreeNode } from "./types";
 
@@ -58,6 +59,22 @@ export const api = {
   toMarkdownJob: (file: File, frontMatter = true, engine?: ConvertEngine) => { const f = new FormData(); f.append("file", file); return req<{ job: number; reused?: boolean; joined?: string }>("POST", `/api/convert/markdown/jobs${qs({ front_matter: frontMatter ? undefined : "false", engine })}`, f); },
   markdownResult: (job: number) => req<MarkdownConversion>("GET", `/api/convert/markdown/jobs/${job}`),
   conversions: () => req<ConversionEntry[]>("GET", "/api/convert/markdown/jobs"),
+  kb: () => req<KbList>("GET", "/api/kb"),
+  kbDoc: (id: number) => req<KbDoc & { markdown: string }>("GET", `/api/kb/${id}`),
+  kbSearch: (q: string) => req<KbHit[]>("GET", `/api/kb/search${qs({ q })}`),
+  kbAddConversions: (jobs?: number[]) => req<KbAddResult>("POST", "/api/kb/from-conversions", jobs ? { jobs } : {}),
+  kbUpload: (files: File[]) => { const f = new FormData(); files.forEach((x) => f.append("files", x)); return req<KbAddResult>("POST", "/api/kb/upload", f); },
+  kbEnable: (id: number, enabled: boolean) => req<KbDoc>("PATCH", `/api/kb/${id}`, { enabled }),
+  kbDelete: (id: number) => req("DELETE", `/api/kb/${id}`),
+  chatConfig: () => req<ChatConfig>("GET", "/api/chat/config"),
+  chatSessions: (q = "") => req<ChatSessionRow[]>("GET", `/api/chat/sessions${qs({ q })}`),
+  chatNew: () => req<ChatSessionRow>("POST", "/api/chat/sessions"),
+  chatSession: (id: number) => req<ChatSessionFull>("GET", `/api/chat/sessions/${id}`),
+  chatRename: (id: number, b: { title?: string; pinned?: boolean }) => req<ChatSessionRow>("PATCH", `/api/chat/sessions/${id}`, b),
+  chatDelete: (id: number) => req("DELETE", `/api/chat/sessions/${id}`),
+  chatDeleteAll: () => req<{ deleted: number }>("DELETE", "/api/chat/sessions"),
+  chatFeedback: (mid: number, feedback: 1 | -1 | null) => req("PATCH", `/api/chat/messages/${mid}`, { feedback }),
+  chatExportUrl: (id: number) => `/api/chat/sessions/${id}/export`,
   removeConversion: (job: number) => req<{ ok: boolean; handed_to?: string; left?: boolean }>("DELETE", `/api/convert/markdown/jobs/${job}`),
   conversionSourceUrl: (job: number) => `/api/convert/markdown/jobs/${job}/source`,
   reconvertOutdated: () => req<{ job: number | null; count?: number; no_source?: number; reused?: boolean }>("POST", "/api/convert/markdown/reconvert-outdated"),
@@ -220,3 +237,28 @@ export type OfflineStatus = {
   guard: { active: boolean; blocked_total: number; recent: { time: number; target: string }[] };
 };
 export type BackupImportResult = { ok: boolean; items: string[]; rows: Record<string, number>; files: number; warnings: string[]; from_version?: string };
+
+/** Ask a question and read the streamed answer (newline-delimited JSON events). Aborting `signal` stops the model. */
+export async function chatStream(sid: number, body: { text?: string; regenerate?: boolean }, onEvent: (e: ChatEvent) => void, signal: AbortSignal): Promise<void> {
+  const r = await fetch(`/api/chat/sessions/${sid}/messages`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
+  if (r.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED));
+  if (!r.ok || !r.body) {
+    let detail: unknown = r.statusText;
+    try { detail = (await r.json()).detail ?? detail; } catch { /* not JSON */ }
+    throw new ApiError(r.status, errorText(detail));
+  }
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i: number;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (line) onEvent(JSON.parse(line) as ChatEvent);
+    }
+  }
+}

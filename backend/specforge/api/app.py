@@ -23,7 +23,7 @@ from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 from .. import __version__, auth, catalog, cmddb, compare, compare_ai, convert, coverage, crossgen, eventlog, execscen, jobs, refs, reports, scenarios
-from .. import backup, mcp_metrics, mcp_server, specquery
+from .. import backup, chat, knowledge, mcp_metrics, mcp_server, specquery
 from ..crossgen import generate_cross_scenarios
 from ..convert import ENGINES, ConversionError, SUPPORTED, convert_file, output_name
 from ..convert import models as docling_models
@@ -35,6 +35,7 @@ from ..llm.service import LLMService, make_provider
 
 
 MAX_CONVERT_BYTES = 200 * 1024 * 1024
+MAX_KB_BYTES = 50 * 1024 * 1024
 MAX_CMDDB_UPLOAD_BYTES = int(os.environ.get("SPECFORGE_CMDDB_UPLOAD_MB", "4096")) * 1024 * 1024   # per upload (all files together)
 SCENARIO_STATES = {"draft", "approved", "rejected"}
 LINK_STATES = {"proposed", "approved", "rejected"}
@@ -66,6 +67,7 @@ ADMIN_ONLY = {("PUT", "/api/settings"), ("PUT", "/api/features"), ("GET", "/api/
               ("GET", "/api/backup/options"), ("GET", "/api/backup/export"), ("POST", "/api/backup/import"),
               ("GET", "/api/offline"), ("PUT", "/api/offline"), ("POST", "/api/offline/download")}
 ADMIN_PREFIX = "/api/users"
+KB_PREFIX = "/api/kb"       # reading and searching the knowledge base is for everyone; adding, changing and removing documents is for admins
 # Deleting shared library items (any id): saved spec comparisons and uploaded specs with their parse runs. Every user may
 # still upload, parse and compare. (A finished To Markdown file is admin-only too, checked in convert_markdown_remove,
 # because its owner may still cancel or dismiss one that has not finished.)
@@ -108,6 +110,7 @@ def client_ip(req: Request) -> str:
 def admin_only(method: str, path: str) -> bool:
     return ((method, path) in ADMIN_ONLY or (method == "DELETE" and ADMIN_ONLY_DELETE.match(path) is not None)
             or path == ADMIN_PREFIX or path.startswith(ADMIN_PREFIX + "/")
+            or (method not in SAFE_METHODS and (path == KB_PREFIX or path.startswith(KB_PREFIX + "/")))
             or (path.startswith(MCP_PREFIX) and path not in MCP_PUBLIC))
 
 
@@ -946,7 +949,7 @@ def create_app() -> FastAPI:
         d = _conversion_dir(res.get("dir"))
         return next((f for f in d.glob("source.*") if f.is_file()), None) if d else None
 
-    def _conversion_entry(j: dict, watched: set[int]) -> dict | None:
+    def _conversion_entry(j: dict, watched: set[int], kb: dict[int, int] | None = None) -> dict | None:
         """A conversion job (with its live progress filled in) as the To Markdown page lists it; None if its file is gone."""
         payload = jloads(j["payload_json"], {})
         res = jloads(j["result_json"], None) or {}
@@ -958,6 +961,7 @@ def create_app() -> FastAPI:
                 "can_remove": _may_remove(j, watched), "has_source": j["state"] == "done" and _source_file(res) is not None,
                 "outdated": j["state"] == "done" and convert.outdated(res),
                 "cancelling": active and jobs.cancel_requested(j["id"], DB), "error": j["error"],
+                "kb_doc": (kb if kb is not None else knowledge.added_jobs(conn())).get(j["id"]),    # its knowledge base document, once added
                 "ahead": j["ahead"], "ahead_of": j["ahead_of"],     # its place in the conversion queue while it waits
                 "result": {k: v for k, v in res.items() if k != "dir"} if j["state"] == "done" else None}
 
@@ -979,8 +983,8 @@ def create_app() -> FastAPI:
                              "OR id IN (SELECT job_id FROM job_watcher WHERE user = ?)) "
                              "AND (state IN ('queued','running') OR updated >= datetime('now', ?)))) ORDER BY id DESC",
                      (u, u, f"-{CONVERT_KEEP_SECONDS} seconds"))
-        watched = watched_ids()
-        return [e for j in jobs.with_progress_all(found, conn()) if (e := _conversion_entry(j, watched)) is not None]
+        watched, kb = watched_ids(), knowledge.added_jobs(conn())
+        return [e for j in jobs.with_progress_all(found, conn()) if (e := _conversion_entry(j, watched, kb)) is not None]
 
     @app.post("/api/convert/markdown/reconvert-outdated")
     def convert_markdown_reconvert_outdated():
@@ -1087,6 +1091,186 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "the original file of this conversion was not kept; it was converted before originals were stored")
         name = jloads(j["payload_json"], {}).get("filename") or src.name
         return FileResponse(src, filename=name)
+
+    # ------------------------------------------------------------------ knowledge base (the chatbot's documents)
+    def _kb_pending() -> list[dict]:
+        """Finished To Markdown conversions that are not in the knowledge base yet, oldest first."""
+        added = knowledge.added_jobs(conn())
+        out = []
+        for j in rows(conn(), "SELECT * FROM job WHERE type='convert-markdown' AND state='done' AND json_extract(payload_json, '$.hidden') IS NULL ORDER BY id"):
+            if j["id"] in added:
+                continue
+            res = jloads(j["result_json"], None) or {}
+            if safe_join(_conversions_dir(), f"{res.get('dir', '')}/out.md") is None:
+                continue
+            out.append({"job": j["id"], "source": jloads(j["payload_json"], {}).get("filename") or res.get("filename"),
+                        "title": res.get("title"), "user": job_owner(j), "created": j["updated"]})
+        return out
+
+    @app.get("/api/kb")
+    def kb_list():
+        docs = knowledge.listing(conn())
+        return {"docs": docs, "pending": _kb_pending(), "chunks": sum(d["chunks"] for d in docs),
+                "convertible": sorted(knowledge.CONVERT_SUFFIXES), "direct": sorted(knowledge.TEXT_SUFFIXES)}
+
+    @app.get("/api/kb/search")
+    def kb_search(q: str = Query(..., min_length=1), limit: int = Query(6, ge=1, le=20)):
+        return knowledge.search(conn(), q, limit)
+
+    @app.post("/api/kb/from-conversions")
+    def kb_add_conversions(body: dict = Body(default={})):
+        """Admin: add finished conversions to the knowledge base: the listed `jobs`, or every one not added yet (`jobs` omitted)."""
+        wanted = body.get("jobs") if isinstance(body, dict) else None
+        if wanted is not None and not (isinstance(wanted, list) and all(isinstance(x, int) and not isinstance(x, bool) for x in wanted)):
+            raise HTTPException(422, "jobs must be a list of conversion ids")
+        todo = [p for p in _kb_pending() if wanted is None or p["job"] in wanted]
+        added, failed = [], []
+        for p in todo:
+            res = jloads(row(conn(), "SELECT result_json FROM job WHERE id=?", (p["job"],))["result_json"], {})  # type: ignore[index]
+            f = safe_join(_conversions_dir(), f"{res.get('dir', '')}/out.md")
+            try:
+                if f is None:
+                    raise knowledge.KnowledgeError(f"{p['source']}: the converted file is no longer on the server")
+                added.append(knowledge.add_markdown(conn(), f.read_text(encoding="utf-8"), filename=p["source"] or f"conversion-{p['job']}",
+                                                    source="conversion", user=me()["username"], job_id=p["job"], title=p["title"] or None))
+            except knowledge.KnowledgeError as e:
+                failed.append({"job": p["job"], "source": p["source"], "error": str(e)})
+        audit(f"Added {len(added)} converted file(s) to the knowledge base", count=len(added), failed=len(failed))
+        return {"added": added, "failed": failed, "pending": len(_kb_pending())}
+
+    @app.post("/api/kb/upload")
+    def kb_upload(files: list[UploadFile] = File(...)):
+        """Admin: add text-like files directly (Markdown, text, HTML, JSON, YAML, CSV, XML). PDF, DOC and DOCX go through the
+        To Markdown converter first; the page sends them there and adds the result."""
+        added, failed = [], []
+        for f in files:
+            name = os.path.basename(f.filename or "document")
+            try:
+                raw = f.file.read(MAX_KB_BYTES + 1)
+                if len(raw) > MAX_KB_BYTES:
+                    raise knowledge.KnowledgeError(f"{name}: larger than {MAX_KB_BYTES // 2**20} MB")
+                added.append(knowledge.add_file(conn(), name, raw, me()["username"]))
+            except knowledge.KnowledgeError as e:
+                failed.append({"source": name, "error": str(e)})
+        audit(f"Added {len(added)} uploaded file(s) to the knowledge base", count=len(added), failed=len(failed))
+        return {"added": added, "failed": failed}
+
+    @app.get("/api/kb/{doc_id}")
+    def kb_get(doc_id: int):
+        d, t = knowledge.get(conn(), doc_id), knowledge.text(conn(), doc_id)
+        if d is None or t is None:
+            raise HTTPException(404, "document not found")
+        return {**d, "markdown": t}
+
+    @app.patch("/api/kb/{doc_id}")
+    def kb_patch(doc_id: int, body: dict = Body(...)):
+        if not isinstance(body.get("enabled"), bool):
+            raise HTTPException(422, "enabled must be true or false")
+        d = knowledge.set_enabled(conn(), doc_id, body["enabled"])
+        if d is None:
+            raise HTTPException(404, "document not found")
+        audit(f"Knowledge base document “{d['title']}” {'enabled' if d['enabled'] else 'disabled'}", doc_id=doc_id)
+        return d
+
+    @app.delete("/api/kb/{doc_id}")
+    def kb_delete(doc_id: int):
+        d = knowledge.get(conn(), doc_id)
+        if d is None or not knowledge.remove(conn(), doc_id):
+            raise HTTPException(404, "document not found")
+        audit(f"Removed “{d['title']}” from the knowledge base", "warn", doc_id=doc_id)
+        return {"ok": True}
+
+    # ------------------------------------------------------------------ chatbot
+    def _chat_cfg() -> dict:
+        return settings()
+
+    @app.get("/api/chat/config")
+    def chat_config():
+        c = _chat_cfg()["chat"]
+        return {"enabled": bool(c.get("enabled")), "configured": bool(c.get("model")), "provider": c.get("provider"), "model": c.get("model"),
+                "suggestions": bool(c.get("suggestions", True)), "docs": conn().execute("SELECT COUNT(*) FROM kb_doc WHERE enabled=1").fetchone()[0]}
+
+    def _need_chat() -> None:
+        if not _chat_cfg()["chat"].get("enabled", True):
+            raise HTTPException(409, "the chatbot is turned off (an admin can turn it on in Settings → Chatbot)")
+
+    @app.get("/api/chat/sessions")
+    def chat_sessions(q: str = Query("")):
+        return chat.list_sessions(conn(), me()["username"], q)
+
+    @app.post("/api/chat/sessions")
+    def chat_new():
+        _need_chat()
+        return chat.create_session(conn(), me()["username"])
+
+    @app.delete("/api/chat/sessions")
+    def chat_delete_all():
+        n = chat.delete_all(conn(), me()["username"])
+        audit(f"Deleted all {n} chat session(s)", count=n)
+        return {"deleted": n}
+
+    @app.get("/api/chat/sessions/{sid}")
+    def chat_get(sid: int):
+        s = chat.get_session(conn(), sid, me()["username"])
+        if s is None:
+            raise HTTPException(404, "chat not found")
+        return s
+
+    @app.patch("/api/chat/sessions/{sid}")
+    def chat_patch(sid: int, body: dict = Body(...)):
+        title, pinned = body.get("title"), body.get("pinned")
+        if (title is not None and not isinstance(title, str)) or (pinned is not None and not isinstance(pinned, bool)):
+            raise HTTPException(422, "title must be text and pinned true or false")
+        s = chat.update_session(conn(), sid, me()["username"], title, pinned)
+        if s is None:
+            raise HTTPException(404, "chat not found")
+        return s
+
+    @app.delete("/api/chat/sessions/{sid}")
+    def chat_delete(sid: int):
+        if not chat.delete_session(conn(), sid, me()["username"]):
+            raise HTTPException(404, "chat not found")
+        return {"ok": True}
+
+    @app.get("/api/chat/sessions/{sid}/export")
+    def chat_export(sid: int):
+        r = chat.export_markdown(conn(), sid, me()["username"])
+        if r is None:
+            raise HTTPException(404, "chat not found")
+        title, md = r
+        return Response(md, media_type="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(re.sub(r'[^A-Za-z0-9._ -]+', '_', title) or 'chat')}.md"})
+
+    @app.post("/api/chat/sessions/{sid}/messages")
+    def chat_send(sid: int, body: dict = Body(...)):
+        """Ask a question; the answer streams back as newline-delimited JSON events (see chat.run_turn)."""
+        _need_chat()
+        user = me()["username"]
+        if chat.get_session(conn(), sid, user) is None:
+            raise HTTPException(404, "chat not found")
+        regenerate = body.get("regenerate") is True
+        text = body.get("text")
+        if not regenerate and not (isinstance(text, str) and text.strip()):
+            raise HTTPException(422, "text is required")
+        cfg = settings()
+        try:
+            prov = make_provider(cfg["chat"].get("provider") or "ollama", cfg)
+            if not hasattr(prov, "stream"):
+                raise LLMError(f"provider '{prov.name}' cannot stream; choose Ollama or an OpenAI-compatible server in Settings → Chatbot")
+        except LLMError as e:
+            raise HTTPException(409, str(e)) from e
+        events = chat.run_turn(conn, user, sid, text or "", cfg, prov, regenerate=regenerate)
+        return StreamingResponse((chat.sse(e) for e in events), media_type="application/x-ndjson",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    @app.patch("/api/chat/messages/{mid}")
+    def chat_feedback(mid: int, body: dict = Body(...)):
+        v = body.get("feedback")
+        if v not in (1, -1, None):
+            raise HTTPException(422, "feedback must be 1, -1 or null")
+        if not chat.set_feedback(conn(), mid, me()["username"], v):
+            raise HTTPException(404, "message not found")
+        return {"ok": True}
 
     # ------------------------------------------------------------------ compare two spec versions
     _summary_lock = threading.Lock()

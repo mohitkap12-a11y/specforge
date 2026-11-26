@@ -10,7 +10,8 @@ import CatalogPage from "./pages/Catalog";
 import CommandDBsPage from "./pages/CommandDBs";
 import ActivityPage from "./pages/Activity";
 import SettingsPage from "./pages/Settings";
-import SpecsPage from "./pages/Specs";
+import KnowledgePage from "./pages/Knowledge";
+import ChatPage from "./pages/Chat";
 import ConvertPage from "./pages/Convert";
 import ExplorerPage from "./pages/Explorer";
 import ScenariosPage from "./pages/Scenarios";
@@ -36,7 +37,9 @@ export default function App() {
         <Route path="/workflow" element={cov(<OverviewPage />)} />
         <Route path="/compare" element={<ComparePage />} />
         <Route path="/dashboard" element={<Navigate to="/" replace />} />
-        <Route path="/specs" element={cov(<SpecsPage />)} />
+        <Route path="/knowledge" element={<KnowledgePage />} />
+        <Route path="/chat" element={<ChatPage />} />
+        <Route path="/specs" element={<Navigate to="/knowledge?tab=specs" replace />} />
         <Route path="/convert" element={<ConvertPage />} />
         <Route path="/explorer" element={cov(<ExplorerPage />)} />
         <Route path="/sets" element={cov(<SetsPage />)} />

@@ -1,7 +1,9 @@
 """Ollama HTTP provider (local). Uses /api/tags, /api/chat (structured output via `format`), /api/embed."""
 from __future__ import annotations
 
-from typing import Any
+import json
+import time
+from typing import Any, Iterator
 
 import httpx
 
@@ -59,6 +61,39 @@ class OllamaProvider:
             return data["message"]["content"]
         except KeyError as e:
             raise LLMError(f"Unexpected Ollama response: {str(data)[:200]}") from e
+
+    def stream(self, messages, *, model, temperature=0.2, max_tokens=None, think=None) -> Iterator[str]:
+        """Yield the reply's text as the model writes it. `last_stats` holds tokens and speed once the stream has ended."""
+        if not model:
+            raise LLMError("No Ollama model selected (Settings -> Chatbot)")
+        body: dict[str, Any] = {"model": model, "messages": messages, "stream": True,
+                                "options": {"temperature": temperature, "num_ctx": self.num_ctx}}
+        if max_tokens:
+            body["options"]["num_predict"] = max_tokens
+        if think is not None:
+            body["think"] = think
+        self.last_stats: dict[str, Any] = {}
+        t0 = time.monotonic()
+        try:
+            with self.client.stream("POST", self.base_url + "/api/chat", json=body) as r:
+                if r.status_code >= 400:
+                    r.read()
+                    raise LLMError(f"Ollama /api/chat failed: {r.status_code} {r.text[:300]}")
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    ev = json.loads(line)
+                    if ev.get("error"):
+                        raise LLMError(f"Ollama: {ev['error']}")
+                    if piece := (ev.get("message") or {}).get("content"):
+                        yield piece
+                    if ev.get("done"):
+                        n, ns = ev.get("eval_count"), ev.get("eval_duration")
+                        self.last_stats = {"tokens": n, "prompt_tokens": ev.get("prompt_eval_count"),
+                                           "tps": round(n / (ns / 1e9), 1) if n and ns else None}
+        except httpx.HTTPError as e:
+            raise LLMError(f"Ollama request failed: {e}") from e
+        self.last_stats.setdefault("seconds", round(time.monotonic() - t0, 2))
 
     def embed(self, texts, *, model) -> list[list[float]]:
         data = self._req("POST", "/api/embed", json={"model": model, "input": texts})
