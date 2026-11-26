@@ -293,3 +293,20 @@ def test_reset_everything_unlinks_knowledge_base_documents_from_deleted_jobs(cli
     d = knowledge.add_markdown(get_conn(), DOC, filename="t.md", source="conversion", user="u", job_id=7)
     assert client.post("/api/reset", json={"scope": "all"}).status_code == 200
     assert get_conn().execute("SELECT job_id FROM kb_doc WHERE id=?", (d["id"],)).fetchone()[0] is None
+
+
+def test_replacing_job_history_alone_unlinks_existing_documents(tmp_path, monkeypatch):
+    import io
+
+    from specforge.core import db
+
+    monkeypatch.setenv("SPECFORGE_HOME", str(tmp_path / "w"))
+    db._local.__dict__.clear()
+    from specforge.api.app import create_app
+
+    with TestClient(create_app()) as c:
+        knowledge.add_markdown(db.get_conn(), DOC, filename="t.md", source="conversion", user="u", job_id=5)
+        data = c.get("/api/backup/export", params={"items": "jobs_activity"}).content
+        r = c.post("/api/backup/import", files={"file": ("b.zip", io.BytesIO(data), "application/zip")}, data={"items": "jobs_activity", "replace": "true"})
+        assert r.status_code == 200, r.text
+        assert db.get_conn().execute("SELECT job_id FROM kb_doc").fetchone()[0] is None
