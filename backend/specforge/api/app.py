@@ -764,6 +764,8 @@ def create_app() -> FastAPI:
         counts = _reset_counts(scope)
         for table in spec["delete"]:
             c.execute(f"DELETE FROM {table}")
+        if "job" in spec["delete"]:      # knowledge base documents stay; the conversion jobs they came from are gone (job ids get reused)
+            c.execute("UPDATE kb_doc SET job_id=NULL")
         c.commit()
         files = 0
         for sub in spec["files"]:

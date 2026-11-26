@@ -285,3 +285,11 @@ def test_deleting_an_account_deletes_its_chats(ws):
     chat.create_session(c, "dave")
     auth.delete_user(c, u["id"])
     assert chat.list_sessions(c, "dave") == []
+
+
+def test_reset_everything_unlinks_knowledge_base_documents_from_deleted_jobs(client):
+    from specforge.core.db import get_conn
+
+    d = knowledge.add_markdown(get_conn(), DOC, filename="t.md", source="conversion", user="u", job_id=7)
+    assert client.post("/api/reset", json={"scope": "all"}).status_code == 200
+    assert get_conn().execute("SELECT job_id FROM kb_doc WHERE id=?", (d["id"],)).fetchone()[0] is None
