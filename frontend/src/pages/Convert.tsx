@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookPlus, Copy, Download, Eye, FilePlus2, FileDown, Search, Trash2, UploadCloud, X } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Copy, Download, Eye, FilePlus2, FileDown, Search, Trash2, UploadCloud, X } from "lucide-react";
 import { api } from "../api";
 import { MarkdownPreview } from "../components/MarkdownPreview";
 import { Badge, Empty, ErrorNote, PageHeader, Segmented, Switch } from "../components/ui";
@@ -40,7 +40,7 @@ async function copyLater(text: Promise<string>): Promise<void> {
 function Conversion({ c }: { c: ConversionEntry }) {
   const { push } = useToast();
   const { track } = useJobs();
-  const { coverage, isAdmin } = useAuth();
+  const { coverage } = useAuth();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const r = c.result;
@@ -58,15 +58,9 @@ function Conversion({ c }: { c: ConversionEntry }) {
     ({ document: d, job }) => {
       track(job, `Parse ${d.family} ${d.version}`);
       qc.invalidateQueries({ queryKey: ["specs"] });
-      push({ title: `Parsed as spec: ${d.family} ${d.version}`, description: r?.engine === "docling" ? "Parsing from this Docling conversion; no new conversion is needed." : "Parsing with the built-in parser (this file was converted without Docling).", tone: "ok" });
+      push({ title: `Added to Specs as ${d.family} ${d.version}`, description: r?.engine === "docling" ? "Parsing from this Docling conversion; no new conversion is needed." : "Parsing with the built-in parser (this file was converted without Docling).", tone: "ok" });
     },
     (e) => push({ title: "Could not add to Specs", description: errText(e), tone: "bad" }));
-  const addToKb = () => api.kbAddConversions([c.job]).then(
-    (res) => {
-      qc.invalidateQueries({ queryKey: ["conversions"] }); qc.invalidateQueries({ queryKey: ["kb"] });
-      push(res.added.length ? { title: "Added to the knowledge base", description: `${c.source ?? "The file"} is searchable by the chatbot.`, tone: "ok" } : { title: "Not added", description: res.failed[0]?.error, tone: "bad" });
-    },
-    (e) => push({ title: "Could not add to the knowledge base", description: errText(e), tone: "bad" }));
   const remove = () => {
     if (r && !window.confirm(`Delete ${c.source ?? "this file"} and its Markdown from the library? Nobody will be able to open or download it any more.`)) return;
     api.removeConversion(c.job).then((res) => {
@@ -89,7 +83,6 @@ function Conversion({ c }: { c: ConversionEntry }) {
             {c.state === "failed" && <Badge value="failed" label="Failed" />}
             {c.state === "cancelled" && <Badge value="draft" label="Cancelled" />}
             {r && <Badge value={r.engine === "docling" ? "ok" : "info"} label={r.engine === "docling" ? "Docling" : "Built-in"} />}
-            {r && (c.kb_doc !== null ? <Badge value="ok" label="In knowledge base" /> : <span title="Not added to the knowledge base yet: the chatbot cannot see this file"><Badge value="warning" label="Not in knowledge base" /></span>)}
             {c.outdated && <span title="Made by an older version of this engine. Uploading the file again converts it again; an admin can re-convert every outdated file at once."><Badge value="warning" label="Outdated" /></span>}
           </div>
           <div className="muted small">
@@ -106,8 +99,7 @@ function Conversion({ c }: { c: ConversionEntry }) {
             <>
               <button onClick={() => setOpen(true)}><Eye size={14} /> Preview</button>
               <button onClick={copy}><Copy size={14} /> Copy</button>
-              {c.has_source && coverage !== "soon" && !/\.doc$/i.test(c.source ?? "") && <button onClick={() => void addToSpecs()} title="Parse this spec for Explorer, Compare and Coverage from this conversion"><FilePlus2 size={14} /> Parse as spec</button>}
-              {isAdmin && c.kb_doc === null && <button onClick={() => void addToKb()} title="Let the chatbot answer from this file"><BookPlus size={14} /> Add to knowledge base</button>}
+              {c.has_source && coverage !== "soon" && !/\.doc$/i.test(c.source ?? "") && <button onClick={() => void addToSpecs()} title="Parse this spec for Explorer, Compare and Coverage from this conversion"><FilePlus2 size={14} /> Add to Specs</button>}
               <button className="primary" onClick={() => void download()}><Download size={14} /> Download .md</button>
             </>
           )}
@@ -163,15 +155,6 @@ export default function ConvertPage() {
   const shown = useMemo(() => items.filter((c) => (whose === "all" || c.mine) && (!q || matches(c, q))), [items, whose, q]);
   const busy = uploads.some((u) => !u.error) || items.some((c) => c.state === "queued" || c.state === "running");
   const outdated = items.filter((c) => c.outdated);
-  const notAdded = items.filter((c) => c.result && c.kb_doc === null);
-  const addAll = useMutation({
-    mutationFn: () => api.kbAddConversions(notAdded.map((c) => c.job)),
-    onSuccess: (res) => {
-      void qc.invalidateQueries({ queryKey: ["conversions"] }); void qc.invalidateQueries({ queryKey: ["kb"] });
-      push({ title: `Added ${res.added.length} file${res.added.length === 1 ? "" : "s"} to the knowledge base`, description: res.failed.length ? res.failed.map((f) => f.error).join("; ") : undefined, tone: res.failed.length ? "info" : "ok" });
-    },
-    onError: (e) => push({ title: "Could not add to the knowledge base", description: errText(e), tone: "bad" }),
-  });
   const reconvert = async () => {
     setReconverting(true);
     try {
@@ -203,15 +186,6 @@ export default function ConvertPage() {
         <button className="primary" onClick={() => input.current?.click()}>Choose files</button>
       </div>
       <ErrorNote error={list.error} />
-      {notAdded.length > 0 && (
-        <div className="card row">
-          <span className="grow">
-            <strong>{notAdded.length} converted file{notAdded.length === 1 ? " is" : "s are"} not in the knowledge base.</strong>{" "}
-            <span className="muted small">{isAdmin ? "Add them all in one go so the chatbot can answer from them, or one by one with “Add to knowledge base”." : "An admin adds converted files to the knowledge base."}</span>
-          </span>
-          {isAdmin && <button className="primary" disabled={addAll.isPending} onClick={() => addAll.mutate()}><BookPlus size={14} /> Add {notAdded.length} to knowledge base</button>}
-        </div>
-      )}
       {isAdmin && outdated.length > 0 && (
         <div className="card row">
           <span className="grow">

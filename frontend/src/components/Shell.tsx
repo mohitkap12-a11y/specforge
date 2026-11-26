@@ -6,7 +6,6 @@ import { api } from "../api";
 import { isActive, useJobs } from "./jobs";
 import { Bell } from "./Bell";
 import { CommandPalette } from "./CommandPalette";
-import { ChatWidget } from "./chat/ChatWidget";
 import { COMING_SOON, GROUPS, NAV, isCoveragePage, navFor, type NavItem } from "./nav";
 import { useAuth } from "./auth";
 import { useTheme } from "../theme";
@@ -108,7 +107,6 @@ export function Shell({ children }: { children: ReactNode }) {
         </header>
         <main className="main" id="main">{children}</main>
       </div>
-      <ChatWidget />
       <CommandPalette open={palette} onClose={() => setPalette(false)} />
     </div>
   );

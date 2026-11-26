@@ -217,31 +217,6 @@ CREATE INDEX IF NOT EXISTS ix_mcp_call_fp ON mcp_call(fingerprint, ts);
 CREATE INDEX IF NOT EXISTS ix_mcp_call_client ON mcp_call(ip, ts);
 -- An admin's triage of one group of misses or errors (mcp_call.fingerprint): open / investigating / fixed / ignored, and a note
 CREATE TABLE IF NOT EXISTS mcp_issue(fingerprint TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'open', note TEXT, updated TEXT, updated_by TEXT);
--- Knowledge base (knowledge.py): documents an admin added for the chatbot (the Markdown is kept in the workspace), their searchable chunks
-CREATE TABLE IF NOT EXISTS kb_doc(
-  id INTEGER PRIMARY KEY, title TEXT NOT NULL, filename TEXT, source TEXT NOT NULL, job_id INTEGER, sha256 TEXT,
-  chars INTEGER DEFAULT 0, chunks INTEGER DEFAULT 0, path TEXT NOT NULL, added_by TEXT, enabled INTEGER DEFAULT 1,
-  created TEXT DEFAULT CURRENT_TIMESTAMP
-);
-CREATE UNIQUE INDEX IF NOT EXISTS ix_kb_job ON kb_doc(job_id) WHERE job_id IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS ix_kb_sha ON kb_doc(sha256);
-CREATE TABLE IF NOT EXISTS kb_chunk(
-  id INTEGER PRIMARY KEY, doc_id INTEGER NOT NULL REFERENCES kb_doc(id) ON DELETE CASCADE, ord INTEGER NOT NULL, heading TEXT, text TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ix_kb_chunk_doc ON kb_chunk(doc_id, ord);
-CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5(heading, text, doc_id UNINDEXED, chunk_id UNINDEXED,
-  tokenize="porter unicode61 remove_diacritics 2 tokenchars '_'");
--- Chatbot (chat.py): every user's own sessions and their messages
-CREATE TABLE IF NOT EXISTS chat_session(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT NOT NULL, title TEXT NOT NULL DEFAULT 'New chat', pinned INTEGER DEFAULT 0,
-  created TEXT DEFAULT CURRENT_TIMESTAMP, updated TEXT DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS ix_chat_session_user ON chat_session(user, updated);
-CREATE TABLE IF NOT EXISTS chat_message(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL REFERENCES chat_session(id) ON DELETE CASCADE, role TEXT NOT NULL,
-  content TEXT NOT NULL, sources_json TEXT, suggestions_json TEXT, stats_json TEXT, feedback INTEGER, created TEXT DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS ix_chat_message_session ON chat_message(session_id, id);
 -- Other users following a job they asked for while it was already queued or running (same file, same spec)
 CREATE TABLE IF NOT EXISTS job_watcher(
   job_id INTEGER NOT NULL REFERENCES job(id) ON DELETE CASCADE, user TEXT NOT NULL, PRIMARY KEY(job_id, user)

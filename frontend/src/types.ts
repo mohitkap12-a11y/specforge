@@ -134,7 +134,6 @@ export interface ConversionEntry {
   has_source: boolean;   // the uploaded original can be downloaded (GET /api/convert/markdown/jobs/{job}/source)
   outdated: boolean;     // made by an older version of its engine: not reused for the same file; an admin can re-convert it
   cancelling: boolean;   // cancel asked; a running Docling conversion stops only when the current file is done
-  kb_doc: number | null;   // its knowledge base document once an admin added it (null: not added yet)
   ahead: number; ahead_of: Job["ahead_of"];   // queued: its place in the conversion queue
   result: Omit<MarkdownConversion, "markdown"> | null;
 }
@@ -253,24 +252,3 @@ export interface McpIssueDetail {
   errors: { error: string; count: number }[]; agents: { agent: string; count: number }[]; clients: { ip: string; count: number }[]; p50_ms: number | null;
   recovered: number; followed: number; next: { call: McpCallRow; next: McpCallRow[] }[];
 }
-
-/** Knowledge base (GET /api/kb): the documents the chatbot answers from, and the converted files not added yet. */
-export interface KbDoc { id: number; title: string; filename: string | null; source: "conversion" | "upload"; job_id: number | null; chars: number; chunks: number; added_by: string | null; enabled: number; created: string }
-export interface KbPending { job: number; source: string | null; title: string | null; user: string | null; created: string }
-export interface KbList { docs: KbDoc[]; pending: KbPending[]; chunks: number; convertible: string[]; direct: string[] }
-export interface KbAddResult { added: KbDoc[]; failed: { job?: number; source: string | null; error: string }[]; pending?: number }
-export interface KbHit { id: number; doc_id: number; title: string; heading: string; text: string; score: number }
-
-/** The chatbot (see chat.py). */
-export interface ChatConfig { enabled: boolean; configured: boolean; provider: string; model: string; suggestions: boolean; docs: number }
-export interface ChatSessionRow { id: number; title: string; pinned: number; created: string; updated: string; messages: number }
-export interface ChatSource { n: number; doc_id: number; title: string; heading: string; text: string }
-export interface ChatStats { tokens?: number; tps?: number | null; seconds?: number; model?: string; excerpts?: number; stopped?: boolean; interrupted?: string }
-export interface ChatMessage { id: number; role: "user" | "assistant"; content: string; sources: ChatSource[]; suggestions: string[]; stats: ChatStats | null; feedback: number | null; created?: string }
-export interface ChatSessionFull extends Omit<ChatSessionRow, "messages"> { messages: ChatMessage[] }
-export type ChatEvent =
-  | { type: "start"; session_id: number; user_message: { id: number; role: "user"; content: string }; sources: ChatSource[]; title: string }
-  | { type: "delta"; text: string }
-  | { type: "done"; message: ChatMessage }
-  | { type: "suggestions"; message_id: number; items: string[] }
-  | { type: "error"; message: string };

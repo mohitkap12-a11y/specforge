@@ -59,10 +59,6 @@ ITEMS: dict[str, dict[str, Any]] = {
                             "exec_test": "insert", "coverage_run": "insert", "coverage_result": "insert", "coverage_test": "insert",
                             "item_result": "insert"}},
     "converter": {"label": "To Markdown library", "requires": [], "dirs": ["conversions"], "tables": {}},
-    "knowledge": {"label": "Knowledge base (documents for the chatbot)", "requires": [], "dirs": ["kb"],
-                  "tables": {"kb_doc": "insert", "kb_chunk": "insert"}},
-    "chats": {"label": "Chatbot history (every user's chats)", "requires": [], "dirs": [],
-              "tables": {"chat_session": "insert", "chat_message": "insert"}},
     "mcp": {"label": "Spec MCP call history", "requires": [], "dirs": [], "tables": {"mcp_issue": "upsert", "mcp_call": "append"}},
     "settings": {"label": "Settings", "requires": [], "dirs": [], "tables": {"setting": "upsert"}},
     "users": {"label": "User accounts (password hashes, no sessions)", "requires": [], "dirs": [], "tables": {"app_user": "ignore"}},
@@ -419,13 +415,6 @@ def _import_db(conn: sqlite3.Connection, z: zipfile.ZipFile, items: set[str], re
         if {"specs", "converter"} & items:
             for t in INDEX_TABLES:
                 conn.execute(f"DELETE FROM {t}")
-        if "knowledge" in items:         # the search index is derived: rebuilt from the chunks
-            conn.execute("DELETE FROM kb_fts")
-            conn.execute("INSERT INTO kb_fts(heading, text, doc_id, chunk_id) SELECT trim(d.title || ' ' || coalesce(c.heading, '')), c.text, c.doc_id, c.id "
-                         "FROM kb_chunk c JOIN kb_doc d ON d.id = c.doc_id")
-        if ("knowledge" in items) != ("jobs_activity" in items):
-            # only one side was restored: job numbers in the knowledge base no longer name the conversions they came from
-            conn.execute("UPDATE kb_doc SET job_id=NULL")
         if "jobs_activity" in items:
             conn.execute("UPDATE job SET state='failed', error='interrupted: imported from a backup' WHERE state IN ('queued','running')")
         bad = conn.execute("PRAGMA foreign_key_check").fetchall()
