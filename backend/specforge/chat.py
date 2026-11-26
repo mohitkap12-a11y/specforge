@@ -207,7 +207,36 @@ def sse(ev: dict) -> bytes:
     return (json.dumps(ev, ensure_ascii=False) + "\n").encode()
 
 
-def run_turn(conn_fn, user: str, sid: int, text: str, cfg: dict, provider, *, regenerate: bool = False) -> Iterator[dict]:
+def spec_hits(speclib, query: str, limit: int) -> list[dict]:
+    """Passages of the parsed specs (latest version of each; the Knowledge base's "Parsed specs" tab), as the chat reads them."""
+    ts = knowledge.terms(query)
+    if not ts or limit < 1:
+        return []
+    try:
+        docs, _ = speclib.docs_for(None, None)
+    except Exception:  # noqa: BLE001  nothing parsed yet
+        return []
+    by_run = {d["run_id"]: d for d in docs}
+    for d in docs:
+        speclib.ensure_index(d)
+    match = " OR ".join('"' + t.replace('"', "").lower() + '"' for t in ts)
+    ph = ",".join("?" * len(by_run))
+    try:
+        found = rows(speclib.conn(), f"SELECT number, title, body, run_id, kind, page, bm25(mcp_fts, 4.0, 8.0, 1.0) AS score FROM mcp_fts "
+                                     f"WHERE mcp_fts MATCH ? AND run_id IN ({ph}) AND kind IN ('section','table') ORDER BY score LIMIT ?",
+                     [match, *by_run, limit])
+    except sqlite3.OperationalError:
+        return []
+    out = []
+    for h in found:
+        d = by_run[h["run_id"]]
+        head = (f"Figure {h['number']}" if h["kind"] == "table" else f"§{h['number']}") + (f" {h['title']}" if h["title"] else "")
+        out.append({"doc_id": None, "title": f"{d['family']} {d['version']}", "heading": head + (f" (p. {h['page']})" if h.get("page") else ""),
+                    "text": h["body"]})
+    return out
+
+
+def run_turn(conn_fn, user: str, sid: int, text: str, cfg: dict, provider, *, regenerate: bool = False, extra_search=None) -> Iterator[dict]:
     """Events: {type: start, user_message, sources} · {type: delta, text} · {type: done, message} · {type: suggestions, message_id, items}
     · {type: error, message}. `conn_fn()` returns this thread's database connection (the generator hops between threads)."""
     chat = cfg["chat"]
@@ -238,7 +267,16 @@ def run_turn(conn_fn, user: str, sid: int, text: str, cfg: dict, provider, *, re
     c.commit()
     model = chat.get("model") or ""
     t0 = time.monotonic()
-    chunks = knowledge.search(c, _retrieval_query(text, history), int(chat.get("top_k") or 6))
+    rq, k = _retrieval_query(text, history), int(chat.get("top_k") or 6)
+    chunks = knowledge.search(c, rq, k)
+    if extra_search:        # parsed specs: the best passages of both sources, interleaved
+        try:
+            more = extra_search(rq, k)
+        except Exception as e:  # noqa: BLE001  a broken index must not stop the chat
+            eventlog.emit("warn", "chat", f"parsed-spec search failed: {e}")
+            more = []
+        mixed = [x for pair in zip(chunks + [None] * k, more + [None] * k) for x in pair if x]
+        chunks = mixed[:k + 2]
     sources = [{"n": i, "doc_id": ch["doc_id"], "title": ch["title"], "heading": ch["heading"], "text": ch["text"][:CONTEXT_CHARS]}
                for i, ch in enumerate(chunks, 1)]
     yield {"type": "start", "session_id": sid, "user_message": {"id": umid, "role": "user", "content": text},
@@ -250,8 +288,12 @@ def run_turn(conn_fn, user: str, sid: int, text: str, cfg: dict, provider, *, re
             raise LLMError("No chat model is set. An admin can choose one in Settings → Chatbot.")
         msgs = build_messages(text, history, chunks, chat)
         eventlog.emit("info", "chat", f"{user}: question ({len(chunks)} excerpts, {sum(len(m['content']) for m in msgs)} chars) to {prov.name}/{model}")
-        for piece in prov.stream(msgs, model=model, temperature=float(chat.get("temperature", 0.2)),
-                                 max_tokens=int(chat.get("max_tokens") or 1500), think=False if chat.get("disable_thinking", True) else None):
+        if hasattr(prov, "stream"):
+            pieces = prov.stream(msgs, model=model, temperature=float(chat.get("temperature", 0.2)),
+                                 max_tokens=int(chat.get("max_tokens") or 1500), think=False if chat.get("disable_thinking", True) else None)
+        else:      # e.g. the OpenCode CLI answers in one piece
+            pieces = iter([prov.generate(msgs, model=model, temperature=float(chat.get("temperature", 0.2)))])
+        for piece in pieces:
             if vis := parser.feed(piece):
                 answer.append(vis)
                 yield {"type": "delta", "text": vis}

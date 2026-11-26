@@ -116,7 +116,9 @@ The result is stored (filter, search and page it in the UI) and exports to a Mar
 
 **Chatbot** (floating button bottom right; *Expand* opens the full page with your chat history: search, rename, pin, delete, export, delete all; chats are private to each user). Answers stream, cite their sources ([1], [2] with the passage one click away), render tables and code (copy, download, JSON formatting, sandboxed HTML preview), end with three follow-up questions, and show tokens/second. *Stop* and *Regenerate* work as in any chat app.
 
-**Models (Settings → Chatbot).** Any local server: **Ollama** or an **OpenAI-compatible** one (vLLM, llama.cpp `llama-server`, LM Studio, SGLang). The answer is grounded in ~6 retrieved passages (~2.5k tokens), so a small instruct model is enough. Suggestions, 4-bit (Q4_K_M / AWQ) builds:
+The chatbot reads the knowledge base **and the parsed specs** (Knowledge base → Parsed specs; switch in Settings → Chatbot), and its history and documents are part of Backup / Export-Import.
+
+**Models (Settings → Chatbot).** Uses the same Ollama connection as the other AI features (Settings → AI providers); OpenCode (not streamed) and OpenAI-compatible servers also work. Any local server: **Ollama** or an **OpenAI-compatible** one (vLLM, llama.cpp `llama-server`, LM Studio, SGLang). The answer is grounded in ~6 retrieved passages (~2.5k tokens), so a small instruct model is enough. Suggestions, 4-bit (Q4_K_M / AWQ) builds:
 
 | GPU memory | Model | Why |
 |---|---|---|

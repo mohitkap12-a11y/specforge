@@ -204,3 +204,42 @@ def test_sessions_are_private_and_chat_can_be_turned_off(client):
     assert client.get("/api/chat/sessions").json() == []
     client.put("/api/settings", json={"chat": {"enabled": False}})
     assert client.post("/api/chat/sessions").status_code == 409
+
+
+def test_backup_round_trip_of_knowledge_base_and_chats(tmp_path, monkeypatch):
+    import io
+
+    from specforge.core import db
+
+    def make(home):
+        monkeypatch.setenv("SPECFORGE_HOME", str(home))
+        db._local.__dict__.clear()
+        from specforge.api.app import create_app
+        return TestClient(create_app())
+
+    with make(tmp_path / "a") as a:
+        a.post("/api/kb/upload", files=[("files", ("a.md", DOC.encode(), "text/markdown"))])
+        sid = a.post("/api/chat/sessions").json()["id"]
+        a.put("/api/settings", json={"chat": {"model": "m"}})
+        monkeypatch.setattr("specforge.api.app.make_provider", lambda n, s: FakeProvider(["Hi"]))
+        a.post(f"/api/chat/sessions/{sid}/messages", json={"text": "hello"})
+        data = a.get("/api/backup/export", params={"items": "knowledge,chats"}).content
+    with make(tmp_path / "b") as b:
+        r = b.post("/api/backup/import", files={"file": ("b.zip", io.BytesIO(data), "application/zip")}, data={"items": "knowledge,chats"})
+        assert r.status_code == 200, r.text
+        assert b.get("/api/kb/search", params={"q": "SQ_ID"}).json()[0]["heading"] == "Queues"      # the index was rebuilt
+        assert "Identify" in b.get(f"/api/kb/{b.get('/api/kb').json()['docs'][0]['id']}").json()["markdown"]
+        assert [m["role"] for m in b.get(f"/api/chat/sessions/{sid}").json()["messages"]] == ["user", "assistant"]
+
+
+def test_chat_also_reads_parsed_specs(conn, demo_dir):
+    from specforge import specquery
+    from specforge.core import config
+    from specforge.ingest import store
+
+    d = store.register_document(conn, demo_dir / "nvme-base-2.4.pdf")
+    store.run_parse(conn, d["id"], workers=1)
+    lib = specquery.SpecLibrary(str(config.db_path()))
+    hits = chat.spec_hits(lib, "Identify controller", 4)
+    assert hits and hits[0]["doc_id"] is None and hits[0]["title"].startswith("nvme-base") and hits[0]["text"]
+    assert chat.spec_hits(lib, "zzzz", 4) == []

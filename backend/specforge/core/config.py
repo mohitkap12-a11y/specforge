@@ -22,7 +22,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # the chatbot (chat.py): provider "ollama" or "openai" (an OpenAI-compatible server), retrieval depth, answers only from the
     # knowledge base (strict), no hidden "thinking" for speed, follow-up question suggestions
     "chat": {"enabled": True, "provider": "ollama", "model": "", "temperature": 0.2, "top_k": 6, "history_messages": 8,
-             "max_tokens": 1500, "strict": True, "disable_thinking": True, "suggestions": True, "system_prompt": ""},
+             "max_tokens": 1500, "strict": True, "use_specs": True, "disable_thinking": True, "suggestions": True, "system_prompt": ""},
     "parser": {"workers": 0, "table_strategy": "auto"},  # workers=0 -> cpu_count-1
     "llm": {"max_concurrency": 2, "max_retries": 2},
     "logging": {"min_level": "info", "capture_prompts": True, "preview_chars": 4000},  # capture_prompts: keep LLM prompts/replies in the activity log

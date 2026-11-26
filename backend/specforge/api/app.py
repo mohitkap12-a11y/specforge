@@ -1255,11 +1255,10 @@ def create_app() -> FastAPI:
         cfg = settings()
         try:
             prov = make_provider(cfg["chat"].get("provider") or "ollama", cfg)
-            if not hasattr(prov, "stream"):
-                raise LLMError(f"provider '{prov.name}' cannot stream; choose Ollama or an OpenAI-compatible server in Settings → Chatbot")
         except LLMError as e:
             raise HTTPException(409, str(e)) from e
-        events = chat.run_turn(conn, user, sid, text or "", cfg, prov, regenerate=regenerate)
+        events = chat.run_turn(conn, user, sid, text or "", cfg, prov, regenerate=regenerate,
+                              extra_search=(lambda q, n: chat.spec_hits(speclib, q, n)) if cfg["chat"].get("use_specs", True) else None)
         return StreamingResponse((chat.sse(e) for e in events), media_type="application/x-ndjson",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 

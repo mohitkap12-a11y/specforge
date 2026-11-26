@@ -384,7 +384,7 @@ export default function SettingsPage() {
             <div className="fields">
               <Field label="Chatbot"><span className="row"><Switch checked={s.chat?.enabled !== false} onChange={(v) => set(["chat", "enabled"], v)} label="Chatbot enabled" /> {s.chat?.enabled !== false ? "On" : "Off"}</span></Field>
               <Field label="Server type" hint="Ollama, or any OpenAI-compatible server (vLLM, llama.cpp, LM Studio, SGLang)">
-                <select value={s.chat?.provider ?? "ollama"} onChange={(e) => set(["chat", "provider"], e.target.value)}><option value="ollama">Ollama</option><option value="openai">OpenAI-compatible (vLLM, llama.cpp, LM Studio …)</option></select>
+                <select value={s.chat?.provider ?? "ollama"} onChange={(e) => set(["chat", "provider"], e.target.value)}><option value="ollama">Ollama</option><option value="openai">OpenAI-compatible (vLLM, llama.cpp, LM Studio …)</option><option value="opencode">OpenCode (answers appear at once, not streamed)</option></select>
               </Field>
               <Field label="Model" hint="The model id the server lists, e.g. qwen3:8b (Ollama) or Qwen/Qwen3-8B (vLLM)"><input value={s.chat?.model ?? ""} placeholder="model id" onChange={(e) => set(["chat", "model"], e.target.value)} /></Field>
               <Field label="Temperature" hint="Low is more factual"><input type="number" step="0.1" min="0" max="2" value={s.chat?.temperature ?? 0.2} onChange={(e) => set(["chat", "temperature"], e.target.value === "" ? 0.2 : Number(e.target.value))} /></Field>
@@ -398,11 +398,12 @@ export default function SettingsPage() {
                 <Field label="Timeout (seconds)"><input type="number" value={s.openai?.timeout ?? ""} onChange={(e) => num(["openai", "timeout"])(e.target.value)} /></Field>
               </div>
             )}
-            <Models provider={s.chat?.provider === "openai" ? "openai" : "ollama"} />
+            <Models provider={s.chat?.provider === "openai" ? "openai" : s.chat?.provider === "opencode" ? "opencode" : "ollama"} />
             <div className="divider" />
             <div className="fields">
               <Field label="Answer only from the knowledge base" hint="Off: the model may add general knowledge, and says when it does"><span className="row"><Switch checked={s.chat?.strict !== false} onChange={(v) => set(["chat", "strict"], v)} label="Strict answers" /> {s.chat?.strict !== false ? "Strict" : "Allow general knowledge"}</span></Field>
               <Field label="Skip hidden reasoning" hint="Much faster first words on Qwen3 and similar models"><span className="row"><Switch checked={s.chat?.disable_thinking !== false} onChange={(v) => set(["chat", "disable_thinking"], v)} label="Disable thinking" /> {s.chat?.disable_thinking !== false ? "Fast" : "Model decides"}</span></Field>
+              <Field label="Also search parsed specs" hint="The specs on the Knowledge base → Parsed specs tab (latest version of each)"><span className="row"><Switch checked={s.chat?.use_specs !== false} onChange={(v) => set(["chat", "use_specs"], v)} label="Search parsed specs" /> {s.chat?.use_specs !== false ? "On" : "Off"}</span></Field>
               <Field label="Follow-up suggestions"><span className="row"><Switch checked={s.chat?.suggestions !== false} onChange={(v) => set(["chat", "suggestions"], v)} label="Suggestions" /> {s.chat?.suggestions !== false ? "On" : "Off"}</span></Field>
             </div>
             <Field label="Extra instructions" hint="Added to the assistant's rules, e.g. “Always name the specification revision.”"><textarea rows={3} value={s.chat?.system_prompt ?? ""} onChange={(e) => set(["chat", "system_prompt"], e.target.value)} /></Field>
