@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BookPlus, Eye, FileText, Library, Search, Trash2, UploadCloud, X } from "lucide-react";
@@ -58,7 +58,6 @@ function Documents() {
   const [preview, setPreview] = useState<KbDoc | null>(null);
   const [filter, setFilter] = useState("");
   const [autoAdd, setAutoAdd] = useState(true);
-  const [waiting, setWaiting] = useState<number[]>([]);       // conversions started here: added as soon as they finish
   const kb = useQuery({ queryKey: ["kb"], queryFn: api.kb, refetchInterval: 5000 });
   const refresh = () => { void qc.invalidateQueries({ queryKey: ["kb"] }); void qc.invalidateQueries({ queryKey: ["conversions"] }); };
   const report = (r: { added: unknown[]; failed: { error: string }[] }) => push({
@@ -75,21 +74,15 @@ function Documents() {
       if (rest.length) push({ title: `${rest.length} file${rest.length === 1 ? "" : "s"} not supported`, description: rest.map((f) => f.name).join(", "), tone: "bad" });
       if (direct.length) report(await api.kbUpload(direct));
       for (const f of convert) {     // PDF, DOC and DOCX: To Markdown first, in the background
-        const { job, reused } = await api.toMarkdownJob(f);
-        if (autoAdd) setWaiting((w) => [...w, job]);
-        track(job, `Convert ${f.name}`, () => refresh());
+        // the server adds it when the conversion finishes (whatever page you are on); a file already converted is added at once
+        const { job, reused, joined } = await api.toMarkdownJob(f, true, undefined, autoAdd);
+        track(job, `Convert ${f.name}`, () => { if (autoAdd && joined) addPending.mutate([job]); refresh(); });
         if (reused) push({ title: `${f.name} is already converted`, description: "Its existing conversion is used.", tone: "ok" });
         else push({ title: `Converting ${f.name}`, description: autoAdd ? "It is added to the knowledge base when the conversion finishes." : "Add it from the list below when the conversion finishes.", tone: "info" });
       }
     },
     onSuccess: refresh, onError: (e) => push({ title: "Upload failed", description: errText(e), tone: "bad" }),
   });
-  // conversions started here: add each one as soon as it shows up as converted and not added
-  useEffect(() => {
-    const ready = (kb.data?.pending ?? []).filter((p) => waiting.includes(p.job)).map((p) => p.job);
-    if (ready.length && !addPending.isPending) { setWaiting((w) => w.filter((j) => !ready.includes(j))); addPending.mutate(ready); }
-  }, [kb.data, waiting, addPending]);
-
   const onFiles = (l: FileList | null) => { if (l?.length) upload.mutate(Array.from(l)); if (input.current) input.current.value = ""; };
   const q = filter.trim().toLowerCase();
   const docs = (kb.data?.docs ?? []).filter((d) => !q || [d.title, d.filename, d.added_by].some((v) => v?.toLowerCase().includes(q)));

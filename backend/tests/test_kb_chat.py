@@ -321,3 +321,16 @@ def test_an_answer_never_lands_in_a_chat_that_reused_the_id(conn):
     assert b["id"] != a["id"]
     assert list(gen)[-1]["type"] == "error"
     assert chat.get_session(conn, b["id"], "bob")["messages"] == []
+
+
+def test_conversion_started_with_add_to_kb_is_added_by_the_server(client):
+    import time
+
+    job = client.post("/api/convert/markdown/jobs", params={"add_to_kb": "true", "engine": "builtin"},
+                      files={"file": ("auto.docx", _docx(), "application/octet-stream")}).json()["job"]
+    for _ in range(300):
+        if client.get(f"/api/jobs/{job}").json()["state"] in ("done", "failed"):
+            break
+        time.sleep(0.1)
+    kb = client.get("/api/kb").json()
+    assert [d["job_id"] for d in kb["docs"]] == [job] and kb["pending"] == []

@@ -282,7 +282,7 @@ def create_app() -> FastAPI:
                 upload = folder / p["upload"] if folder and p.get("upload") else None
                 if upload is None or not upload.is_file():
                     raise LookupError("its uploaded file is gone (it was queued before queued jobs survived a restart)")
-                work, pool = _convert_work(p["filename"], folder, str(upload), p.get("front_matter", True), p.get("engine"), j["user"] or p.get("user")), convert.serial_pool()
+                work, pool = _convert_work(p["filename"], folder, str(upload), p.get("front_matter", True), p.get("engine"), j["user"] or p.get("user"), bool(p.get("add_to_kb"))), convert.serial_pool()
             else:
                 d = row(conn(), "SELECT * FROM spec_document WHERE id=?", (p.get("document_id"),))
                 if d is None:
@@ -887,10 +887,13 @@ def create_app() -> FastAPI:
         return {**_conversion_json(name, res), "markdown": res.markdown}
 
     @app.post("/api/convert/markdown/jobs")
-    def convert_markdown_job(file: UploadFile = File(...), front_matter: bool = Query(True), engine: str | None = Query(None)):
+    def convert_markdown_job(file: UploadFile = File(...), front_matter: bool = Query(True), engine: str | None = Query(None),
+                             add_to_kb: bool = Query(False)):
         """Background conversion: returns {job}; fetch the result from /api/convert/markdown/jobs/{job} once it is done.
         A file that is already in the library with the same options is not converted again: {job, reused: true} names that conversion."""
         name, suffix = _convert_params(file, engine)
+        if add_to_kb and me()["role"] != "admin":
+            raise HTTPException(403, "only an admin can add files to the knowledge base")
         _prune_conversions()
         folder = Path(tempfile.mkdtemp(dir=_conversions_dir()))
         try:
@@ -902,6 +905,8 @@ def create_app() -> FastAPI:
         if (same := _converted_already(sha, front_matter, engine or convert.default_engine())) is not None:
             shutil.rmtree(folder, ignore_errors=True)
             audit(f"{name} is already converted to Markdown; the existing conversion is reused", job_id=same)
+            if add_to_kb:
+                kb_add_conversions({"jobs": [same]})
             return {"job": same, "reused": True}
         if (same := _converting_now(sha, front_matter, engine or convert.default_engine())) is not None:
             shutil.rmtree(folder, ignore_errors=True)
@@ -909,9 +914,9 @@ def create_app() -> FastAPI:
             audit(f"{name} is already being converted (asked for by {job_owner(same)}); following that conversion", job_id=same["id"])
             return {"job": same["id"], "reused": True, "joined": job_owner(same)}
         user = me()["username"]
-        job = submit_job("convert-markdown", _convert_work(name, folder, path, front_matter, engine, user),
+        job = submit_job("convert-markdown", _convert_work(name, folder, path, front_matter, engine, user, add_to_kb),
                          {"filename": name, "user": user, "engine": engine, "dir": folder.name, "upload": Path(path).name,
-                          "sha256": sha, "front_matter": front_matter},
+                          "sha256": sha, "front_matter": front_matter, "add_to_kb": add_to_kb or None},
                          label=f"Convert {name} to Markdown", pool=convert.serial_pool(), queue=convert.QUEUE)
         audit(f"Conversion of {name} to Markdown queued", job_id=job, engine=engine or convert.default_engine())
         return {"job": job}
@@ -925,7 +930,7 @@ def create_app() -> FastAPI:
                 return j
         return None
 
-    def _convert_work(name: str, folder: Path, path: str, front_matter: bool, engine: str | None, user: str | None):
+    def _convert_work(name: str, folder: Path, path: str, front_matter: bool, engine: str | None, user: str | None, add_to_kb: bool = False):
         suffix = Path(name).suffix.lower()
 
         def work(c, prog):
@@ -941,6 +946,11 @@ def create_app() -> FastAPI:
                 shutil.rmtree(folder, ignore_errors=True)
                 raise
             eventlog.emit("info", "api", f"Converted {name} to Markdown", user=user, format=res.source_format, engine=res.engine, **res.stats)
+            if add_to_kb:           # asked for on upload by an admin: done here so it happens whatever page the user is on
+                try:
+                    knowledge.add_markdown(c, res.markdown, filename=name, source="conversion", user=user, job_id=prog.job_id, title=res.title or None)
+                except knowledge.KnowledgeError as e:
+                    eventlog.emit("warn", "api", f"Not added to the knowledge base: {e}", user=user)
             return {**_conversion_json(name, res), "dir": folder.name}
         return work
 
