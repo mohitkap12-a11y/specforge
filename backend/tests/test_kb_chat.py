@@ -334,3 +334,22 @@ def test_conversion_started_with_add_to_kb_is_added_by_the_server(client):
         time.sleep(0.1)
     kb = client.get("/api/kb").json()
     assert [d["job_id"] for d in kb["docs"]] == [job] and kb["pending"] == []
+
+
+def test_legacy_encoded_text_is_not_mistaken_for_utf16():
+    text = "Identify returns café controller data."
+    assert knowledge.decode(text.encode("cp1252")) == text
+    assert knowledge.decode("héllo".encode("utf-16")) == "héllo"
+
+
+def test_only_one_answer_at_a_time_per_chat(conn):
+    a = chat.create_session(conn, "alice")
+    cfg = {"chat": {"model": "m", "top_k": 3}}
+    first = chat.run_turn(lambda: conn, "alice", a["id"], "one", cfg, FakeProvider(["x"]))
+    assert next(first)["type"] == "start"
+    second = list(chat.run_turn(lambda: conn, "alice", a["id"], "two", cfg, FakeProvider(["y"])))
+    assert second[0]["type"] == "error" and "still being written" in second[0]["message"]
+    list(first)
+    assert [e["type"] for e in chat.run_turn(lambda: conn, "alice", a["id"], "three", cfg, FakeProvider(["z"]))][0] == "start"
+    msgs = chat.get_session(conn, a["id"], "alice")["messages"]
+    assert [m["content"] for m in msgs if m["role"] == "user"] == ["one", "three"]

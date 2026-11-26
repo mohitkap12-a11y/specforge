@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 import time
 from typing import Any, Iterator
 
@@ -246,7 +247,26 @@ def spec_hits(speclib, query: str, limit: int) -> list[dict]:
     return out
 
 
-def run_turn(conn_fn, user: str, sid: int, text: str, cfg: dict, provider, *, regenerate: bool = False, extra_search=None) -> Iterator[dict]:
+_active: set[int] = set()
+_active_lock = threading.Lock()
+
+
+def run_turn(conn_fn, user: str, sid: int, text: str, cfg: dict, provider, **kw) -> Iterator[dict]:
+    """One answer at a time per chat (a second tab asking meanwhile is refused, so the history keeps its order)."""
+    with _active_lock:
+        busy = sid in _active
+        _active.add(sid)
+    if busy:
+        yield {"type": "error", "message": "an answer is still being written in this chat (another tab?): wait for it or press Stop there"}
+        return
+    try:
+        yield from _run_turn(conn_fn, user, sid, text, cfg, provider, **kw)
+    finally:
+        with _active_lock:
+            _active.discard(sid)
+
+
+def _run_turn(conn_fn, user: str, sid: int, text: str, cfg: dict, provider, *, regenerate: bool = False, extra_search=None) -> Iterator[dict]:
     """Events: {type: start, user_message, sources} · {type: delta, text} · {type: done, message} · {type: suggestions, message_id, items}
     · {type: error, message}. `conn_fn()` returns this thread's database connection (the generator hops between threads)."""
     chat = cfg["chat"]

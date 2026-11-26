@@ -68,12 +68,21 @@ class _Html(HTMLParser):
 
 
 def decode(raw: bytes) -> str:
-    for enc in ("utf-8-sig", "utf-16"):
+    """UTF-8, UTF-16 only when it announces itself with a byte-order mark (a legacy 8-bit file can decode as UTF-16 by accident),
+    else Windows-1252 / Latin-1."""
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         try:
-            return raw.decode(enc)
+            return raw.decode("utf-16")
         except UnicodeError:
-            continue
-    return raw.decode("latin-1")
+            pass
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeError:
+        pass
+    try:
+        return raw.decode("cp1252")
+    except UnicodeError:
+        return raw.decode("latin-1")
 
 
 def to_markdown(filename: str, raw: bytes) -> str:
