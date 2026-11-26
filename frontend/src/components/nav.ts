@@ -33,11 +33,17 @@ export const coverageAccess = (isAdmin: boolean, released: boolean): CoverageAcc
 export const COVERAGE_PAGES = NAV.filter((n) => n.group === "coverage").map((n) => n.to);
 export const isCoveragePage = (path: string) => COVERAGE_PAGES.some((p) => path === p || path.startsWith(p + "/"));
 export const COMING_SOON: NavItem = { to: "/workflow", label: "Coverage Tool", icon: Gauge, desc: "Measure which commands, fields and requirements your tests cover. Coming soon.", group: "coverage", soon: true };
+/** The Chatbot is released the same way as the Coverage Tool (Settings → Feature rollout): `chatAccess` has the same three states. */
+export const chatAccess = coverageAccess;
+export const isChatPage = (path: string) => path === "/chat" || path.startsWith("/chat/");
+export const COMING_SOON_CHAT: NavItem = { to: "/chat", label: "Chatbot", icon: MessagesSquare, desc: "Ask questions about the knowledge base. Coming soon.", group: "knowledge", soon: true };
 
 /** The pages this user may open: admin-only pages (user management) only for an admin of a server with sign-in. While the
  *  Coverage Tool is coming soon all its pages (the spec library too) give way to one placeholder. */
-export const navFor = (canManageUsers: boolean, coverage: CoverageAccess = "released"): NavItem[] => {
-  const pages = NAV.filter((n) => canManageUsers || !n.adminOnly);
+export const navFor = (canManageUsers: boolean, coverage: CoverageAccess = "released", chat: CoverageAccess = "released"): NavItem[] => {
+  let pages = NAV.filter((n) => canManageUsers || !n.adminOnly);
+  // the Chatbot not released yet: its entry stays in the menu as "coming soon"
+  if (chat === "soon") pages = pages.map((n) => (n.to === "/chat" ? COMING_SOON_CHAT : n));
   if (coverage !== "soon") return pages;
   return [...pages.filter((n) => n.group !== "coverage"), COMING_SOON];
 };

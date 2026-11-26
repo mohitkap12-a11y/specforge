@@ -28,7 +28,7 @@ function Tool({ icon: Icon, tone, name, tagline, points, to, cta, links, foot, s
 
 /** The landing page: SpecForge is separate tools on one spec library; each card says what it does and what it needs. */
 export default function HomePage() {
-  const { coverage } = useAuth();
+  const { coverage, chat } = useAuth();
   const specs = useQuery({ queryKey: ["specs"], queryFn: api.specs });
   const comps = useQuery({ queryKey: ["comparisons"], queryFn: api.comparisons });
   const parsed = (specs.data ?? []).filter((d) => d.runs.some((r) => r.status === "done")).length;
@@ -49,7 +49,10 @@ export default function HomePage() {
           foot={<>{parsed} parsed spec(s) in the library · {(comps.data ?? []).length >= 100 ? "100+" : (comps.data ?? []).length} saved comparison(s)</>} />
         <Tool icon={MessagesSquare} tone="chat" name="Knowledge & Chat" tagline="Ask your documents. Answers come with sources."
           points={["Upload specs and project documents once; an admin adds them to the knowledge base", "A chatbot in the corner of every page, or full screen with your chat history", "Code, JSON and HTML answers you can copy, download and preview"]}
-          to="/chat" cta="Open the chatbot" links={[{ to: "/knowledge", label: "Knowledge base" }]} />
+          to="/chat" cta="Open the chatbot" links={[{ to: "/knowledge", label: "Knowledge base" }]}
+          soon={chat === "soon"}
+          badge={chat === "preview" && <Link to="/settings#rollout" className="badge warn" title="Only admins can use the chatbot until it is released in Settings">Admin preview</Link>}
+          foot={chat === "soon" ? <>Being tried out internally; it appears here once it is released.</> : undefined} />
         <Tool icon={Bot} tone="agents" name="Spec MCP" tagline="Your coding agent asks the parsed specs instead of guessing."
           points={["One MCP endpoint for OpenCode, Roo Code and Claude Code; no account or key", "Command Dwords and fields, data structures, sections and figures, with page citations", "What changed between versions, computed once on the server"]}
           to="/agents" cta="Connect your agent" foot={<>{parsed} parsed spec(s) served</>} />

@@ -21,8 +21,8 @@ export function Shell({ children }: { children: ReactNode }) {
   const [palette, setPalette] = useState(false);
   const [theme, setTheme] = useTheme();
   const { jobs } = useJobs();
-  const { me, user, isAdmin, canManageUsers, coverage, signOut } = useAuth();
-  const pages = navFor(canManageUsers, coverage);
+  const { me, user, isAdmin, canManageUsers, coverage, chat, signOut } = useAuth();
+  const pages = navFor(canManageUsers, coverage, chat);
   const health = useQuery({ queryKey: ["health"], queryFn: api.health, staleTime: 60_000 });
   const running = jobs.filter(isActive).length;
   const here = (n: NavItem) => (n.to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(n.to));
@@ -74,6 +74,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <div key={g.key}>
               {g.title ? <div className="nav-group"><span className="lbl">{g.title}</span>
                 {g.key === "coverage" && coverage === "preview" && <span className="lbl preview-tag" title="Only admins see the Coverage Tool until it is released in Settings → Feature rollout">Admin preview</span>}
+                {g.key === "knowledge" && chat === "preview" && <span className="lbl preview-tag" title="Only admins see the Chatbot until it is released in Settings → Feature rollout">Chat: admin preview</span>}
               </div> : <div style={{ height: 6 }} />}
               {pages.filter((n) => n.group === g.key).map(link)}
             </div>
@@ -108,7 +109,7 @@ export function Shell({ children }: { children: ReactNode }) {
         </header>
         <main className="main" id="main">{children}</main>
       </div>
-      <ChatWidget />
+      {chat !== "soon" && <ChatWidget />}
       <CommandPalette open={palette} onClose={() => setPalette(false)} />
     </div>
   );

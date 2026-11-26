@@ -3,7 +3,7 @@ import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Link, useLocation } from "react-router-dom";
 import { api, type BackupItem } from "../api";
 import { useJobs } from "../components/jobs";
-import type { ResetScope } from "../types";
+import type { Features, ResetScope } from "../types";
 import { ErrorNote, Field, Loading, PageHeader, Segmented, Switch } from "../components/ui";
 import { useToast } from "../components/Toasts";
 import { useAuth } from "../components/auth";
@@ -265,32 +265,39 @@ function OfflinePanel() {
   );
 }
 
-/** Staged rollout: the Coverage Tool is an admin-only preview until it is released here; applies at once, not with the save bar. */
+/** Staged rollout: the Coverage Tool and the Chatbot are admin-only previews until released here; applies at once, not with the save bar. */
 function Rollout() {
   const qc = useQueryClient();
   const toast = useToast();
   const { me } = useAuth();
-  const released = !!me.features?.coverage_released;
   const flip = useMutation({
-    mutationFn: (v: boolean) => api.setFeatures({ coverage_released: v }),
-    onSuccess: (_, v) => {
-      qc.invalidateQueries({ queryKey: ["me"] });
-      toast.push({ title: v ? "Coverage Tool released to every user" : "Coverage Tool is admin-only again", tone: "ok" });
-    },
+    mutationFn: (v: Partial<Features>) => api.setFeatures(v),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["me"] }),
   });
-  const change = (v: boolean) => {
-    if (window.confirm(v ? "Release the Coverage Tool to every user? Its pages appear in everyone's menu right away."
-      : "Take the Coverage Tool back to an admin-only preview? Other users see it as coming soon again.")) flip.mutate(v);
+  const change = (key: keyof Features, name: string, v: boolean, pages: string) => {
+    if (window.confirm(v ? `Release the ${name} to every user? ${pages} appear in everyone's menu right away.`
+      : `Take the ${name} back to an admin-only preview? Other users see it as coming soon again.`))
+      flip.mutate({ [key]: v }, { onSuccess: () => toast.push({ title: v ? `${name} released to every user` : `${name} is admin-only again`, tone: "ok" }) });
   };
+  const cov = !!me.features?.coverage_released, chat = !!me.features?.chat_released;
   return (
     <Section id="rollout" title="Feature rollout" description="Tools still being tried out internally. Until you release one, only admins can use it; everyone else sees it as coming soon.">
       <div className="row" style={{ flexWrap: "nowrap", alignItems: "flex-start" }}>
-        <Switch label="Release the Coverage Tool to every user" checked={released} onChange={(v) => !flip.isPending && change(v)} />
+        <Switch label="Release the Coverage Tool to every user" checked={cov} onChange={(v) => !flip.isPending && change("coverage_released", "Coverage Tool", v, "Its pages")} />
         <div>
-          <strong>Coverage Tool</strong> <span className={`badge ${released ? "ok" : "warn"}`}>{released ? "Released" : "Admin preview"}</span>
-          <div className="muted small">{released
+          <strong>Coverage Tool</strong> <span className={`badge ${cov ? "ok" : "warn"}`}>{cov ? "Released" : "Admin preview"}</span>
+          <div className="muted small">{cov
             ? "Every user sees the Coverage Tool and all its pages in the menu."
             : "Only admins see the Workflow, Sets, Catalog, Command DBs, Scenarios, Coverage and Reports pages. Specs and Explorer stay open to everyone (Spec Compare uses them)."}</div>
+        </div>
+      </div>
+      <div className="row" style={{ flexWrap: "nowrap", alignItems: "flex-start", marginTop: 12 }}>
+        <Switch label="Release the Chatbot to every user" checked={chat} onChange={(v) => !flip.isPending && change("chat_released", "Chatbot", v, "The Chatbot page and the chat button")} />
+        <div>
+          <strong>Chatbot</strong> <span className={`badge ${chat ? "ok" : "warn"}`}>{chat ? "Released" : "Admin preview"}</span>
+          <div className="muted small">{chat
+            ? "Every user sees the Chatbot page and the chat button in the corner of every page."
+            : "Only admins can use the Chatbot page and the chat button. The knowledge base stays open to everyone."}</div>
         </div>
       </div>
       <ErrorNote error={flip.error} />

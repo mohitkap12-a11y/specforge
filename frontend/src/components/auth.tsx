@@ -3,11 +3,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, UNAUTHORIZED } from "../api";
 import type { AppUser, Me } from "../types";
 import LoginPage from "../pages/Login";
-import { coverageAccess, type CoverageAccess } from "./nav";
+import { chatAccess, coverageAccess, type CoverageAccess } from "./nav";
 
 /** `canManageUsers`: an admin on a server with sign-in (without sign-in there are no accounts to manage).
  *  `coverage`: whether this user can use the Coverage Tool (released, admin-only preview, or coming soon). */
-interface AuthCtx { me: Me; user: AppUser; isAdmin: boolean; canManageUsers: boolean; coverage: CoverageAccess; signOut: () => Promise<void> }
+interface AuthCtx { me: Me; user: AppUser; isAdmin: boolean; canManageUsers: boolean; coverage: CoverageAccess; chat: CoverageAccess; signOut: () => Promise<void> }
 const Ctx = createContext<AuthCtx | null>(null);
 
 export function useAuth(): AuthCtx {
@@ -37,5 +37,6 @@ export function AuthGate({ children }: { children: ReactNode }) {
   };
   const isAdmin = me.user.role === "admin";
   const coverage = coverageAccess(isAdmin, !!me.features?.coverage_released);
-  return <Ctx.Provider value={{ me, user: me.user, isAdmin, canManageUsers: me.auth && isAdmin, coverage, signOut }}>{children}</Ctx.Provider>;
+  const chat = chatAccess(isAdmin, !!me.features?.chat_released);
+  return <Ctx.Provider value={{ me, user: me.user, isAdmin, canManageUsers: me.auth && isAdmin, coverage, chat, signOut }}>{children}</Ctx.Provider>;
 }

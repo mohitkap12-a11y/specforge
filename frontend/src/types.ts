@@ -192,7 +192,7 @@ export interface AppUser {
 }
 /** `auth` false: the server runs without sign-in (single local user, who is admin). */
 /** Staged rollouts an admin turns on for every user (see PUT /api/features). */
-export interface Features { coverage_released: boolean }
+export interface Features { coverage_released: boolean; chat_released: boolean }
 export interface Me { auth: boolean; user: AppUser | null; pending: number; features?: Partial<Features> }
 
 export type ResetScope = "comparisons" | "coverage" | "specs" | "all";

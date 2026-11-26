@@ -77,7 +77,9 @@ MCP_PREFIX, MCP_PUBLIC = "/api/mcp/", {"/api/mcp/info"}
 # The Coverage Tool's own routes: admins only until an admin releases the tool (settings.features.coverage_released).
 # Specs, parse runs and the explorer are not here: the converter, Compare and the MCP endpoint share them.
 COVERAGE_PREFIXES = ("/api/sets", "/api/cmddb", "/api/coverage", "/api/scenarios", "/api/cross")
-FEATURES = {"coverage_released": bool}
+# The chatbot (and its floating widget) is gated the same way by settings.features.chat_released. The knowledge base stays open.
+CHAT_PREFIX = "/api/chat"
+FEATURES = {"coverage_released": bool, "chat_released": bool}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # With login turned off (`serve --no-auth`, localhost only) the single local user is the admin.
 LOCAL_USER = {"id": 0, "username": "local", "display_name": None, "role": "admin", "status": "active"}
@@ -120,6 +122,14 @@ def coverage_route(path: str) -> bool:
 
 def coverage_released(conn) -> bool:
     return bool((config.load_settings(conn).get("features") or {}).get("coverage_released"))
+
+
+def chat_route(path: str) -> bool:
+    return path == CHAT_PREFIX or path.startswith(CHAT_PREFIX + "/")
+
+
+def chat_released(conn) -> bool:
+    return bool((config.load_settings(conn).get("features") or {}).get("chat_released"))
 
 
 class McpDispatch:
@@ -169,6 +179,9 @@ class AuthGate:
         if (user is not None and user["role"] != "admin" and coverage_route(path)
                 and not await run_in_threadpool(lambda: coverage_released(get_conn()))):
             return await JSONResponse({"detail": "the Coverage Tool is coming soon: an admin has not released it yet"}, 403)(scope, receive, send)
+        if (user is not None and user["role"] != "admin" and chat_route(path)
+                and not await run_in_threadpool(lambda: chat_released(get_conn()))):
+            return await JSONResponse({"detail": "the Chatbot is coming soon: an admin has not released it yet"}, 403)(scope, receive, send)
         if renewed:          # the server extended the session: extend the browser's cookie too
             cookie, inner = session_cookie(token, is_https(req)), send
 

@@ -26,7 +26,7 @@ import type { ReactNode } from "react";
 
 export default function App() {
   const { push } = useToast();
-  const { canManageUsers, coverage } = useAuth();
+  const { canManageUsers, coverage, chat } = useAuth();
   // the Coverage Tool's pages: a "coming soon" page until an admin releases it (admins use it meanwhile)
   const cov = (page: ReactNode) => (coverage === "soon" ? <ComingSoonPage /> : page);
   return (
@@ -38,7 +38,7 @@ export default function App() {
         <Route path="/compare" element={<ComparePage />} />
         <Route path="/dashboard" element={<Navigate to="/" replace />} />
         <Route path="/knowledge" element={<KnowledgePage />} />
-        <Route path="/chat" element={<ChatPage />} />
+        <Route path="/chat" element={chat === "soon" ? <ComingSoonPage tool="chat" /> : <ChatPage />} />
         <Route path="/specs" element={<Navigate to="/knowledge?tab=specs" replace />} />
         <Route path="/convert" element={<ConvertPage />} />
         <Route path="/explorer" element={cov(<ExplorerPage />)} />

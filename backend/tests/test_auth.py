@@ -239,7 +239,7 @@ def test_coverage_tool_is_admin_only_until_released(app):
     auth.create_user(get_conn(), "erin", "erinpass1", status="active")
     with client(app) as admin, client(app) as c:
         login(admin, "root", "rootpass1"); login(c, "erin", "erinpass1")
-        assert c.get("/api/auth/me").json()["features"] == {"coverage_released": False}
+        assert c.get("/api/auth/me").json()["features"] == {"coverage_released": False, "chat_released": False}
         for path in ("/api/sets", "/api/cmddb", "/api/coverage/runs", "/api/cross/angles"):
             assert c.get(path).status_code == 403, path
             assert admin.get(path).status_code == 200, path
@@ -251,17 +251,35 @@ def test_coverage_tool_is_admin_only_until_released(app):
         assert c.put("/api/features", json={"coverage_released": True}).status_code == 403
         assert admin.put("/api/features", json={"coverage_released": "yes"}).status_code == 422
         assert admin.put("/api/features", json={"other": True}).status_code == 422
-        assert admin.put("/api/features", json={"coverage_released": True}).json() == {"coverage_released": True}
-        assert c.get("/api/auth/me").json()["features"] == {"coverage_released": True}
+        assert admin.put("/api/features", json={"coverage_released": True}).json() == {"coverage_released": True, "chat_released": False}
+        assert c.get("/api/auth/me").json()["features"] == {"coverage_released": True, "chat_released": False}
         assert c.get("/api/sets").status_code == 200
         # saving the settings form (loaded before the rollout) does not undo it
         stale = admin.get("/api/settings").json()
-        stale["features"] = {"coverage_released": False}
+        stale["features"] = {"coverage_released": False, "chat_released": False}
         assert admin.put("/api/settings", json=stale).status_code == 200
         assert c.get("/api/sets").status_code == 200
         # and it can be taken back to an admin-only preview
-        assert admin.put("/api/features", json={"coverage_released": False}).status_code == 200
+        assert admin.put("/api/features", json={"coverage_released": False, "chat_released": False}).status_code == 200
         assert c.get("/api/sets").status_code == 403
+
+
+def test_chatbot_is_admin_only_until_released(app):
+    from specforge import auth
+    from specforge.core.db import get_conn
+
+    auth.create_user(get_conn(), "frank", "frankpass1", status="active")
+    with client(app) as admin, client(app) as c:
+        login(admin, "root", "rootpass1"); login(c, "frank", "frankpass1")
+        for path in ("/api/chat/config", "/api/chat/sessions"):
+            assert c.get(path).status_code == 403, path
+            assert admin.get(path).status_code == 200, path
+        assert c.get("/api/kb").status_code == 200      # the knowledge base stays open
+        assert c.put("/api/features", json={"chat_released": True}).status_code == 403
+        assert admin.put("/api/features", json={"chat_released": True}).json()["chat_released"] is True
+        assert c.get("/api/chat/config").status_code == 200
+        assert admin.put("/api/features", json={"chat_released": False}).status_code == 200
+        assert c.get("/api/chat/config").status_code == 403
 
 
 def test_no_auth_local_admin_always_has_coverage(ws):

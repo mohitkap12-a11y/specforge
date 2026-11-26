@@ -86,3 +86,18 @@ describe("coverage tool rollout", () => {
     expect(isCoveragePage("/compare")).toBe(false);
   });
 });
+
+import { COMING_SOON_CHAT, chatAccess } from "./components/nav";
+
+describe("chatbot rollout", () => {
+  it("is an admin preview until released, coming soon for the others", () => {
+    expect(chatAccess(true, false)).toBe("preview");
+    expect(chatAccess(false, false)).toBe("soon");
+    expect(chatAccess(false, true)).toBe("released");
+  });
+  it("swaps the Chatbot entry for a coming-soon one only while it is coming soon", () => {
+    expect(navFor(false, "released", "soon").filter((n) => n.to === "/chat")).toEqual([COMING_SOON_CHAT]);
+    expect(navFor(false, "released", "preview").find((n) => n.to === "/chat")?.soon).toBeUndefined();
+    expect(navFor(false).find((n) => n.to === "/chat")?.soon).toBeUndefined();
+  });
+});
