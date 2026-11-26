@@ -330,6 +330,9 @@ def run_turn(conn_fn, user: str, sid: int, text: str, cfg: dict, provider, *, re
     c = conn_fn()
     sugg = parse_followups(parser.followups) if chat.get("suggestions", True) else []
     mid = _save(c, sid, full, sources, sugg, stats)
+    if not mid:
+        yield {"type": "error", "message": "this chat was deleted while the answer was being written"}
+        return
     yield {"type": "done", "message": {"id": mid, "role": "assistant", "content": full, "sources": sources, "suggestions": sugg, "stats": stats, "feedback": None}}
     if chat.get("suggestions", True) and not sugg and full and not err:
         try:
@@ -343,6 +346,9 @@ def run_turn(conn_fn, user: str, sid: int, text: str, cfg: dict, provider, *, re
 
 
 def _save(c, sid: int, content: str, sources: list, suggestions: list, stats: dict) -> int:
+    """Store an answer; 0 when its chat was deleted meanwhile (ids are never reused, so it cannot land in someone else's chat)."""
+    if not c.execute("SELECT 1 FROM chat_session WHERE id=?", (sid,)).fetchone():
+        return 0
     cur = c.execute("INSERT INTO chat_message(session_id, role, content, sources_json, suggestions_json, stats_json) VALUES(?,?,?,?,?,?)",
                     (sid, "assistant", content, json.dumps(sources), json.dumps(suggestions), json.dumps(stats)))
     c.execute("UPDATE chat_session SET updated=CURRENT_TIMESTAMP WHERE id=?", (sid,))

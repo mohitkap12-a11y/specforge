@@ -233,12 +233,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5(heading, text, doc_id UNIND
   tokenize="porter unicode61 remove_diacritics 2 tokenchars '_'");
 -- Chatbot (chat.py): every user's own sessions and their messages
 CREATE TABLE IF NOT EXISTS chat_session(
-  id INTEGER PRIMARY KEY, user TEXT NOT NULL, title TEXT NOT NULL DEFAULT 'New chat', pinned INTEGER DEFAULT 0,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user TEXT NOT NULL, title TEXT NOT NULL DEFAULT 'New chat', pinned INTEGER DEFAULT 0,
   created TEXT DEFAULT CURRENT_TIMESTAMP, updated TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS ix_chat_session_user ON chat_session(user, updated);
 CREATE TABLE IF NOT EXISTS chat_message(
-  id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES chat_session(id) ON DELETE CASCADE, role TEXT NOT NULL,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL REFERENCES chat_session(id) ON DELETE CASCADE, role TEXT NOT NULL,
   content TEXT NOT NULL, sources_json TEXT, suggestions_json TEXT, stats_json TEXT, feedback INTEGER, created TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS ix_chat_message_session ON chat_message(session_id, id);

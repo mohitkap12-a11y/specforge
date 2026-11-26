@@ -310,3 +310,14 @@ def test_replacing_job_history_alone_unlinks_existing_documents(tmp_path, monkey
         r = c.post("/api/backup/import", files={"file": ("b.zip", io.BytesIO(data), "application/zip")}, data={"items": "jobs_activity", "replace": "true"})
         assert r.status_code == 200, r.text
         assert db.get_conn().execute("SELECT job_id FROM kb_doc").fetchone()[0] is None
+
+
+def test_an_answer_never_lands_in_a_chat_that_reused_the_id(conn):
+    a = chat.create_session(conn, "alice")
+    gen = chat.run_turn(lambda: conn, "alice", a["id"], "hello", {"chat": {"model": "m", "top_k": 3}}, FakeProvider(["x", "y"]))
+    assert next(gen)["type"] == "start" and next(gen)["type"] == "delta"
+    chat.delete_session(conn, a["id"], "alice")
+    b = chat.create_session(conn, "bob")
+    assert b["id"] != a["id"]
+    assert list(gen)[-1]["type"] == "error"
+    assert chat.get_session(conn, b["id"], "bob")["messages"] == []
